@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::Duration;
 
 use ratatui::crossterm::event::Event as CtEvent;
 use ratatui_textarea::{Input, TextArea};
@@ -6,13 +6,17 @@ use ratatui_textarea::{Input, TextArea};
 use crate::app::{App, MAX_SCHEMA_WIDTH, MIN_SCHEMA_WIDTH};
 use crate::clipboard;
 use crate::connections::{self, ConnectionStore};
-use crate::datasource::QueryResult;
+use crate::datasource::{Cell, Column, QueryResult};
+use crate::export::{self, ExportFormat};
+use crate::session;
 use crate::state::auth::AuthKind;
 use crate::state::command::CommandBuffer;
 use crate::state::conn_form::{ConnFormPostSave, ConnFormState};
 use crate::state::conn_list::ConnListState;
 use crate::state::focus::{Focus, Mode, PendingChord};
-use crate::state::results::{ResultBlock, ResultCursor, ResultId, ResultPayload};
+use crate::state::results::{
+    ResultBlock, ResultCursor, ResultId, ResultPayload, ResultViewMode, SelectionRect,
+};
 use crate::state::schema::{ExpandOutcome, SchemaPanel};
 use crate::state::status::QueryStatus;
 use crate::ui::theme::{Theme, ThemeKind};
@@ -38,6 +42,15 @@ pub enum Action {
     ExpandLatestResult,
     CollapseResult,
     ResultNav(ResultNavAction),
+    ResultEnterVisual,
+    ResultExitVisual,
+    /// `y` in the expanded view. Yanks the current cell straight to the
+    /// clipboard in Normal sub-mode; switches to YankFormat (prompt) in
+    /// Visual sub-mode.
+    ResultYank,
+    ResultYankFormat(ExportFormat),
+    ResultCancelYankFormat,
+    Export(ExportFormat),
     ToggleTheme,
     Worker(WorkerEvent),
     Auth(AuthAction),
@@ -122,6 +135,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::SetPendingChord(c) => app.pending = c,
         Action::EditorEvent(ev) => {
             app.editor.events.on_event(ev, &mut app.editor.state);
+            schedule_session_save(app);
         }
         Action::OpenCommand => app.mode = Mode::Command(CommandBuffer::default()),
         Action::Command(cmd) => apply_command(app, cmd),
@@ -135,6 +149,12 @@ pub fn apply(app: &mut App, action: Action) {
         Action::ExpandLatestResult => expand_latest(app),
         Action::CollapseResult => app.mode = Mode::Normal,
         Action::ResultNav(nav) => apply_result_nav(app, nav),
+        Action::ResultEnterVisual => result_enter_visual(app),
+        Action::ResultExitVisual => result_exit_visual(app),
+        Action::ResultYank => result_yank(app),
+        Action::ResultYankFormat(fmt) => result_yank_format(app, fmt),
+        Action::ResultCancelYankFormat => result_cancel_yank_format(app),
+        Action::Export(fmt) => export_command(app, fmt),
         Action::ToggleTheme => toggle_theme(app),
         Action::Worker(ev) => apply_worker_event(app, ev),
         Action::Auth(a) => apply_auth(app, a),
@@ -189,6 +209,7 @@ fn run_command_line(app: &mut App, line: &str) {
         "expand" | "e" => expand_latest(app),
         "collapse" | "c" => app.mode = Mode::Normal,
         "theme" => set_theme(app, &args),
+        "export" => run_export_command(app, &args),
         "conn" | "conns" => run_conn_command(app, &args),
         _ => {
             app.status = QueryStatus::Failed {
@@ -437,8 +458,7 @@ fn maybe_dispatch(app: &mut App, outcome: ExpandOutcome) {
 }
 
 fn dispatch_introspect(app: &mut App, target: IntrospectTarget) {
-    let req = app.requests.next();
-    let _ = app.cmd_tx.send(WorkerCommand::Introspect { req, target });
+    let _ = app.cmd_tx.send(WorkerCommand::Introspect { target });
 }
 
 fn prepare_confirm_run(app: &mut App) {
@@ -524,7 +544,6 @@ fn dispatch_query(app: &mut App, sql: String) {
     app.in_flight_query = Some(req);
     app.status = QueryStatus::Running {
         query: trimmed.clone(),
-        started_at: Instant::now(),
     };
     let _ = app
         .cmd_tx
@@ -543,14 +562,23 @@ fn expand_latest(app: &mut App) {
         cursor: ResultCursor::default(),
         col_offset: 0,
         row_offset: 0,
+        view: ResultViewMode::Normal,
     };
 }
 
 fn apply_result_nav(app: &mut App, nav: ResultNavAction) {
-    let Mode::ResultExpanded { id, cursor, .. } = &mut app.mode
+    let Mode::ResultExpanded {
+        id, cursor, view, ..
+    } = &mut app.mode
     else {
         return;
     };
+    // Movement is locked while the format prompt is open — we don't want
+    // navigation keys to silently extend the selection while we're waiting
+    // for `c`/`t`/`j`.
+    if matches!(view, ResultViewMode::YankFormat { .. }) {
+        return;
+    }
     let Some(block) = app.results.iter().find(|b| b.id == *id) else {
         return;
     };
@@ -581,10 +609,10 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
     match event {
         WorkerEvent::QueryDone { req, result } => on_query_done(app, req, result),
         WorkerEvent::QueryFailed { req, error } => on_query_failed(app, req, error.to_string()),
-        WorkerEvent::SchemaLoaded {
-            target, payload, ..
-        } => on_schema_loaded(app, target, payload),
-        WorkerEvent::SchemaFailed { target, error, .. } => {
+        WorkerEvent::SchemaLoaded { target, payload } => {
+            on_schema_loaded(app, target, payload)
+        }
+        WorkerEvent::SchemaFailed { target, error } => {
             on_schema_failed(app, target, error.to_string())
         }
         WorkerEvent::Connected { name } => on_connected(app, name),
@@ -606,10 +634,9 @@ fn on_connected(app: &mut App, name: String) {
     // and re-fire the catalog load.
     app.schema = SchemaPanel::new(app.schema.width);
     app.results.clear();
-    let req = app.requests.next();
+    load_session(app, &name);
     app.schema.begin_root_load();
     let _ = app.cmd_tx.send(WorkerCommand::Introspect {
-        req,
         target: IntrospectTarget::Catalogs,
     });
     app.log
@@ -692,13 +719,8 @@ fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResu
     if !result.columns.is_empty() {
         let payload = build_payload(result.rows, total_rows);
         let id = ResultId(app.results.len());
-        let query = match &app.status {
-            QueryStatus::Running { query, .. } => query.clone(),
-            _ => String::new(),
-        };
         app.results.push(ResultBlock {
             id,
-            query,
             took,
             columns: result.columns,
             payload,
@@ -972,6 +994,9 @@ fn refresh_conn_list(app: &mut App) {
 }
 
 pub(crate) fn dispatch_connect(app: &mut App, name: String, url: String) {
+    // If we're swapping connections, persist the current session before the
+    // editor's contents get replaced by the next `Connected` event.
+    flush_session(app);
     app.mode = Mode::Connecting { name: name.clone() };
     app.status = QueryStatus::Idle;
     let _ = app
@@ -1018,4 +1043,264 @@ fn cut_from(input: &mut TextArea<'static>, log: &crate::log::Logger) {
     if did_cut {
         clipboard::write(log, &input.yank_text());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Result view: visual selection, yank, export
+// ---------------------------------------------------------------------------
+
+fn result_enter_visual(app: &mut App) {
+    let Mode::ResultExpanded { cursor, view, .. } = &mut app.mode else {
+        return;
+    };
+    if matches!(view, ResultViewMode::Normal) {
+        *view = ResultViewMode::Visual { anchor: *cursor };
+    }
+}
+
+fn result_exit_visual(app: &mut App) {
+    let Mode::ResultExpanded { view, .. } = &mut app.mode else {
+        return;
+    };
+    *view = ResultViewMode::Normal;
+}
+
+fn result_yank(app: &mut App) {
+    let Mode::ResultExpanded { id, cursor, view, .. } = &mut app.mode else {
+        return;
+    };
+    match *view {
+        ResultViewMode::Normal => {
+            // Single cell — copy the rendered string straight to the clipboard.
+            // No header, no quoting, no prompt.
+            let cur = *cursor;
+            let id = *id;
+            let Some(block) = app.results.iter().find(|b| b.id == id) else {
+                return;
+            };
+            let text = block
+                .rows()
+                .get(cur.row)
+                .and_then(|row| row.get(cur.col))
+                .map(|cell| cell.display())
+                .unwrap_or_default();
+            clipboard::write(&app.log, &text);
+            app.status = QueryStatus::Notice {
+                msg: format!("yanked cell ({}, {})", cur.row + 1, cur.col + 1),
+            };
+        }
+        ResultViewMode::Visual { anchor } => {
+            *view = ResultViewMode::YankFormat { anchor };
+        }
+        ResultViewMode::YankFormat { .. } => {}
+    }
+}
+
+fn result_yank_format(app: &mut App, fmt: ExportFormat) {
+    let (id, cursor, anchor) = {
+        let Mode::ResultExpanded { id, cursor, view, .. } = &app.mode else {
+            return;
+        };
+        let ResultViewMode::YankFormat { anchor } = view else {
+            return;
+        };
+        (*id, *cursor, *anchor)
+    };
+    let rect = SelectionRect::new(anchor, cursor);
+    let payload = match render_selection(app, id, &rect, fmt) {
+        Some(p) => p,
+        None => {
+            // Block disappeared between expand and yank — drop back to Normal
+            // and surface the error.
+            if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+                *view = ResultViewMode::Normal;
+            }
+            app.status = QueryStatus::Failed {
+                error: "result no longer available".into(),
+            };
+            return;
+        }
+    };
+    clipboard::write(&app.log, &payload);
+    if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+        *view = ResultViewMode::Normal;
+    }
+    app.status = QueryStatus::Notice {
+        msg: format!(
+            "yanked {}×{} as {} ({} bytes)",
+            rect.rows(),
+            rect.cols(),
+            fmt.label(),
+            payload.len()
+        ),
+    };
+}
+
+fn result_cancel_yank_format(app: &mut App) {
+    let Mode::ResultExpanded { view, .. } = &mut app.mode else {
+        return;
+    };
+    if let ResultViewMode::YankFormat { anchor } = *view {
+        *view = ResultViewMode::Visual { anchor };
+    }
+}
+
+fn run_export_command(app: &mut App, args: &[&str]) {
+    let Some(fmt_str) = args.first() else {
+        app.status = QueryStatus::Failed {
+            error: "usage: :export csv|tsv|json".into(),
+        };
+        return;
+    };
+    let Some(fmt) = ExportFormat::parse(fmt_str) else {
+        app.status = QueryStatus::Failed {
+            error: format!("unknown export format: {fmt_str} (use csv|tsv|json)"),
+        };
+        return;
+    };
+    apply(app, Action::Export(fmt));
+}
+
+fn export_command(app: &mut App, fmt: ExportFormat) {
+    // Two routes:
+    // - Inside an expanded result with an active selection → export the rect.
+    // - Otherwise → export the latest result block in full.
+    if let Mode::ResultExpanded { id, cursor, view, .. } = &app.mode
+        && let Some(anchor) = view.anchor()
+    {
+        let id = *id;
+        let cursor = *cursor;
+        let rect = SelectionRect::new(anchor, cursor);
+        let Some(payload) = render_selection(app, id, &rect, fmt) else {
+            app.status = QueryStatus::Failed {
+                error: "result no longer available".into(),
+            };
+            return;
+        };
+        clipboard::write(&app.log, &payload);
+        if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+            *view = ResultViewMode::Normal;
+        }
+        app.status = QueryStatus::Notice {
+            msg: format!(
+                "exported {}×{} as {} ({} bytes)",
+                rect.rows(),
+                rect.cols(),
+                fmt.label(),
+                payload.len()
+            ),
+        };
+        return;
+    }
+    let Some(block) = app.results.last() else {
+        app.status = QueryStatus::Failed {
+            error: "no result to export".into(),
+        };
+        return;
+    };
+    let columns: Vec<&Column> = block.columns.iter().collect();
+    let rows: Vec<Vec<&Cell>> = block
+        .rows()
+        .iter()
+        .map(|row| row.iter().collect())
+        .collect();
+    let payload = export::format(fmt, &columns, &rows);
+    let row_count = rows.len();
+    let col_count = columns.len();
+    clipboard::write(&app.log, &payload);
+    app.status = QueryStatus::Notice {
+        msg: format!(
+            "exported {}×{} as {} ({} bytes)",
+            row_count,
+            col_count,
+            fmt.label(),
+            payload.len()
+        ),
+    };
+}
+
+/// Slice the selected rectangle out of `block` and run it through the
+/// chosen formatter. Returns `None` only if the block has gone missing.
+fn render_selection(
+    app: &App,
+    id: ResultId,
+    rect: &SelectionRect,
+    fmt: ExportFormat,
+) -> Option<String> {
+    let block = app.results.iter().find(|b| b.id == id)?;
+    let col_end = (rect.col_end + 1).min(block.columns.len());
+    let col_start = rect.col_start.min(col_end);
+    let columns: Vec<&Column> = block.columns[col_start..col_end].iter().collect();
+    let row_end = (rect.row_end + 1).min(block.rows().len());
+    let row_start = rect.row_start.min(row_end);
+    let rows: Vec<Vec<&Cell>> = block.rows()[row_start..row_end]
+        .iter()
+        .map(|row| {
+            let end = col_end.min(row.len());
+            let start = col_start.min(end);
+            row[start..end].iter().collect()
+        })
+        .collect();
+    Some(export::format(fmt, &columns, &rows))
+}
+
+// ---------------------------------------------------------------------------
+// Editor session persistence
+// ---------------------------------------------------------------------------
+
+const SESSION_DEBOUNCE: Duration = Duration::from_millis(800);
+
+/// Push the next debounced save 800ms into the future. Skips when there's
+/// no active connection — the editor isn't user-reachable in those modes,
+/// but the early return keeps us honest if that ever changes.
+fn schedule_session_save(app: &mut App) {
+    if app.active_connection.is_none() {
+        return;
+    }
+    app.editor_dirty = true;
+    app.pending_save_at = Some(tokio::time::Instant::now() + SESSION_DEBOUNCE);
+}
+
+/// Write the current editor buffer to the active connection's session
+/// file. Best-effort: failures are logged and swallowed so a flaky disk
+/// can't break the editor.
+pub(crate) fn flush_session(app: &mut App) {
+    let Some(name) = app.active_connection.clone() else {
+        app.editor_dirty = false;
+        app.pending_save_at = None;
+        return;
+    };
+    let path = session::path_for(&app.data_dir, &name);
+    let text = app.editor.text();
+    match session::save(&path, &text) {
+        Ok(()) => app
+            .log
+            .info("session", format!("saved {}", path.display())),
+        Err(err) => app
+            .log
+            .warn("session", format!("save {} failed: {err}", path.display())),
+    }
+    app.editor_dirty = false;
+    app.pending_save_at = None;
+}
+
+/// Load the session for `name` into the editor. Treats a missing file as
+/// an empty buffer — first save will create it. Resets the dirty/timer
+/// state so the load itself doesn't trigger another save.
+fn load_session(app: &mut App, name: &str) {
+    let path = session::path_for(&app.data_dir, name);
+    match session::load(&path) {
+        Ok(text) => {
+            app.editor.replace_text(&text);
+            app.log
+                .info("session", format!("loaded {}", path.display()));
+        }
+        Err(err) => {
+            app.log
+                .warn("session", format!("load {} failed: {err}", path.display()));
+            app.editor.replace_text("");
+        }
+    }
+    app.editor_dirty = false;
+    app.pending_save_at = None;
 }

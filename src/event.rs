@@ -7,7 +7,9 @@ use crate::action::{
     SchemaAction,
 };
 use crate::app::App;
+use crate::export::ExportFormat;
 use crate::state::focus::{Focus, Mode, PendingChord};
+use crate::state::results::ResultViewMode;
 
 pub fn translate(app: &App, event: CtEvent) -> Option<Action> {
     match event {
@@ -49,7 +51,7 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
     match &app.mode {
         Mode::Command(_) => translate_command_key(key),
         Mode::Normal => translate_normal_key(app, key, raw),
-        Mode::ResultExpanded { .. } => translate_expanded_key(app, key),
+        Mode::ResultExpanded { view, .. } => translate_expanded_key(app, key, view),
         Mode::ConfirmRun { .. } => translate_confirm_key(key),
         Mode::Auth(_) => translate_auth_key(key),
         Mode::EditConnection(_) => translate_conn_form_key(key),
@@ -248,10 +250,44 @@ fn translate_leader_chord(app: &App, key: KeyEvent) -> Option<Action> {
     }
 }
 
-fn translate_expanded_key(_app: &App, key: KeyEvent) -> Option<Action> {
+fn translate_expanded_key(_app: &App, key: KeyEvent, view: &ResultViewMode) -> Option<Action> {
+    // YankFormat sub-mode: only the format keys + cancel work; navigation
+    // and other shortcuts are inert until the user picks one.
+    if matches!(view, ResultViewMode::YankFormat { .. }) {
+        return match key.code {
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                Some(Action::ResultYankFormat(ExportFormat::Csv))
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                Some(Action::ResultYankFormat(ExportFormat::Tsv))
+            }
+            KeyCode::Char('j') | KeyCode::Char('J') => {
+                Some(Action::ResultYankFormat(ExportFormat::Json))
+            }
+            KeyCode::Esc => Some(Action::ResultCancelYankFormat),
+            _ => None,
+        };
+    }
+
     use ResultNavAction::*;
+    let in_visual = matches!(view, ResultViewMode::Visual { .. });
     let action = match (key.code, key.modifiers) {
-        (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => return Some(Action::CollapseResult),
+        // Esc/q: in Visual, drop back to Normal; in Normal, close the view.
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+            return Some(if in_visual {
+                Action::ResultExitVisual
+            } else {
+                Action::CollapseResult
+            });
+        }
+        (KeyCode::Char('v'), m) if m.is_empty() => {
+            return Some(if in_visual {
+                Action::ResultExitVisual
+            } else {
+                Action::ResultEnterVisual
+            });
+        }
+        (KeyCode::Char('y'), m) if m.is_empty() => return Some(Action::ResultYank),
         (KeyCode::Char('h'), _) | (KeyCode::Left, _) => Left,
         (KeyCode::Char('l'), _) | (KeyCode::Right, _) => Right,
         (KeyCode::Char('j'), _) | (KeyCode::Down, _) => Down,

@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Widget};
 
 use crate::app::App;
 use crate::state::focus::Mode;
-use crate::state::results::{ResultBlock, fit_columns};
+use crate::state::results::{ResultBlock, SelectionRect, fit_columns};
 use auth_view::AuthPrompt;
 use bottom_bar::{BottomBar, COMMAND_PREFIX};
 use conn_form_view::ConnForm;
@@ -57,13 +57,14 @@ fn render_workspace(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: R
 fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Rect) {
     frame.render_widget(BottomBar::new(app), bottom_area);
 
-    let (id, cur, prev_col_offset, prev_row_offset) = match app.mode {
+    let (id, cur, prev_col_offset, prev_row_offset, view) = match app.mode {
         Mode::ResultExpanded {
             id,
             cursor,
             col_offset,
             row_offset,
-        } => (id, cursor, col_offset, row_offset),
+            view,
+        } => (id, cursor, col_offset, row_offset, view),
         _ => return,
     };
 
@@ -79,6 +80,8 @@ fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Re
     let new_col_offset = clamp_offset(prev_col_offset, cur.col, visible_cols, block.columns.len());
     let new_row_offset = clamp_offset(prev_row_offset, cur.row, visible_rows, block.rows().len());
 
+    let selection = view.anchor().map(|anchor| SelectionRect::new(anchor, cur));
+
     frame.render_widget(
         ExpandedResult {
             block,
@@ -88,6 +91,7 @@ fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Re
             row_offset: new_row_offset,
             visible_rows,
             theme: &app.theme,
+            selection,
         },
         main,
     );

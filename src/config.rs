@@ -1,8 +1,3 @@
-// Several fields and methods only get exercised once Phase 2 wires the
-// auth/connection-management UI in. The crate-level allow keeps the dead-code
-// warnings quiet until then.
-#![allow(dead_code)]
-
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -72,12 +67,6 @@ pub struct ConnectionEntry {
     pub ciphertext: Option<String>,
 }
 
-impl ConnectionEntry {
-    pub fn is_encrypted(&self) -> bool {
-        self.ciphertext.is_some()
-    }
-}
-
 fn default_theme() -> ThemeKind {
     ThemeKind::Dark
 }
@@ -122,14 +111,6 @@ impl ConfigStore {
         &self.state
     }
 
-    pub fn theme(&self) -> ThemeKind {
-        self.state.theme
-    }
-
-    pub fn schema_width(&self) -> u16 {
-        self.state.schema_width
-    }
-
     pub fn crypto(&self) -> Option<&CryptoBlock> {
         self.state.crypto.as_ref()
     }
@@ -171,11 +152,6 @@ impl ConfigStore {
     /// key — Phase 1 only persists the block.
     pub fn set_crypto(&mut self, crypto: CryptoBlock) -> io::Result<()> {
         self.state.crypto = Some(crypto);
-        self.flush()
-    }
-
-    pub fn clear_crypto(&mut self) -> io::Result<()> {
-        self.state.crypto = None;
         self.flush()
     }
 

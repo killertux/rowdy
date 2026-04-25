@@ -7,7 +7,9 @@ mod connections;
 mod crypto;
 mod datasource;
 mod event;
+mod export;
 mod log;
+mod session;
 mod state;
 mod subcommands;
 mod terminal;
@@ -83,7 +85,7 @@ async fn run_app() -> Result<i32> {
     let worker_handle = tokio::spawn(worker::run(logger.clone(), cmd_rx, evt_tx));
 
     let mut tui = Tui::init()?;
-    let mut app = App::new(cmd_tx, config, logger.clone());
+    let mut app = App::new(cmd_tx, config, logger.clone(), data_dir.clone());
     apply_decision(&mut app, decision);
 
     let result = run(&mut tui.terminal, &mut app, evt_rx).await;
@@ -213,6 +215,9 @@ async fn run(
     let mut events = EventStream::new();
     while !app.should_quit {
         terminal.draw(|f| ui::render(app, f))?;
+        // Read the deadline once per iteration so the sleep is rebuilt each
+        // loop with whatever the latest edit pushed it to.
+        let save_at = app.pending_save_at;
         tokio::select! {
             terminal_event = events.next() => match terminal_event {
                 Some(Ok(ev)) => process_terminal_event(app, ev),
@@ -223,10 +228,26 @@ async fn run(
                 Some(ev) => apply(app, Action::Worker(ev)),
                 None => break,
             },
+            _ = wait_until_or_pending(save_at) => {
+                action::flush_session(app);
+            }
         }
+    }
+    if app.editor_dirty {
+        action::flush_session(app);
     }
     let _ = app.cmd_tx.send(WorkerCommand::Close);
     Ok(())
+}
+
+/// Future that resolves at `at` if `Some`, or stays pending forever if `None`
+/// — used so the save branch in the select! block is dormant when no save
+/// is scheduled.
+async fn wait_until_or_pending(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending::<()>().await,
+    }
 }
 
 fn process_terminal_event(app: &mut App, ev: CtEvent) {

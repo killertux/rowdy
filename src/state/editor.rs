@@ -18,6 +18,18 @@ impl EditorPanel {
     pub fn editor_mode(&self) -> EditorMode {
         self.state.mode
     }
+
+    /// Replace the buffer with `text` (used when loading a saved session).
+    /// Resets cursor and discards any selection/highlight; the editor mode
+    /// is left at edtui's default (Normal).
+    pub fn replace_text(&mut self, text: &str) {
+        self.state = EditorState::new(Lines::from(text));
+    }
+
+    /// Current buffer flattened to a String (joined with `\n`).
+    pub fn text(&self) -> String {
+        self.state.lines.flatten(&Some('\n')).into_iter().collect()
+    }
 }
 
 impl Default for EditorPanel {

@@ -2,7 +2,7 @@ use crate::state::auth::AuthState;
 use crate::state::command::CommandBuffer;
 use crate::state::conn_form::ConnFormState;
 use crate::state::conn_list::ConnListState;
-use crate::state::results::{ResultCursor, ResultId};
+use crate::state::results::{ResultCursor, ResultId, ResultViewMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -27,6 +27,8 @@ pub enum Mode {
         /// Absolute index of the topmost visible row. Same render-time clamp
         /// as `col_offset`, but for vertical scroll.
         row_offset: usize,
+        /// Visual selection / yank-format prompt sub-state.
+        view: ResultViewMode,
     },
     ConfirmRun {
         statement: String,

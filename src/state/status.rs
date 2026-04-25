@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Debug, Default)]
 pub enum QueryStatus {
@@ -6,9 +6,6 @@ pub enum QueryStatus {
     Idle,
     Running {
         query: String,
-        // Surfaced once the bottom bar renders elapsed-time for in-flight queries.
-        #[allow(dead_code)]
-        started_at: Instant,
     },
     Succeeded {
         rows: usize,
@@ -21,4 +18,9 @@ pub enum QueryStatus {
         error: String,
     },
     Cancelled,
+    /// Transient informational message (yank/export confirmation, etc.).
+    /// Persists in the bar until the next status change.
+    Notice {
+        msg: String,
+    },
 }

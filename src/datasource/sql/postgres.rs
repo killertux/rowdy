@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -12,7 +13,7 @@ use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
-use crate::datasource::{Column, Datasource, Dialect, QueryResult, Row as CellRow};
+use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
 
 const DEFAULT_POOL_SIZE: u32 = 3;
@@ -21,6 +22,10 @@ const TARGET: &str = "postgres";
 pub struct PostgresDatasource {
     pool: PgPool,
     log: Logger,
+    // Backend PID of the currently running `execute()`, or 0 when nothing is
+    // in flight. PostgreSQL backend PIDs are positive int4, so 0 is a safe
+    // "none" sentinel. Read by `cancel()` to issue `pg_cancel_backend`.
+    in_flight_pid: AtomicI32,
 }
 
 impl PostgresDatasource {
@@ -35,16 +40,16 @@ impl PostgresDatasource {
                 DatasourceError::Connect(e.to_string())
             })?;
         log.info(TARGET, "connected");
-        Ok(Self { pool, log })
+        Ok(Self {
+            pool,
+            log,
+            in_flight_pid: AtomicI32::new(0),
+        })
     }
 }
 
 #[async_trait]
 impl Datasource for PostgresDatasource {
-    fn dialect(&self) -> Dialect {
-        Dialect::Postgres
-    }
-
     async fn introspect_catalogs(&self) -> DatasourceResult<Vec<CatalogInfo>> {
         // A Postgres connection is bound to a single database; expose it as the
         // sole catalog so the tree mirrors the rest of the drivers.
@@ -180,14 +185,33 @@ impl Datasource for PostgresDatasource {
             format!("execute: {}", super::one_line_sql(statement)),
         );
         let started = Instant::now();
+
+        // Pin a single connection to this query so `cancel()` can target the
+        // exact backend that's running it. The connection returns to the pool
+        // when `conn` drops (including on a `JoinHandle::abort`).
+        let mut conn = self.pool.acquire().await.map_err(|e| {
+            self.log.error(TARGET, format!("acquire failed: {e}"));
+            execute_err(e)
+        })?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(|e| {
+                self.log.error(TARGET, format!("backend pid fetch failed: {e}"));
+                execute_err(e)
+            })?;
+        self.in_flight_pid.store(pid, Ordering::SeqCst);
+
         if super::is_row_returning(statement) {
-            let rows = sqlx::query(statement)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| {
-                    self.log.error(TARGET, format!("execute failed: {e}"));
-                    execute_err(e)
-                })?;
+            let result = sqlx::query(statement).fetch_all(&mut *conn).await;
+            // Clear the pid before checking the result so a subsequent cancel
+            // doesn't try to kill a backend that's already free. On abort,
+            // this line never runs and `cancel()` reads the still-set pid.
+            self.in_flight_pid.store(0, Ordering::SeqCst);
+            let rows = result.map_err(|e| {
+                self.log.error(TARGET, format!("execute failed: {e}"));
+                execute_err(e)
+            })?;
             let elapsed = started.elapsed();
             let columns = build_columns(&rows);
             let rows: Vec<CellRow> = rows
@@ -205,13 +229,12 @@ impl Datasource for PostgresDatasource {
                 elapsed,
             })
         } else {
-            let outcome = sqlx::query(statement)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| {
-                    self.log.error(TARGET, format!("execute failed: {e}"));
-                    execute_err(e)
-                })?;
+            let result = sqlx::query(statement).execute(&mut *conn).await;
+            self.in_flight_pid.store(0, Ordering::SeqCst);
+            let outcome = result.map_err(|e| {
+                self.log.error(TARGET, format!("execute failed: {e}"));
+                execute_err(e)
+            })?;
             let elapsed = started.elapsed();
             let affected = outcome.rows_affected();
             self.log.info(
@@ -228,17 +251,28 @@ impl Datasource for PostgresDatasource {
     }
 
     async fn cancel(&self) -> DatasourceResult<()> {
-        // TODO: real cancel via pg_cancel_backend(pid) — needs the worker to
-        // track the backend PID of the in-flight query. For now the worker
-        // aborts the JoinHandle, which drops the future on the client side.
+        let pid = self.in_flight_pid.swap(0, Ordering::SeqCst);
+        if pid == 0 {
+            self.log.info(TARGET, "cancel: no in-flight query");
+            return Ok(());
+        }
         self.log
-            .info(TARGET, "cancel (no-op until backend pid tracking lands)");
-        Ok(())
-    }
-
-    async fn close(self: Box<Self>) -> DatasourceResult<()> {
-        self.log.info(TARGET, "closing pool");
-        self.pool.close().await;
+            .info(TARGET, format!("cancel: pg_cancel_backend({pid})"));
+        // A separate pool connection is used so the cancel doesn't wait on
+        // the busy backend. `pg_cancel_backend` returns false if the target
+        // PID is no longer running anything — best-effort by design.
+        let signaled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+            .bind(pid)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| {
+                self.log.warn(TARGET, format!("cancel failed: {e}"));
+                execute_err(e)
+            })?;
+        if !signaled {
+            self.log
+                .warn(TARGET, format!("pg_cancel_backend({pid}) returned false"));
+        }
         Ok(())
     }
 }
@@ -253,7 +287,6 @@ fn build_columns(rows: &[PgRow]) -> Vec<Column> {
         .iter()
         .map(|col| Column {
             name: col.name().to_string(),
-            type_name: col.type_info().name().to_string(),
         })
         .collect()
 }

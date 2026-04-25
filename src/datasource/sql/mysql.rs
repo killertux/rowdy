@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -11,7 +12,7 @@ use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
-use crate::datasource::{Column, Datasource, Dialect, QueryResult, Row as CellRow};
+use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
 
 const DEFAULT_POOL_SIZE: u32 = 3;
@@ -22,6 +23,10 @@ const TARGET: &str = "mysql";
 pub struct MysqlDatasource {
     pool: MySqlPool,
     log: Logger,
+    // CONNECTION_ID() of the currently running `execute()`, or 0 when nothing
+    // is in flight. MySQL connection ids start at 1, so 0 is a safe "none"
+    // sentinel. Read by `cancel()` to issue `KILL QUERY`.
+    in_flight_conn_id: AtomicU64,
 }
 
 impl MysqlDatasource {
@@ -46,16 +51,16 @@ impl MysqlDatasource {
                 DatasourceError::Connect(e.to_string())
             })?;
         log.info(TARGET, "connected");
-        Ok(Self { pool, log })
+        Ok(Self {
+            pool,
+            log,
+            in_flight_conn_id: AtomicU64::new(0),
+        })
     }
 }
 
 #[async_trait]
 impl Datasource for MysqlDatasource {
-    fn dialect(&self) -> Dialect {
-        Dialect::MySql
-    }
-
     async fn introspect_catalogs(&self) -> DatasourceResult<Vec<CatalogInfo>> {
         // MySQL exposes a single static catalog (`def`); we read it from
         // information_schema rather than hard-coding it.
@@ -200,14 +205,32 @@ impl Datasource for MysqlDatasource {
             format!("execute: {}", super::one_line_sql(statement)),
         );
         let started = Instant::now();
+
+        // Pin a single connection to this query so `cancel()` can issue
+        // `KILL QUERY <conn_id>` against the exact session running it.
+        let mut conn = self.pool.acquire().await.map_err(|e| {
+            self.log.error(TARGET, format!("acquire failed: {e}"));
+            execute_err(e)
+        })?;
+        let conn_id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(|e| {
+                self.log.error(TARGET, format!("connection id fetch failed: {e}"));
+                execute_err(e)
+            })?;
+        self.in_flight_conn_id.store(conn_id, Ordering::SeqCst);
+
         if super::is_row_returning(statement) {
-            let rows = sqlx::query(statement)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| {
-                    self.log.error(TARGET, format!("execute failed: {e}"));
-                    execute_err(e)
-                })?;
+            let result = sqlx::query(statement).fetch_all(&mut *conn).await;
+            // Clear the conn id before checking the result so a subsequent
+            // cancel doesn't try to kill a session that's already idle. On
+            // abort, this never runs and `cancel()` reads the still-set id.
+            self.in_flight_conn_id.store(0, Ordering::SeqCst);
+            let rows = result.map_err(|e| {
+                self.log.error(TARGET, format!("execute failed: {e}"));
+                execute_err(e)
+            })?;
             let elapsed = started.elapsed();
             let columns = build_columns(&rows);
             let rows: Vec<CellRow> = rows
@@ -225,13 +248,12 @@ impl Datasource for MysqlDatasource {
                 elapsed,
             })
         } else {
-            let outcome = sqlx::query(statement)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| {
-                    self.log.error(TARGET, format!("execute failed: {e}"));
-                    execute_err(e)
-                })?;
+            let result = sqlx::query(statement).execute(&mut *conn).await;
+            self.in_flight_conn_id.store(0, Ordering::SeqCst);
+            let outcome = result.map_err(|e| {
+                self.log.error(TARGET, format!("execute failed: {e}"));
+                execute_err(e)
+            })?;
             let elapsed = started.elapsed();
             let affected = outcome.rows_affected();
             self.log.info(
@@ -248,17 +270,24 @@ impl Datasource for MysqlDatasource {
     }
 
     async fn cancel(&self) -> DatasourceResult<()> {
-        // TODO: real cancel via `KILL QUERY <connection_id>` — needs the worker
-        // to track the connection id of the in-flight query. For now the worker
-        // aborts the JoinHandle, which drops the future on the client side.
-        self.log
-            .info(TARGET, "cancel (no-op until connection id tracking lands)");
-        Ok(())
-    }
-
-    async fn close(self: Box<Self>) -> DatasourceResult<()> {
-        self.log.info(TARGET, "closing pool");
-        self.pool.close().await;
+        let conn_id = self.in_flight_conn_id.swap(0, Ordering::SeqCst);
+        if conn_id == 0 {
+            self.log.info(TARGET, "cancel: no in-flight query");
+            return Ok(());
+        }
+        // `KILL QUERY` is an admin statement and doesn't accept placeholders;
+        // formatting the u64 directly is safe (no injection surface). A
+        // separate pool connection is used so the kill doesn't wait on the
+        // busy session.
+        let sql = format!("KILL QUERY {conn_id}");
+        self.log.info(TARGET, format!("cancel: {sql}"));
+        sqlx::query(&sql)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                self.log.warn(TARGET, format!("cancel failed: {e}"));
+                execute_err(e)
+            })?;
         Ok(())
     }
 }
@@ -273,7 +302,6 @@ fn build_columns(rows: &[MySqlRow]) -> Vec<Column> {
         .iter()
         .map(|col| Column {
             name: col.name().to_string(),
-            type_name: col.type_info().name().to_string(),
         })
         .collect()
 }

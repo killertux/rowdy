@@ -1,7 +1,3 @@
-// Phase 1 lands the crypto primitives; Phase 2 wires them into auth + the
-// connection store. Until then most items below have no in-tree caller.
-#![allow(dead_code)]
-
 use std::fmt;
 
 use argon2::{Algorithm, Argon2, Params, Version};

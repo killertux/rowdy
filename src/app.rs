@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::ConfigStore;
@@ -39,10 +41,25 @@ pub struct App {
     /// Name of the currently active connection (set on `Connected`). `None`
     /// while the worker has no datasource.
     pub active_connection: Option<String>,
+    /// Base `.rowdy/` directory — used to resolve session files and any
+    /// other on-disk state.
+    pub data_dir: PathBuf,
+    /// Set whenever the editor buffer changes after a connection is active.
+    /// Cleared by the debounced save (or the shutdown flush).
+    pub editor_dirty: bool,
+    /// When the next debounced session save should fire. Each edit pushes
+    /// this 800ms into the future; the run loop watches it via
+    /// `tokio::time::sleep_until`.
+    pub pending_save_at: Option<tokio::time::Instant>,
 }
 
 impl App {
-    pub fn new(cmd_tx: UnboundedSender<WorkerCommand>, config: ConfigStore, log: Logger) -> Self {
+    pub fn new(
+        cmd_tx: UnboundedSender<WorkerCommand>,
+        config: ConfigStore,
+        log: Logger,
+        data_dir: PathBuf,
+    ) -> Self {
         let initial = config.state();
         let schema = SchemaPanel::new(initial.schema_width);
         let theme = Theme::for_kind(initial.theme);
@@ -64,6 +81,9 @@ impl App {
             log,
             connection_store: None,
             active_connection: None,
+            data_dir,
+            editor_dirty: false,
+            pending_save_at: None,
         }
     }
 }

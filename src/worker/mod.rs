@@ -1,8 +1,3 @@
-// Most variants and fields below are sent or read once Chunk B wires up the
-// schema introspection and cancel paths. Module-level allow is the cleanest
-// way to mark this stubbed-but-stable surface.
-#![allow(dead_code)]
-
 pub mod request;
 
 use std::sync::Arc;
@@ -25,7 +20,6 @@ pub enum WorkerCommand {
     },
     Cancel,
     Introspect {
-        req: RequestId,
         target: IntrospectTarget,
     },
     /// Open a new connection. On success the worker swaps its active
@@ -71,12 +65,10 @@ pub enum WorkerEvent {
         error: DatasourceError,
     },
     SchemaLoaded {
-        req: RequestId,
         target: IntrospectTarget,
         payload: SchemaPayload,
     },
     SchemaFailed {
-        req: RequestId,
         target: IntrospectTarget,
         error: DatasourceError,
     },
@@ -116,7 +108,7 @@ pub async fn run(
                 handle_connect(&logger, &events, &mut datasource, name, url).await;
             }
             WorkerCommand::Cancel => match &datasource {
-                Some(ds) => cancel_query(ds, &mut current_query),
+                Some(ds) => cancel_query(&logger, ds.as_ref(), &mut current_query).await,
                 None => logger.warn("worker", "cancel ignored: no active connection"),
             },
             WorkerCommand::Execute { req, sql } => match &datasource {
@@ -128,11 +120,10 @@ pub async fn run(
                     });
                 }
             },
-            WorkerCommand::Introspect { req, target } => match &datasource {
-                Some(ds) => spawn_introspect(ds, &events, req, target),
+            WorkerCommand::Introspect { target } => match &datasource {
+                Some(ds) => spawn_introspect(ds, &events, target),
                 None => {
                     let _ = events.send(WorkerEvent::SchemaFailed {
-                        req,
                         target,
                         error: DatasourceError::Connect("no active connection".into()),
                     });
@@ -165,14 +156,23 @@ async fn handle_connect(
     }
 }
 
-fn cancel_query(datasource: &Arc<dyn Datasource>, current: &mut Option<JoinHandle<()>>) {
+async fn cancel_query(
+    logger: &Logger,
+    datasource: &dyn Datasource,
+    current: &mut Option<JoinHandle<()>>,
+) {
+    // Hit the server cancel first so the in-flight query's pinned connection
+    // returns a "canceled" error of its own. Awaiting here also serializes
+    // against the next command — no follow-up `Execute` can start and
+    // overwrite the in-flight identifier before `cancel()` reads it.
+    if let Err(e) = datasource.cancel().await {
+        logger.warn("worker", format!("cancel failed: {e}"));
+    }
+    // Belt-and-braces: if the spawn_query future hasn't already finished
+    // off the cancel error, drop it now so its pooled connection is freed.
     if let Some(handle) = current.take() {
         handle.abort();
     }
-    let datasource = datasource.clone();
-    tokio::spawn(async move {
-        let _ = datasource.cancel().await;
-    });
 }
 
 fn spawn_query(
@@ -196,13 +196,12 @@ fn spawn_query(
 fn spawn_introspect(
     datasource: &Arc<dyn Datasource>,
     events: &UnboundedSender<WorkerEvent>,
-    req: RequestId,
     target: IntrospectTarget,
 ) {
     let datasource = datasource.clone();
     let events = events.clone();
     tokio::spawn(async move {
-        let event = handle_introspect(datasource.as_ref(), req, target).await;
+        let event = handle_introspect(datasource.as_ref(), target).await;
         let _ = events.send(event);
     });
 }
@@ -216,7 +215,6 @@ async fn handle_execute(datasource: &dyn Datasource, req: RequestId, sql: String
 
 async fn handle_introspect(
     datasource: &dyn Datasource,
-    req: RequestId,
     target: IntrospectTarget,
 ) -> WorkerEvent {
     let outcome = match &target {
@@ -250,11 +248,7 @@ async fn handle_introspect(
             .map(SchemaPayload::Indices),
     };
     match outcome {
-        Ok(payload) => WorkerEvent::SchemaLoaded {
-            req,
-            target,
-            payload,
-        },
-        Err(error) => WorkerEvent::SchemaFailed { req, target, error },
+        Ok(payload) => WorkerEvent::SchemaLoaded { target, payload },
+        Err(error) => WorkerEvent::SchemaFailed { target, error },
     }
 }

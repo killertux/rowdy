@@ -9,7 +9,7 @@ use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
-use crate::datasource::{Column, Datasource, Dialect, QueryResult, Row as CellRow};
+use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
 
 const DEFAULT_POOL_SIZE: u32 = 3;
@@ -38,10 +38,6 @@ impl SqliteDatasource {
 
 #[async_trait]
 impl Datasource for SqliteDatasource {
-    fn dialect(&self) -> Dialect {
-        Dialect::Sqlite
-    }
-
     async fn introspect_catalogs(&self) -> DatasourceResult<Vec<CatalogInfo>> {
         // SQLite has no notion of catalogs; expose a single synthetic root.
         Ok(vec![CatalogInfo {
@@ -202,12 +198,6 @@ impl Datasource for SqliteDatasource {
         self.log.info(TARGET, "cancel (no-op for sqlite)");
         Ok(())
     }
-
-    async fn close(self: Box<Self>) -> DatasourceResult<()> {
-        self.log.info(TARGET, "closing pool");
-        self.pool.close().await;
-        Ok(())
-    }
 }
 
 
@@ -220,7 +210,6 @@ fn build_columns(rows: &[SqliteRow]) -> Vec<Column> {
         .iter()
         .map(|col| Column {
             name: col.name().to_string(),
-            type_name: col.type_info().name().to_string(),
         })
         .collect()
 }

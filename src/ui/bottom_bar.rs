@@ -6,6 +6,7 @@ use ratatui::widgets::Widget;
 
 use crate::app::App;
 use crate::state::focus::Mode;
+use crate::state::results::ResultViewMode;
 use crate::state::status::QueryStatus;
 use crate::ui::theme::Theme;
 
@@ -33,6 +34,12 @@ impl Widget for BottomBar<'_> {
             }
             Mode::Connecting { name } => {
                 render_connecting(name, area, buf, &self.app.theme);
+            }
+            Mode::ResultExpanded {
+                view: ResultViewMode::YankFormat { .. },
+                ..
+            } => {
+                render_yank_format_prompt(area, buf, &self.app.theme);
             }
             _ => render_status(&self.app.status, area, buf, &self.app.theme),
         }
@@ -119,5 +126,28 @@ fn describe(status: &QueryStatus, theme: &Theme) -> (Color, String) {
         }
         QueryStatus::Failed { error } => (theme.status_error, format!("error — {error}")),
         QueryStatus::Cancelled => (theme.status_idle, "cancelled".to_string()),
+        QueryStatus::Notice { msg } => (theme.status_ok, msg.clone()),
     }
+}
+
+fn render_yank_format_prompt(area: Rect, buf: &mut Buffer, theme: &Theme) {
+    let line = Line::from(vec![
+        Span::styled("⎘ ", Style::default().fg(theme.status_ok).bg(theme.bg)),
+        Span::styled(
+            "yank as: ",
+            Style::default()
+                .fg(theme.fg)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "[c]sv  [t]sv  [j]son",
+            Style::default().fg(theme.fg).bg(theme.bg),
+        ),
+        Span::styled(
+            "  ·  Esc cancel",
+            Style::default().fg(theme.fg_dim).bg(theme.bg),
+        ),
+    ]);
+    line.render(area, buf);
 }

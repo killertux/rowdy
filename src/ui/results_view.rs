@@ -7,7 +7,7 @@ use ratatui::widgets::{
 };
 
 use crate::datasource::Cell;
-use crate::state::results::{ResultBlock, ResultCursor, ResultPayload, fit_columns};
+use crate::state::results::{ResultBlock, ResultCursor, ResultPayload, SelectionRect, fit_columns};
 use crate::ui::theme::Theme;
 
 pub struct InlineResult<'a> {
@@ -39,6 +39,7 @@ impl Widget for InlineResult<'_> {
             0,
             visible_cols,
             self.theme,
+            None,
         );
         let widths = column_widths(visible_cols);
         Widget::render(
@@ -81,6 +82,9 @@ pub struct ExpandedResult<'a> {
     pub row_offset: usize,
     pub visible_rows: usize,
     pub theme: &'a Theme,
+    /// `Some` when Visual mode is active; the rectangle is highlighted
+    /// in the grid and surfaced in the title bar.
+    pub selection: Option<SelectionRect>,
 }
 
 impl Widget for ExpandedResult<'_> {
@@ -96,6 +100,7 @@ impl Widget for ExpandedResult<'_> {
             self.row_offset,
             self.visible_rows,
             total_rows,
+            self.selection,
         );
         let block_widget = themed_block(self.theme, title, true);
         let inner = block_widget.inner(area);
@@ -109,6 +114,7 @@ impl Widget for ExpandedResult<'_> {
             self.col_offset,
             self.visible_cols,
             self.theme,
+            self.selection,
         );
         let widths = column_widths(self.visible_cols);
         Widget::render(
@@ -135,6 +141,7 @@ fn build_table<'a>(
     col_offset: usize,
     visible_cols: usize,
     theme: &Theme,
+    selection: Option<SelectionRect>,
 ) -> BuiltTable<'a> {
     let col_end = (col_offset + visible_cols).min(block.columns.len());
     let header = TableRow::new(block.columns[col_offset..col_end].iter().map(|c| {
@@ -152,12 +159,21 @@ fn build_table<'a>(
         .enumerate()
         .map(|(local, row)| {
             let absolute_row = row_offset + local;
-            build_row(row, absolute_row, col_offset, col_end, cursor, theme)
+            build_row(
+                row,
+                absolute_row,
+                col_offset,
+                col_end,
+                cursor,
+                theme,
+                selection,
+            )
         })
         .collect();
     BuiltTable { header, rows }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_row<'a>(
     row: &[Cell],
     absolute_row: usize,
@@ -165,6 +181,7 @@ fn build_row<'a>(
     col_end: usize,
     cursor: Option<ResultCursor>,
     theme: &Theme,
+    selection: Option<SelectionRect>,
 ) -> TableRow<'a> {
     // Slice defensively — a row that lost cells (driver bug or NULL handling
     // mismatch) shouldn't panic the renderer.
@@ -172,10 +189,24 @@ fn build_row<'a>(
     let start = col_offset.min(end);
     TableRow::new(row[start..end].iter().enumerate().map(|(local, value)| {
         let absolute_col = col_offset + local;
-        let cell_style = if matches!(cursor, Some(cur) if cur.row == absolute_row && cur.col == absolute_col) {
+        let is_cursor =
+            matches!(cursor, Some(cur) if cur.row == absolute_row && cur.col == absolute_col);
+        let in_selection = selection
+            .map(|s| s.contains(absolute_row, absolute_col))
+            .unwrap_or(false);
+        // Cursor wins over selection so the active cell stays distinguishable
+        // even when it's inside the highlighted rectangle. We darken the
+        // selection one notch (REVERSED) so the two layers stay visually
+        // separable on every theme.
+        let cell_style = if is_cursor {
             Style::default()
                 .fg(theme.selection_fg)
                 .bg(theme.selection_bg)
+        } else if in_selection {
+            Style::default()
+                .fg(theme.selection_fg)
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::DIM)
         } else if value.is_null() {
             Style::default().fg(theme.fg_dim).bg(theme.bg)
         } else {
@@ -221,6 +252,7 @@ fn expanded_title(
     row_offset: usize,
     visible_rows: usize,
     total_rows: usize,
+    selection: Option<SelectionRect>,
 ) -> String {
     let cols_end = (col_offset + visible_cols).min(total_cols);
     let rows_end = (row_offset + visible_rows).min(total_rows);
@@ -228,8 +260,12 @@ fn expanded_title(
     let cols_right = if cols_end < total_cols { " ›" } else { "" };
     let rows_up = if row_offset > 0 { "↑ " } else { "" };
     let rows_down = if rows_end < total_rows { " ↓" } else { "" };
+    let visual = match selection {
+        Some(s) => format!(" — VISUAL · {}×{}", s.rows(), s.cols()),
+        None => String::new(),
+    };
     format!(
-        " result #{} — {}rows {}-{} of {}{} (loaded {}) — {}cols {}-{} of {}{} — cell ({}, {}) — q/Esc to close ",
+        " result #{} — {}rows {}-{} of {}{} (loaded {}) — {}cols {}-{} of {}{} — cell ({}, {}){} — q/Esc to close ",
         block.id.0 + 1,
         rows_up,
         row_offset + 1,
@@ -244,6 +280,7 @@ fn expanded_title(
         cols_right,
         cursor.row + 1,
         cursor.col + 1,
+        visual,
     )
 }
 

@@ -5,7 +5,6 @@ pub enum DatasourceError {
     Connect(String),
     Execute(String),
     Introspect(String),
-    Cancelled,
 }
 
 impl fmt::Display for DatasourceError {
@@ -14,7 +13,6 @@ impl fmt::Display for DatasourceError {
             Self::Connect(msg) => write!(f, "connect: {msg}"),
             Self::Execute(msg) => write!(f, "execute: {msg}"),
             Self::Introspect(msg) => write!(f, "introspect: {msg}"),
-            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }

@@ -24,9 +24,13 @@ exploring schemas, and inspecting results — all without leaving the terminal.
   cursor and asks before executing it. `<Space>R` bypasses the confirmation;
   in editor Visual mode `<Space>r` runs the explicit selection straight away.
 - **Typed result cells** (`Null / Bool / Int / Float / Text / Bytes /
-  Timestamp / Date / Time / Uuid / Other`) — preserved end-to-end so future
-  exporters (CSV / TSV / JSON / SQL inserts) keep type fidelity. The TUI
-  renders each cell via its own `display()`; `NULL` cells are dimmed.
+  Timestamp / Date / Time / Uuid / Other`) — preserved end-to-end so the
+  CSV / TSV / JSON exporters keep type fidelity. The TUI renders each
+  cell via its own `display()`; `NULL` cells are dimmed.
+- **Yank and export** in the expanded result view: `y` copies the
+  current cell to the clipboard, `v` enters Visual mode for a
+  rectangular selection, and `:export csv|tsv|json` (or `y` from Visual)
+  copies the result — full or selected — in the chosen format.
 - **Three SQL drivers** sharing the same `Datasource` trait:
   - **SQLite** — in-memory or file-based, schema via `sqlite_master` and
     `pragma_*` virtual tables.
@@ -40,6 +44,15 @@ exploring schemas, and inspecting results — all without leaving the terminal.
   you change a default).
 - **File logger** at `./.rowdy/<datetime>.log`. The app and every datasource
   write into the same file (connect / execute / cancel / errors).
+- **Saved connections** in `./.rowdy/config.toml`. Pick one from a `:conn`
+  list, switch live with `:conn use NAME`, manage them with the non-TUI
+  `rowdy connections …` subcommands. Connection strings can optionally be
+  encrypted with a password (argon2id + chacha20-poly1305) — the password
+  is prompted in-TUI on launch, or supplied via `--password`.
+- **Per-connection editor sessions** persisted at
+  `./.rowdy/sessions/<name>/session_0.sql`. The buffer is flushed 800ms
+  after the last edit and reloaded on the next launch (or `:conn use`
+  switch).
 - **Vim-style modal input** end-to-end: editor uses real vim bindings via
   edtui; the schema panel and result viewer use the same `hjkl` / `gg` / `G`
   vocabulary.
@@ -83,17 +96,22 @@ The codebase is a small, MVC-flavoured loop with an async worker on the side:
   `introspect_columns`, `introspect_indices`, `execute`, `cancel`, `close`.
   Drivers live under `src/datasource/sql/`.
 - The worker (`src/worker/mod.rs`) owns the live connection pool, runs at
-  most one query at a time (with cancellation via `JoinHandle::abort`), and
-  fans introspection out concurrently.
+  most one query at a time, and fans introspection out concurrently.
+  `:cancel` aborts the in-flight `JoinHandle` *and* sends a server-side
+  cancel (`pg_cancel_backend` for Postgres, `KILL QUERY` for MySQL) so the
+  database doesn't keep grinding on a query the user gave up on. SQLite
+  has no server-side cancel; the abort is the cancel.
 
 State is encoded so that invalid combinations are unrepresentable wherever
 possible:
 
 - `Focus { Editor, Schema }` — exactly one panel owns input.
 - `Mode { Normal, Command(CommandBuffer), ResultExpanded { id, cursor,
-  col_offset }, ConfirmRun { statement } }` — no "expanded but no result"
-  state, no "in command mode but no buffer", no "awaiting confirmation but
-  no statement".
+  col_offset, row_offset }, ConfirmRun { statement }, Auth(AuthState),
+  EditConnection(ConnFormState), ConnectionList(ConnListState),
+  Connecting { name } }` — every variant carries the data its UI needs;
+  no "expanded but no result", no "in command mode but no buffer", no
+  "awaiting confirmation but no statement".
 - `QueryStatus { Idle, Running, Succeeded, Failed, Cancelled }` — replaces a
   bag of booleans / `Option<String>` fields.
 - `ResultPayload { Clipped, Full }` — variant says whether more rows exist;
@@ -106,7 +124,7 @@ possible:
 
 ## Connection strings
 
-`--connection <url>` is **required**. URL scheme dispatches to the driver:
+URL scheme dispatches to the driver:
 
 | Scheme                       | Driver     | Example                                                |
 |------------------------------|------------|--------------------------------------------------------|
@@ -125,12 +143,6 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
 > **System schemas are hidden** by default — Postgres `pg_catalog`,
 > `information_schema`, `pg_toast`, `pg_temp_*`; MySQL `information_schema`,
 > `mysql`, `performance_schema`, `sys`. You can still query them by name.
-
-> **Cancel** for Postgres and MySQL currently relies on aborting the
-> client-side `JoinHandle` — the future is dropped but the server may keep
-> running the query. Real cancellation (`pg_cancel_backend` / `KILL QUERY`)
-> needs the worker to track the backend PID / connection id and is on the
-> roadmap.
 
 ## Running it
 
@@ -168,16 +180,26 @@ Password handling mirrors the TUI:
 On startup rowdy creates `.rowdy/` in the current working directory if it
 doesn't exist. It holds:
 
-- `config.toml` — theme + schema panel width. Written **lazily** on the
-  first change away from defaults; a vanilla session never creates it.
+- `config.toml` — theme, schema-panel width, saved connections, and (when
+  the encrypted store is in use) the argon2id/chacha20-poly1305 crypto
+  block. Written **lazily** on the first change away from defaults.
 - `<datetime>.log` — one file per session, named for the launch time.
   Append-only. The app and every datasource log into it (connect /
-  execute / cancel / errors). URL passwords are redacted.
+  execute / cancel / errors / session save+load). URL passwords are
+  redacted.
+- `sessions/<connection-name>/session_0.sql` — the editor buffer for each
+  saved connection. Auto-saved 800ms after the last edit and reloaded on
+  the next connect. Connection names are sanitised for path safety, so
+  two names that differ only in path-unsafe characters share a session
+  for now.
 
 ### Sample database
 
-A seed program creates a small e-commerce schema (4 tables, 1 view, 5
-indices, ~450 rows) so you have something realistic to poke at:
+A seed program creates a sample SQLite database to poke at: a small
+e-commerce schema (`users` / `products` / `orders` / `order_items` plus a
+`recent_orders` view), an `events` table with 5000 rows, a `wide_metrics`
+table with 32 columns to exercise horizontal scroll, and 10 small lookup
+tables to exercise the schema panel's vertical scroll.
 
 ```sh
 cargo run --example seed_sqlite -- ./sample.db
@@ -277,18 +299,45 @@ Nodes show their load state inline:
 
 When you've expanded a result block (`<Space>e` or `:expand`).
 
-| Keys         | Action                       |
-|--------------|------------------------------|
-| `h j k l`    | Move cell cursor             |
-| `0` / `$`    | First / last column in row   |
-| `gg` / `G`   | First / last row             |
-| `q` / `Esc`  | Close expanded view          |
+| Keys         | Action                                                     |
+|--------------|------------------------------------------------------------|
+| `h j k l`    | Move cell cursor                                           |
+| `0` / `$`    | First / last column in row                                 |
+| `gg` / `G`   | First / last row                                           |
+| `y`          | Yank — current cell (Normal) or selection (Visual, prompts for format) |
+| `v`          | Toggle Visual mode (rectangular cell selection)            |
+| `q` / `Esc`  | Visual: exit Visual · Normal: close expanded view          |
 
 When the result has more columns than fit on screen the view scrolls
 horizontally to keep the cursor visible. The title shows `cols X-Y of Z`
 with `‹`/`›` markers when there are columns off-screen on either side. The
 inline preview shows only the leftmost columns that fit and a `+N →` count
 of how many were truncated — expand it to navigate.
+
+#### Yank and export
+
+`y` in Normal sub-mode copies the current cell's rendered text straight
+to the system clipboard — no header, no quoting.
+
+`y` in Visual sub-mode opens a tiny prompt at the bottom of the screen:
+`yank as: [c]sv [t]sv [j]son · Esc cancel`. A single key picks the
+format and the selection is copied; `Esc` returns you to Visual with the
+selection intact.
+
+`:export csv|tsv|json` does the same thing from the command bar. With an
+active Visual selection it exports just the rectangle; otherwise it
+exports the latest result block in full.
+
+Format details:
+- **CSV** — RFC 4180. Fields with commas, quotes, or newlines are quoted;
+  internal `"` is doubled; `NULL` becomes an empty field.
+- **TSV** — tabs separate fields; tabs / newlines / carriage returns
+  inside a cell are replaced with spaces so the table shape survives a
+  paste into a spreadsheet. Use CSV if you need exact round-trip.
+- **JSON** — `[{column: value, …}, …]`. `Bool` / `Int` / `UInt` / `Float`
+  cells become native JSON values, `Null` becomes `null`, bytes render
+  as a hex string (`"0xdeadbeef"`), everything else is a string. NaN /
+  infinity floats fall through to `null`.
 
 ### Command prompt
 
@@ -314,6 +363,7 @@ After pressing `:`.
 | `:width <cols>`              | Set schema panel width (clamped 12–80)                          |
 | `:theme dark` \| `light`     | Switch theme                                                    |
 | `:theme toggle` \| `:theme`  | Flip between Dark and Light                                     |
+| `:export csv` \| `tsv` \| `json` | Copy the latest result (or Visual selection) to the clipboard |
 | `:conn`, `:conn list`        | Open the connection list                                        |
 | `:conn add <name>`           | Open the form to create `<name>`                                |
 | `:conn edit <name>`          | Open the form pre-filled with `<name>`'s URL (overwrite on save) |
@@ -344,10 +394,13 @@ src/
   action.rs               Action enum, apply() dispatcher, command parser
   event.rs                crossterm Event → Action translation
   cli.rs                  clap arg parsing (--connection NAME, --password)
+  clipboard.rs            arboard wrapper for paste/copy/cut into inputs
   crypto.rs               argon2id KDF + chacha20poly1305 AEAD primitives
   connections.rs          ConnectionStore: encrypt/decrypt, unlock, make_entry
   config.rs               .rowdy/config.toml load + lazy save
   log.rs                  Logger — Arc<Mutex<File>>, info/warn/error
+  export.rs               CSV / TSV / JSON formatters for yank + :export
+  session.rs              .rowdy/sessions/<name>/session_0.sql load + save
   subcommands.rs          non-TUI `rowdy connections …` handlers
   terminal.rs             terminal init / restore / panic hook
   state/                  sub-state modules
@@ -390,22 +443,20 @@ examples/
 
 Next likely steps, roughly ordered:
 
-- **Real cancel** for Postgres (`pg_cancel_backend(pid)`) and MySQL
-  (`KILL QUERY <id>`) — needs the worker to track the backend PID /
-  connection id of the in-flight query.
 - **`NUMERIC` / `DECIMAL`** decoding for Postgres and MySQL — currently
   falls through to `Cell::Other`. Wiring sqlx's `bigdecimal` feature would
   fix it.
-- **Export**: `:export <path>` for CSV / TSV / JSON / SQL inserts. The
-  typed `Cell` model is already in place to support this without losing
-  fidelity.
+- **SQL export** (`:export sql`) — emit `INSERT` statements for the
+  selected rows, dialect-aware so they round-trip back into the same
+  driver. CSV / TSV / JSON exports are already wired (clipboard target);
+  this would slot in alongside them.
+- **Export to file** (`:export csv > path.csv`) — current exports only
+  hit the clipboard. A path argument that writes to disk would close the
+  loop for larger result sets.
 - **Multiple result blocks** stacked under the editor with scrolling
   (currently only the latest is shown).
 - **A real SQL lexer** for statement splitting (the current `;` splitter is
   intentionally naive — see the TODO at `state/editor.rs`).
-- **Elapsed-time** rendering for in-flight queries
-  (`QueryStatus::Running.started_at` is already captured).
-- **Query history** surfaced under each result block
-  (`ResultBlock.query` is already captured).
+- **Elapsed-time** rendering for in-flight queries.
+- **Query history** surfaced under each result block.
 - **SQL syntax highlighting** in the editor.
-- **Theme persistence** via a config file.

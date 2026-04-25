@@ -1,7 +1,3 @@
-// Phase 1: store-shape primitives + crypto integration. Phase 2 wires this
-// into the App and the auth flow.
-#![allow(dead_code)]
-
 use std::fmt;
 
 use base64::Engine as _;
@@ -24,10 +20,6 @@ pub enum ConnectionError {
     Crypto(crypto::CryptoError),
     /// Decrypted plaintext wasn't valid UTF-8.
     Utf8(String),
-    /// `add` for a name that already exists, when overwrite was disallowed.
-    NameTaken(String),
-    /// Lookup for a name with no matching entry.
-    NotFound(String),
 }
 
 impl fmt::Display for ConnectionError {
@@ -44,8 +36,6 @@ impl fmt::Display for ConnectionError {
             }
             Self::Crypto(e) => write!(f, "{e}"),
             Self::Utf8(msg) => write!(f, "decrypted url is not valid utf-8: {msg}"),
-            Self::NameTaken(name) => write!(f, "connection {name:?} already exists"),
-            Self::NotFound(name) => write!(f, "no connection named {name:?}"),
         }
     }
 }
@@ -204,7 +194,7 @@ mod tests {
         let entry = store
             .make_entry("local".into(), "sqlite:./sample.db")
             .unwrap();
-        assert!(!entry.is_encrypted());
+        assert!(entry.ciphertext.is_none());
         assert_eq!(entry.url.as_deref(), Some("sqlite:./sample.db"));
         let url = store.lookup(&entry).unwrap();
         assert_eq!(url.as_str(), "sqlite:./sample.db");
@@ -217,7 +207,7 @@ mod tests {
         let entry = store
             .make_entry("prod".into(), "postgres://u:p@h/db")
             .unwrap();
-        assert!(entry.is_encrypted());
+        assert!(entry.ciphertext.is_some());
         assert!(entry.url.is_none());
         let url = store.lookup(&entry).unwrap();
         assert_eq!(url.as_str(), "postgres://u:p@h/db");
