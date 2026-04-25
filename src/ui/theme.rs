@@ -21,6 +21,15 @@ impl ThemeKind {
             Self::Light => Self::Dark,
         }
     }
+
+    /// Name of the syntect theme used for editor syntax highlighting. Both
+    /// names are bundled with edtui's `syntax-highlighting` feature.
+    pub fn syntect_theme_name(self) -> &'static str {
+        match self {
+            Self::Dark => "OneHalfDark",
+            Self::Light => "OneHalfLight",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,4 +110,22 @@ impl Default for Theme {
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use edtui::SyntaxHighlighter;
+
+    #[test]
+    fn syntect_theme_names_resolve_for_sql() {
+        for kind in [ThemeKind::Dark, ThemeKind::Light] {
+            assert!(
+                SyntaxHighlighter::new(kind.syntect_theme_name(), "sql").is_ok(),
+                "{:?} → {} did not resolve",
+                kind,
+                kind.syntect_theme_name()
+            );
+        }
+    }
 }

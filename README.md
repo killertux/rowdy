@@ -459,4 +459,3 @@ Next likely steps, roughly ordered:
   intentionally naive — see the TODO at `state/editor.rs`).
 - **Elapsed-time** rendering for in-flight queries.
 - **Query history** surfaced under each result block.
-- **SQL syntax highlighting** in the editor.

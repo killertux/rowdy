@@ -1,4 +1,4 @@
-use edtui::{EditorTheme, EditorView, LineNumbers};
+use edtui::{EditorTheme, EditorView, LineNumbers, SyntaxHighlighter};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -28,8 +28,11 @@ impl Widget for EditorPane<'_> {
                     .fg(theme.selection_fg),
             );
 
+        let highlighter = SyntaxHighlighter::new(theme.kind.syntect_theme_name(), "sql").ok();
+
         EditorView::new(&mut self.app.editor.state)
             .theme(editor_theme)
+            .syntax_highlighter(highlighter)
             .line_numbers(LineNumbers::Absolute)
             .wrap(false)
             .render(area, buf);
