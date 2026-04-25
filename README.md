@@ -184,7 +184,8 @@ doesn't exist. It holds:
 - `<datetime>.log` — one file per session, named for the launch time.
   Append-only. The app and every datasource log into it (connect /
   execute / cancel / errors / session save+load). URL passwords are
-  redacted.
+  redacted. Only the 5 most recent log files are kept; older ones are
+  deleted at the start of the next launch.
 - `sessions/<connection-name>/session_0.sql` — the editor buffer for each
   saved connection. Auto-saved 800ms after the last edit and reloaded on
   the next connect. Connection names are sanitised for path safety, so

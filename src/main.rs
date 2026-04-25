@@ -43,6 +43,9 @@ use crate::terminal::Tui;
 use crate::worker::{WorkerCommand, WorkerEvent};
 
 const DATA_DIR: &str = ".rowdy";
+/// Cap on the number of `.rowdy/<datetime>.log` files kept on disk. Older
+/// runs are deleted at startup once the new session's log has been opened.
+const MAX_LOG_FILES: usize = 5;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> ExitCode {
@@ -77,6 +80,13 @@ async fn run_app() -> Result<i32> {
         "rowdy",
         format!("starting; log file: {}", log_path.display()),
     );
+
+    // Cap the on-disk log count. The just-opened log counts toward the
+    // limit, so old runs only start dropping when we've actually reached
+    // MAX_LOG_FILES sessions.
+    if let Err(err) = log::prune_old(&data_dir, MAX_LOG_FILES, &logger) {
+        logger.warn("rowdy", format!("log pruning failed: {err}"));
+    }
 
     let mut config = ConfigStore::load(&data_dir)
         .with_context(|| format!("loading config from {}", data_dir.display()))?;
