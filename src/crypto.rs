@@ -104,7 +104,13 @@ pub fn encrypt(
 ) -> CryptoResult<Vec<u8>> {
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     cipher
-        .encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .encrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::Aead)
 }
 

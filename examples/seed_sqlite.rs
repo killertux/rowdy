@@ -183,9 +183,8 @@ async fn create_schema(pool: &sqlx::SqlitePool) -> Result<()> {
 /// Builds the `CREATE TABLE wide_metrics` statement with `METRIC_COLUMN_COUNT`
 /// generated metric columns alternating between INTEGER and REAL.
 fn wide_metrics_create() -> String {
-    let mut cols = String::from(
-        "id INTEGER PRIMARY KEY, recorded_on TEXT NOT NULL, source TEXT NOT NULL",
-    );
+    let mut cols =
+        String::from("id INTEGER PRIMARY KEY, recorded_on TEXT NOT NULL, source TEXT NOT NULL");
     for i in 1..=METRIC_COLUMN_COUNT {
         let ty = if i % 2 == 0 { "INTEGER" } else { "REAL" };
         cols.push_str(&format!(", metric_{i:02} {ty}"));
@@ -326,14 +325,7 @@ async fn seed_order_items(pool: &sqlx::SqlitePool) -> Result<()> {
 async fn seed_events(pool: &sqlx::SqlitePool) -> Result<()> {
     const N: i64 = 5_000;
     let kinds = [
-        "login",
-        "logout",
-        "view",
-        "click",
-        "purchase",
-        "refund",
-        "signup",
-        "error",
+        "login", "logout", "view", "click", "purchase", "refund", "signup", "error",
     ];
     let severities = ["info", "info", "info", "warn", "error"];
 
@@ -419,13 +411,11 @@ async fn seed_lookup_tables(pool: &sqlx::SqlitePool) -> Result<()> {
     for table in LOOKUP_TABLES {
         let mut tx = pool.begin().await?;
         for (name, notes) in rows {
-            sqlx::query(&format!(
-                "INSERT INTO {table}(name, notes) VALUES (?, ?)"
-            ))
-            .bind(name)
-            .bind(notes)
-            .execute(&mut *tx)
-            .await?;
+            sqlx::query(&format!("INSERT INTO {table}(name, notes) VALUES (?, ?)"))
+                .bind(name)
+                .bind(notes)
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
     }

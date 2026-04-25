@@ -12,36 +12,18 @@ pub struct ResultBlock {
     pub id: ResultId,
     pub took: Duration,
     pub columns: Vec<Column>,
-    pub payload: ResultPayload,
+    /// Every row returned by the query. The inline preview slices the first
+    /// few; the expanded view paginates over the full set.
+    pub rows: Vec<Row>,
 }
 
 impl ResultBlock {
     pub fn rows(&self) -> &[Row] {
-        self.payload.rows()
+        &self.rows
     }
 
     pub fn total_rows(&self) -> usize {
-        self.payload.total_rows()
-    }
-}
-
-#[derive(Debug)]
-pub enum ResultPayload {
-    Clipped {
-        preview: Vec<Row>,
-        total_rows: usize,
-    },
-}
-
-impl ResultPayload {
-    pub fn rows(&self) -> &[Row] {
-        let Self::Clipped { preview, .. } = self;
-        preview
-    }
-
-    pub fn total_rows(&self) -> usize {
-        let Self::Clipped { total_rows, .. } = self;
-        *total_rows
+        self.rows.len()
     }
 }
 
@@ -87,11 +69,15 @@ impl ResultCursor {
 #[derive(Debug, Clone, Copy)]
 pub enum ResultViewMode {
     Normal,
-    Visual { anchor: ResultCursor },
+    Visual {
+        anchor: ResultCursor,
+    },
     /// Awaiting the user's CSV/TSV/JSON pick after `y` was pressed in Visual.
     /// We keep the anchor so cancelling drops the user back into Visual with
     /// the same selection.
-    YankFormat { anchor: ResultCursor },
+    YankFormat {
+        anchor: ResultCursor,
+    },
 }
 
 impl ResultViewMode {
@@ -125,10 +111,7 @@ impl SelectionRect {
     }
 
     pub fn contains(&self, row: usize, col: usize) -> bool {
-        row >= self.row_start
-            && row <= self.row_end
-            && col >= self.col_start
-            && col <= self.col_end
+        row >= self.row_start && row <= self.row_end && col >= self.col_start && col <= self.col_end
     }
 
     pub fn rows(&self) -> usize {

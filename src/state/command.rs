@@ -21,10 +21,6 @@ impl Default for CommandBuffer {
 
 impl CommandBuffer {
     pub fn text(&self) -> &str {
-        self.input
-            .lines()
-            .first()
-            .map(String::as_str)
-            .unwrap_or("")
+        self.input.lines().first().map(String::as_str).unwrap_or("")
     }
 }

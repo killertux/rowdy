@@ -98,9 +98,15 @@ fn write_csv_field(out: &mut String, field: &str) {
 
 fn to_tsv(columns: &[&Column], rows: &[Vec<&Cell>]) -> String {
     let mut out = String::new();
-    write_tsv_record(&mut out, columns.iter().map(|c| c.name.as_str().to_string()));
+    write_tsv_record(
+        &mut out,
+        columns.iter().map(|c| c.name.as_str().to_string()),
+    );
     for row in rows {
-        write_tsv_record(&mut out, row.iter().map(|c| display_or_empty(c).into_owned()));
+        write_tsv_record(
+            &mut out,
+            row.iter().map(|c| display_or_empty(c).into_owned()),
+        );
     }
     out
 }
@@ -120,7 +126,13 @@ fn write_tsv_record<I: IntoIterator<Item = String>>(out: &mut String, fields: I)
 fn tsv_sanitize(field: &str) -> String {
     field
         .chars()
-        .map(|c| if matches!(c, '\t' | '\n' | '\r') { ' ' } else { c })
+        .map(|c| {
+            if matches!(c, '\t' | '\n' | '\r') {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -141,8 +153,8 @@ fn to_json(columns: &[&Column], rows: &[Vec<&Cell>]) -> String {
             Value::Object(obj)
         })
         .collect();
-    let mut out = serde_json::to_string_pretty(&Value::Array(array))
-        .unwrap_or_else(|_| "[]".to_string());
+    let mut out =
+        serde_json::to_string_pretty(&Value::Array(array)).unwrap_or_else(|_| "[]".to_string());
     out.push('\n');
     out
 }
@@ -155,7 +167,9 @@ fn cell_to_json(cell: &Cell) -> Value {
         Cell::UInt(v) => Value::Number(Number::from(*v)),
         // f64 NaN/Inf can't be represented in JSON; fall back to null rather
         // than producing invalid output or panicking.
-        Cell::Float(v) => Number::from_f64(*v).map(Value::Number).unwrap_or(Value::Null),
+        Cell::Float(v) => Number::from_f64(*v)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
         // Emit NUMERIC/DECIMAL as a JSON string to avoid the precision loss
         // we'd get from going through f64. Round-trips back into
         // `BigDecimal::from_str` if the consumer needs the value.
@@ -221,7 +235,10 @@ mod tests {
     #[test]
     fn csv_quotes_fields_with_specials() {
         let cols = [col("name"), col("note")];
-        let row = [Cell::Text("Doe, John".into()), Cell::Text("said \"hi\"\nthen left".into())];
+        let row = [
+            Cell::Text("Doe, John".into()),
+            Cell::Text("said \"hi\"\nthen left".into()),
+        ];
         let csv = to_csv(&columns_borrowed(&cols), &[row_borrowed(&row)]);
         assert_eq!(
             csv,

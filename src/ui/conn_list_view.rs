@@ -20,7 +20,11 @@ impl Widget for ConnList<'_> {
         };
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border_focus).bg(self.theme.bg))
+            .border_style(
+                Style::default()
+                    .fg(self.theme.border_focus)
+                    .bg(self.theme.bg),
+            )
             .title(" rowdy — connections ")
             .title_style(
                 Style::default()
@@ -82,7 +86,11 @@ impl Widget for ConnList<'_> {
 fn entry_line<'a>(name: &str, selected: bool, active: bool, theme: &Theme) -> Line<'a> {
     let marker = if active { "● " } else { "  " };
     let suffix = if active { "  (active)" } else { "" };
-    let bg = if selected { theme.selection_bg } else { theme.bg };
+    let bg = if selected {
+        theme.selection_bg
+    } else {
+        theme.bg
+    };
     let fg = if selected {
         theme.selection_fg
     } else if active {
@@ -100,10 +108,7 @@ fn entry_line<'a>(name: &str, selected: bool, active: bool, theme: &Theme) -> Li
                 Modifier::empty()
             }),
         ),
-        Span::styled(
-            suffix.to_string(),
-            Style::default().fg(theme.fg_dim).bg(bg),
-        ),
+        Span::styled(suffix.to_string(), Style::default().fg(theme.fg_dim).bg(bg)),
     ])
 }
 

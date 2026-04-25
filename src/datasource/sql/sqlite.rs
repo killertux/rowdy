@@ -200,7 +200,6 @@ impl Datasource for SqliteDatasource {
     }
 }
 
-
 fn build_columns(rows: &[SqliteRow]) -> Vec<Column> {
     let Some(first) = rows.first() else {
         return Vec::new();

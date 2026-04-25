@@ -29,7 +29,11 @@ impl Widget for ConnForm<'_> {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border_focus).bg(self.theme.bg))
+            .border_style(
+                Style::default()
+                    .fg(self.theme.border_focus)
+                    .bg(self.theme.bg),
+            )
             .title(title)
             .title_style(
                 Style::default()
@@ -73,7 +77,9 @@ impl Widget for ConnForm<'_> {
         let hint_line = match &self.state.error {
             Some(err) => Line::from(Span::styled(
                 err.clone(),
-                Style::default().fg(self.theme.status_error).bg(self.theme.bg),
+                Style::default()
+                    .fg(self.theme.status_error)
+                    .bg(self.theme.bg),
             )),
             None => Line::from(Span::styled(
                 "schemes: sqlite:, postgres:, mysql:, mariadb:",

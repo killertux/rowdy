@@ -114,8 +114,6 @@ possible:
   "awaiting confirmation but no statement".
 - `QueryStatus { Idle, Running, Succeeded, Failed, Cancelled }` — replaces a
   bag of booleans / `Option<String>` fields.
-- `ResultPayload { Clipped, Full }` — variant says whether more rows exist;
-  no `is_clipped` flag.
 - `LoadState { NotLoaded, Loading, Loaded, Failed(error) }` on every schema
   node — drives the lazy-load UX without any "is_loading + error" pairs.
 - `IntrospectTarget` — a single value identifies both *which level* to load
@@ -452,12 +450,74 @@ examples/
 
 Next likely steps, roughly ordered:
 
-- **SQL export** (`:export sql`) — emit `INSERT` statements for the
-  selected rows, dialect-aware so they round-trip back into the same
-  driver. CSV / TSV / JSON exports are already wired (clipboard target);
-  this would slot in alongside them.
-- **Multiple result blocks** stacked under the editor with scrolling
-  (currently only the latest is shown).
+### Correctness / safety
+
+- **Transactions.** `Datasource::execute` runs every statement on
+  `&self.pool`, so sqlx hands each call a fresh pooled connection — `BEGIN`
+  lands on connection A and the next `UPDATE` may land on connection B.
+  The trait needs a transaction handle (or a "stick the next N statements
+  to one connection" mode) before BEGIN/COMMIT/ROLLBACK behave the way the
+  user expects.
+- **Multi-statement execution.** `:run` runs the statement under the
+  cursor; there's no way to run a buffer of N statements as a unit. Pairs
+  with the real-SQL-lexer item below — splitting is necessary but not
+  sufficient, the execution model also needs to pin one connection for
+  the duration of the script.
+- **Query timeout** per connection. A runaway query holds the worker's
+  one-at-a-time slot until the user manually `:cancel`s; a default
+  timeout (with the existing server-side cancel path) would be a cheap
+  guardrail.
+
+### Authoring
+
+- **Schema-aware autocomplete** in the editor. The introspected tree
+  already lives in `SchemaPanel`; surfacing table and column names as
+  prefix-match completions in the editor is mostly a wiring exercise on
+  top of edtui.
+- **SQL formatting** — a `:format` / `=` chord that runs the buffer (or
+  selection) through `sqlformat` or similar.
 - **A real SQL lexer** for statement splitting (the current `;` splitter is
   intentionally naive — see the TODO at `state/editor.rs`).
+- **Multiple sessions per connection.** Each connection has a single
+  `session_0.sql` buffer today — picking a connection swaps the editor
+  to that one buffer. A tabbed model (`session_0.sql`, `session_1.sql`,
+  …) would let users keep a long-running migration draft separate from
+  ad-hoc queries against the same database.
+
+### Result view
+
+- **Cell zoom / detail view** for long TEXT / JSON cells that overflow
+  the grid; press `Enter` (or similar) on a cell in the expanded view to
+  open a scrollable modal with the full value.
+- **Multiple result blocks** stacked under the editor with scrolling
+  (currently only the latest is shown).
 - **Query history** surfaced under each result block.
+- **`:explain` / `<Space>x`** that wraps the statement under the cursor
+  in `EXPLAIN` (or `EXPLAIN ANALYZE`) for the active dialect.
+
+### Connection management
+
+- **"Test connection"** action in the connection form — fire a one-shot
+  connect-and-disconnect so URL typos surface before the user saves and
+  switches.
+
+### Discovery
+
+- **`:help`** / `?` — an in-TUI cheat sheet of bindings and commands.
+  Currently new users have to read the README.
+
+### Export
+
+- **SQL export** (`:export sql`) — emit `INSERT` statements for the
+  selected rows, dialect-aware so they round-trip back into the same
+  driver. CSV / TSV / JSON exports are already wired; this would slot in
+  alongside them.
+
+### Project hygiene
+
+- **CI** — a `.github/workflows/` job that runs `cargo test` and
+  `cargo clippy` on every push.
+- **Live-DB integration tests** — a `docker-compose.yml` with Postgres
+  and MySQL services and an integration test suite. Today the
+  Postgres/MySQL drivers are exercised only via type-checking; the
+  recent NUMERIC/DECIMAL change has zero coverage on those drivers.

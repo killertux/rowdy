@@ -11,11 +11,18 @@ use crate::crypto::{self, DerivedKey, KdfParams, NONCE_LEN, SALT_LEN};
 pub enum ConnectionError {
     /// The on-disk entry doesn't match the store mode (encrypted entry but
     /// no key, or vice-versa).
-    ModeMismatch { name: String, expected_encrypted: bool },
+    ModeMismatch {
+        name: String,
+        expected_encrypted: bool,
+    },
     /// Stored bytes (salt/nonce/ciphertext) couldn't be decoded.
     Decode { what: &'static str, msg: String },
     /// Stored bytes decoded but had the wrong length for their slot.
-    InvalidLength { what: &'static str, expected: usize, got: usize },
+    InvalidLength {
+        what: &'static str,
+        expected: usize,
+        got: usize,
+    },
     /// Decryption failed — wrong key or tampered ciphertext.
     Crypto(crypto::CryptoError),
     /// Decrypted plaintext wasn't valid UTF-8.
@@ -25,13 +32,24 @@ pub enum ConnectionError {
 impl fmt::Display for ConnectionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ModeMismatch { name, expected_encrypted } => write!(
+            Self::ModeMismatch {
+                name,
+                expected_encrypted,
+            } => write!(
                 f,
                 "connection {name:?}: store is {} but entry is the opposite",
-                if *expected_encrypted { "encrypted" } else { "plaintext" }
+                if *expected_encrypted {
+                    "encrypted"
+                } else {
+                    "plaintext"
+                }
             ),
             Self::Decode { what, msg } => write!(f, "could not base64-decode {what}: {msg}"),
-            Self::InvalidLength { what, expected, got } => {
+            Self::InvalidLength {
+                what,
+                expected,
+                got,
+            } => {
                 write!(f, "{what} has wrong length: expected {expected}, got {got}")
             }
             Self::Crypto(e) => write!(f, "{e}"),
@@ -91,7 +109,12 @@ impl ConnectionStore {
     /// Returns the cleartext URL for `entry`. The result is `Zeroizing` so
     /// the URL doesn't linger in memory after the caller is done with it.
     pub fn lookup(&self, entry: &ConnectionEntry) -> ConnectionResult<Zeroizing<String>> {
-        match (&self.key, &entry.url, entry.nonce.as_ref(), entry.ciphertext.as_ref()) {
+        match (
+            &self.key,
+            &entry.url,
+            entry.nonce.as_ref(),
+            entry.ciphertext.as_ref(),
+        ) {
             (None, Some(url), None, None) => Ok(Zeroizing::new(url.clone())),
             (Some(key), None, Some(nonce_b64), Some(ct_b64)) => {
                 let nonce = decode_array::<NONCE_LEN>("nonce", nonce_b64)?;
@@ -227,7 +250,10 @@ mod tests {
     fn unlock_with_wrong_password_fails() {
         let (block, _key) = initialise_crypto_with("hunter2", &fast_params()).unwrap();
         let err = unlock("wrong", &block).unwrap_err();
-        assert!(matches!(err, ConnectionError::Crypto(crypto::CryptoError::Aead)));
+        assert!(matches!(
+            err,
+            ConnectionError::Crypto(crypto::CryptoError::Aead)
+        ));
     }
 
     #[test]

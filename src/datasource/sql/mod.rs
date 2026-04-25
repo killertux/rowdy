@@ -36,7 +36,15 @@ pub(crate) fn is_row_returning(sql: &str) -> bool {
         .collect();
     matches!(
         head.to_ascii_uppercase().as_str(),
-        "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "DESCRIBE" | "DESC" | "PRAGMA" | "VALUES" | "TABLE"
+        "SELECT"
+            | "WITH"
+            | "EXPLAIN"
+            | "SHOW"
+            | "DESCRIBE"
+            | "DESC"
+            | "PRAGMA"
+            | "VALUES"
+            | "TABLE"
     )
 }
 
@@ -49,6 +57,9 @@ pub(crate) fn redact_url(url: &str) -> String {
     let Some((authority, tail)) = rest.split_once('@') else {
         return url.to_string();
     };
-    let user = authority.split_once(':').map(|(u, _)| u).unwrap_or(authority);
+    let user = authority
+        .split_once(':')
+        .map(|(u, _)| u)
+        .unwrap_or(authority);
     format!("{scheme}://{user}:***@{tail}")
 }

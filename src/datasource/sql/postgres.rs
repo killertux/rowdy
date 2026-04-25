@@ -197,7 +197,8 @@ impl Datasource for PostgresDatasource {
             .fetch_one(&mut *conn)
             .await
             .map_err(|e| {
-                self.log.error(TARGET, format!("backend pid fetch failed: {e}"));
+                self.log
+                    .error(TARGET, format!("backend pid fetch failed: {e}"));
                 execute_err(e)
             })?;
         self.in_flight_pid.store(pid, Ordering::SeqCst);
@@ -277,7 +278,6 @@ impl Datasource for PostgresDatasource {
     }
 }
 
-
 fn build_columns(rows: &[PgRow]) -> Vec<Column> {
     let Some(first) = rows.first() else {
         return Vec::new();
@@ -315,7 +315,10 @@ fn decode_cell(row: &PgRow, idx: usize) -> Cell {
 
 fn decode_fallback(row: &PgRow, idx: usize) -> Option<Cell> {
     if let Some(opt) = decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx) {
-        return Some(opt.map(|w| Cell::Text(w.0.to_string())).unwrap_or(Cell::Null));
+        return Some(
+            opt.map(|w| Cell::Text(w.0.to_string()))
+                .unwrap_or(Cell::Null),
+        );
     }
     if let Some(opt) = decode_or_null::<String>(row, idx) {
         return Some(opt.map(Cell::Text).unwrap_or(Cell::Null));
@@ -331,8 +334,9 @@ fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
         return decode_array(row, idx, type_name, inner);
     }
     match type_name {
-        "BOOL" => decode_or_null::<bool>(row, idx)
-            .map(|opt| opt.map(Cell::Bool).unwrap_or(Cell::Null)),
+        "BOOL" => {
+            decode_or_null::<bool>(row, idx).map(|opt| opt.map(Cell::Bool).unwrap_or(Cell::Null))
+        }
         "INT2" | "SMALLINT" => decode_or_null::<i16>(row, idx)
             .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
         "INT4" | "INT" | "INTEGER" => decode_or_null::<i32>(row, idx)
@@ -342,8 +346,9 @@ fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
         }
         "FLOAT4" | "REAL" => decode_or_null::<f32>(row, idx)
             .map(|opt| opt.map(|v| Cell::Float(v as f64)).unwrap_or(Cell::Null)),
-        "FLOAT8" | "DOUBLE PRECISION" => decode_or_null::<f64>(row, idx)
-            .map(|opt| opt.map(Cell::Float).unwrap_or(Cell::Null)),
+        "FLOAT8" | "DOUBLE PRECISION" => {
+            decode_or_null::<f64>(row, idx).map(|opt| opt.map(Cell::Float).unwrap_or(Cell::Null))
+        }
         "NUMERIC" => decode_or_null::<sqlx::types::BigDecimal>(row, idx).map(|opt| {
             opt.map(|v| Cell::Decimal(v.to_string()))
                 .unwrap_or(Cell::Null)
@@ -361,10 +366,13 @@ fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
             .map(|opt| opt.map(Cell::Date).unwrap_or(Cell::Null)),
         "TIME" => decode_or_null::<NaiveTime>(row, idx)
             .map(|opt| opt.map(Cell::Time).unwrap_or(Cell::Null)),
-        "UUID" => decode_or_null::<Uuid>(row, idx)
-            .map(|opt| opt.map(Cell::Uuid).unwrap_or(Cell::Null)),
-        "JSON" | "JSONB" => decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx)
-            .map(|opt| opt.map(|w| Cell::Text(w.0.to_string())).unwrap_or(Cell::Null)),
+        "UUID" => {
+            decode_or_null::<Uuid>(row, idx).map(|opt| opt.map(Cell::Uuid).unwrap_or(Cell::Null))
+        }
+        "JSON" | "JSONB" => decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx).map(|opt| {
+            opt.map(|w| Cell::Text(w.0.to_string()))
+                .unwrap_or(Cell::Null)
+        }),
         _ => None,
     }
 }
@@ -395,12 +403,11 @@ fn decode_array(row: &PgRow, idx: usize, type_name: &str, inner: &str) -> Option
             format_array::<String, _>(row, idx, type_name, json_string)
         }
         "UUID" => format_array::<Uuid, _>(row, idx, type_name, |v| json_string(v.to_string())),
-        "JSON" | "JSONB" => format_array::<sqlx::types::Json<JsonValue>, _>(
-            row,
-            idx,
-            type_name,
-            |w| w.0.to_string(),
-        ),
+        "JSON" | "JSONB" => {
+            format_array::<sqlx::types::Json<JsonValue>, _>(row, idx, type_name, |w| {
+                w.0.to_string()
+            })
+        }
         _ => None,
     }
 }

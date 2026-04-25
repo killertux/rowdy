@@ -124,7 +124,11 @@ impl ConfigStore {
     }
 
     pub fn connection_names(&self) -> Vec<String> {
-        self.state.connections.iter().map(|c| c.name.clone()).collect()
+        self.state
+            .connections
+            .iter()
+            .map(|c| c.name.clone())
+            .collect()
     }
 
     pub fn is_encrypted(&self) -> bool {
@@ -183,9 +187,8 @@ impl ConfigStore {
     }
 
     fn flush(&self) -> io::Result<()> {
-        let text = toml::to_string_pretty(&self.state).map_err(|e| {
-            io::Error::other(format!("serialise config: {e}"))
-        })?;
+        let text = toml::to_string_pretty(&self.state)
+            .map_err(|e| io::Error::other(format!("serialise config: {e}")))?;
         fs::write(&self.path, text)
     }
 }
@@ -294,7 +297,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(store.connections().len(), 1);
-        assert_eq!(store.connection("x").unwrap().url.as_deref(), Some("sqlite:./other.db"));
+        assert_eq!(
+            store.connection("x").unwrap().url.as_deref(),
+            Some("sqlite:./other.db")
+        );
     }
 
     #[test]

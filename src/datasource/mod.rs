@@ -64,11 +64,9 @@ pub async fn connect(connection: &str, logger: Logger) -> DatasourceResult<Box<d
         "sqlite" => sql::sqlite::SqliteDatasource::connect(connection, logger)
             .await
             .map(|ds| Box::new(ds) as Box<dyn Datasource>),
-        "postgres" | "postgresql" => {
-            sql::postgres::PostgresDatasource::connect(connection, logger)
-                .await
-                .map(|ds| Box::new(ds) as Box<dyn Datasource>)
-        }
+        "postgres" | "postgresql" => sql::postgres::PostgresDatasource::connect(connection, logger)
+            .await
+            .map(|ds| Box::new(ds) as Box<dyn Datasource>),
         "mysql" | "mariadb" => sql::mysql::MysqlDatasource::connect(connection, logger)
             .await
             .map(|ds| Box::new(ds) as Box<dyn Datasource>),

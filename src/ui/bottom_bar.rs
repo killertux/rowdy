@@ -63,7 +63,10 @@ fn render_command_prefix(area: Rect, buf: &mut Buffer, theme: &Theme) {
 
 fn render_connecting(name: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
     let line = Line::from(vec![
-        Span::styled("⌛ ", Style::default().fg(theme.status_running).bg(theme.bg)),
+        Span::styled(
+            "⌛ ",
+            Style::default().fg(theme.status_running).bg(theme.bg),
+        ),
         Span::styled(
             format!("connecting to {name}…"),
             Style::default()
@@ -116,7 +119,10 @@ fn describe(status: &QueryStatus, theme: &Theme) -> (Color, String) {
         QueryStatus::Idle => (theme.status_idle, "idle".to_string()),
         QueryStatus::Running { query, started_at } => (
             theme.status_running,
-            format!("running ({}): {query}", format_elapsed(started_at.elapsed())),
+            format!(
+                "running ({}): {query}",
+                format_elapsed(started_at.elapsed())
+            ),
         ),
         QueryStatus::Succeeded {
             rows,

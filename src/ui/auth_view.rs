@@ -25,7 +25,11 @@ impl Widget for AuthPrompt<'_> {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border_focus).bg(self.theme.bg))
+            .border_style(
+                Style::default()
+                    .fg(self.theme.border_focus)
+                    .bg(self.theme.bg),
+            )
             .title(title)
             .title_style(
                 Style::default()
@@ -77,7 +81,11 @@ impl Widget for AuthPrompt<'_> {
         // [4] error
         if let Some(err) = &self.state.error {
             Paragraph::new(err.clone())
-                .style(Style::default().fg(self.theme.status_error).bg(self.theme.bg))
+                .style(
+                    Style::default()
+                        .fg(self.theme.status_error)
+                        .bg(self.theme.bg),
+                )
                 .wrap(Wrap { trim: true })
                 .render(chunks[4], buf);
         }

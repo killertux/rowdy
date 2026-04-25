@@ -7,7 +7,7 @@ use ratatui::widgets::{
 };
 
 use crate::datasource::Cell;
-use crate::state::results::{ResultBlock, ResultCursor, ResultPayload, SelectionRect, fit_columns};
+use crate::state::results::{ResultBlock, ResultCursor, SelectionRect, fit_columns};
 use crate::ui::theme::Theme;
 
 pub struct InlineResult<'a> {
@@ -50,16 +50,13 @@ impl Widget for InlineResult<'_> {
             buf,
         );
 
-        if let ResultPayload::Clipped {
-            total_rows,
-            preview,
-        } = &self.block.payload
-            && preview.len() < *total_rows
-        {
+        let total_rows = self.block.rows().len();
+        let shown = total_rows.min(self.max_preview_rows);
+        if shown < total_rows {
             let footer = Line::from(Span::styled(
                 format!(
                     " ⤥ {} more rows — press <space>e to expand",
-                    total_rows - preview.len()
+                    total_rows - shown
                 ),
                 Style::default().fg(self.theme.fg_dim).bg(self.theme.bg),
             ));
@@ -228,7 +225,10 @@ fn inline_title(
 ) -> String {
     let shown_rows = block.rows().len().min(max_preview_rows);
     let cols = if visible_cols < total_cols {
-        format!(" — {visible_cols}/{total_cols} cols (+{} →)", total_cols - visible_cols)
+        format!(
+            " — {visible_cols}/{total_cols} cols (+{} →)",
+            total_cols - visible_cols
+        )
     } else {
         format!(" — {total_cols} cols")
     };

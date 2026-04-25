@@ -213,10 +213,7 @@ async fn handle_execute(datasource: &dyn Datasource, req: RequestId, sql: String
     }
 }
 
-async fn handle_introspect(
-    datasource: &dyn Datasource,
-    target: IntrospectTarget,
-) -> WorkerEvent {
+async fn handle_introspect(datasource: &dyn Datasource, target: IntrospectTarget) -> WorkerEvent {
     let outcome = match &target {
         IntrospectTarget::Catalogs => datasource
             .introspect_catalogs()

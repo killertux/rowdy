@@ -64,14 +64,19 @@ async fn run_app() -> Result<i32> {
     // operations and shouldn't litter `.rowdy/` with empty session logs.
     if let Some(cmd) = args.command {
         return match cmd {
-            Command::Connections(sub) => subcommands::run_connections(&data_dir, sub, args.password),
+            Command::Connections(sub) => {
+                subcommands::run_connections(&data_dir, sub, args.password)
+            }
         };
     }
 
     let log_path = log_file_path(&data_dir);
     let logger = Logger::open(&log_path)
         .with_context(|| format!("opening log file {}", log_path.display()))?;
-    logger.info("rowdy", format!("starting; log file: {}", log_path.display()));
+    logger.info(
+        "rowdy",
+        format!("starting; log file: {}", log_path.display()),
+    );
 
     let mut config = ConfigStore::load(&data_dir)
         .with_context(|| format!("loading config from {}", data_dir.display()))?;
@@ -128,8 +133,7 @@ fn decide_startup(config: &mut ConfigStore, args: &Args, logger: &Logger) -> Res
     let store = match (config.crypto().cloned(), cli_password) {
         (Some(block), Some(pw)) => {
             // CLI password short-circuits the in-TUI prompt.
-            let key = connections::unlock(pw, &block)
-                .map_err(|e| anyhow!("unlock failed: {e}"))?;
+            let key = connections::unlock(pw, &block).map_err(|e| anyhow!("unlock failed: {e}"))?;
             logger.info("auth", "unlocked via --password");
             Some(ConnectionStore::encrypted(key))
         }

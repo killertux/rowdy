@@ -64,12 +64,11 @@ impl Datasource for MysqlDatasource {
     async fn introspect_catalogs(&self) -> DatasourceResult<Vec<CatalogInfo>> {
         // MySQL exposes a single static catalog (`def`); we read it from
         // information_schema rather than hard-coding it.
-        let rows = sqlx::query(
-            "SELECT DISTINCT catalog_name AS name FROM information_schema.schemata",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(introspect_err)?;
+        let rows =
+            sqlx::query("SELECT DISTINCT catalog_name AS name FROM information_schema.schemata")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(introspect_err)?;
         Ok(rows
             .into_iter()
             .filter_map(|r| r.try_get::<String, _>("name").ok())
@@ -216,7 +215,8 @@ impl Datasource for MysqlDatasource {
             .fetch_one(&mut *conn)
             .await
             .map_err(|e| {
-                self.log.error(TARGET, format!("connection id fetch failed: {e}"));
+                self.log
+                    .error(TARGET, format!("connection id fetch failed: {e}"));
                 execute_err(e)
             })?;
         self.in_flight_conn_id.store(conn_id, Ordering::SeqCst);
@@ -281,17 +281,13 @@ impl Datasource for MysqlDatasource {
         // busy session.
         let sql = format!("KILL QUERY {conn_id}");
         self.log.info(TARGET, format!("cancel: {sql}"));
-        sqlx::query(&sql)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| {
-                self.log.warn(TARGET, format!("cancel failed: {e}"));
-                execute_err(e)
-            })?;
+        sqlx::query(&sql).execute(&self.pool).await.map_err(|e| {
+            self.log.warn(TARGET, format!("cancel failed: {e}"));
+            execute_err(e)
+        })?;
         Ok(())
     }
 }
-
 
 fn build_columns(rows: &[MySqlRow]) -> Vec<Column> {
     let Some(first) = rows.first() else {
@@ -327,7 +323,10 @@ fn decode_cell(row: &MySqlRow, idx: usize) -> Cell {
 
 fn decode_fallback(row: &MySqlRow, idx: usize) -> Option<Cell> {
     if let Some(opt) = decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx) {
-        return Some(opt.map(|w| Cell::Text(w.0.to_string())).unwrap_or(Cell::Null));
+        return Some(
+            opt.map(|w| Cell::Text(w.0.to_string()))
+                .unwrap_or(Cell::Null),
+        );
     }
     if let Some(opt) = decode_or_null::<String>(row, idx) {
         return Some(opt.map(Cell::Text).unwrap_or(Cell::Null));
@@ -340,8 +339,9 @@ fn decode_fallback(row: &MySqlRow, idx: usize) -> Option<Cell> {
 
 fn decode_typed(row: &MySqlRow, idx: usize, type_name: &str) -> Option<Cell> {
     match type_name {
-        "BOOLEAN" => decode_or_null::<bool>(row, idx)
-            .map(|opt| opt.map(Cell::Bool).unwrap_or(Cell::Null)),
+        "BOOLEAN" => {
+            decode_or_null::<bool>(row, idx).map(|opt| opt.map(Cell::Bool).unwrap_or(Cell::Null))
+        }
         "TINYINT" => decode_or_null::<i8>(row, idx)
             .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
         "SMALLINT" => decode_or_null::<i16>(row, idx)
@@ -362,8 +362,9 @@ fn decode_typed(row: &MySqlRow, idx: usize, type_name: &str) -> Option<Cell> {
         }
         "FLOAT" => decode_or_null::<f32>(row, idx)
             .map(|opt| opt.map(|v| Cell::Float(v as f64)).unwrap_or(Cell::Null)),
-        "DOUBLE" => decode_or_null::<f64>(row, idx)
-            .map(|opt| opt.map(Cell::Float).unwrap_or(Cell::Null)),
+        "DOUBLE" => {
+            decode_or_null::<f64>(row, idx).map(|opt| opt.map(Cell::Float).unwrap_or(Cell::Null))
+        }
         "DECIMAL" | "NUMERIC" => decode_or_null::<sqlx::types::BigDecimal>(row, idx).map(|opt| {
             opt.map(|v| Cell::Decimal(v.to_string()))
                 .unwrap_or(Cell::Null)
@@ -385,8 +386,10 @@ fn decode_typed(row: &MySqlRow, idx: usize, type_name: &str) -> Option<Cell> {
             .map(|opt| opt.map(|v| Cell::Text(v.to_string())).unwrap_or(Cell::Null)),
         "YEAR" => decode_or_null::<u16>(row, idx)
             .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
-        "JSON" => decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx)
-            .map(|opt| opt.map(|w| Cell::Text(w.0.to_string())).unwrap_or(Cell::Null)),
+        "JSON" => decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx).map(|opt| {
+            opt.map(|w| Cell::Text(w.0.to_string()))
+                .unwrap_or(Cell::Null)
+        }),
         _ => None,
     }
 }

@@ -15,15 +15,11 @@ use crate::state::command::CommandBuffer;
 use crate::state::conn_form::{ConnFormPostSave, ConnFormState};
 use crate::state::conn_list::ConnListState;
 use crate::state::focus::{Focus, Mode, PendingChord};
-use crate::state::results::{
-    ResultBlock, ResultCursor, ResultId, ResultPayload, ResultViewMode, SelectionRect,
-};
+use crate::state::results::{ResultBlock, ResultCursor, ResultId, ResultViewMode, SelectionRect};
 use crate::state::schema::{ExpandOutcome, SchemaPanel};
 use crate::state::status::QueryStatus;
 use crate::ui::theme::{Theme, ThemeKind};
 use crate::worker::{IntrospectTarget, WorkerCommand, WorkerEvent};
-
-const PREVIEW_ROWS: usize = 100;
 
 pub enum Action {
     Quit,
@@ -620,14 +616,14 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
     match event {
         WorkerEvent::QueryDone { req, result } => on_query_done(app, req, result),
         WorkerEvent::QueryFailed { req, error } => on_query_failed(app, req, error.to_string()),
-        WorkerEvent::SchemaLoaded { target, payload } => {
-            on_schema_loaded(app, target, payload)
-        }
+        WorkerEvent::SchemaLoaded { target, payload } => on_schema_loaded(app, target, payload),
         WorkerEvent::SchemaFailed { target, error } => {
             on_schema_failed(app, target, error.to_string())
         }
         WorkerEvent::Connected { name } => on_connected(app, name),
-        WorkerEvent::ConnectFailed { name, error } => on_connect_failed(app, name, error.to_string()),
+        WorkerEvent::ConnectFailed { name, error } => {
+            on_connect_failed(app, name, error.to_string())
+        }
     }
 }
 
@@ -650,8 +646,7 @@ fn on_connected(app: &mut App, name: String) {
     let _ = app.cmd_tx.send(WorkerCommand::Introspect {
         target: IntrospectTarget::Catalogs,
     });
-    app.log
-        .info("app", format!("connected to {name}"));
+    app.log.info("app", format!("connected to {name}"));
 }
 
 fn on_connect_failed(app: &mut App, name: String, error: String) {
@@ -728,13 +723,12 @@ fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResu
     // Statements run via `execute()` (DML/DDL) report no columns — there's
     // nothing to render in a result block, so skip pushing one.
     if !result.columns.is_empty() {
-        let payload = build_payload(result.rows, total_rows);
         let id = ResultId(app.results.len());
         app.results.push(ResultBlock {
             id,
             took,
             columns: result.columns,
-            payload,
+            rows: result.rows,
         });
     }
 
@@ -743,21 +737,6 @@ fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResu
         affected,
         took,
     };
-}
-
-fn build_payload(rows: Vec<crate::state::results::Row>, total_rows: usize) -> ResultPayload {
-    if total_rows > PREVIEW_ROWS {
-        let preview = rows.into_iter().take(PREVIEW_ROWS).collect();
-        ResultPayload::Clipped {
-            preview,
-            total_rows,
-        }
-    } else {
-        ResultPayload::Clipped {
-            preview: rows,
-            total_rows,
-        }
-    }
 }
 
 fn on_query_failed(app: &mut App, req: crate::worker::RequestId, error: String) {
@@ -794,12 +773,7 @@ fn auth_submit(app: &mut App) {
         return;
     };
     state.error = None;
-    let attempt = state
-        .input
-        .lines()
-        .first()
-        .cloned()
-        .unwrap_or_default();
+    let attempt = state.input.lines().first().cloned().unwrap_or_default();
     let kind = state.kind.clone();
 
     match kind {
@@ -845,7 +819,11 @@ fn auth_submit(app: &mut App) {
                         state.error = Some(format!(
                             "wrong password ({} {} left)",
                             remaining,
-                            if remaining == 1 { "attempt" } else { "attempts" }
+                            if remaining == 1 {
+                                "attempt"
+                            } else {
+                                "attempts"
+                            }
                         ));
                     }
                 }
@@ -1010,20 +988,14 @@ pub(crate) fn dispatch_connect(app: &mut App, name: String, url: String) {
     flush_session(app);
     app.mode = Mode::Connecting { name: name.clone() };
     app.status = QueryStatus::Idle;
-    let _ = app
-        .cmd_tx
-        .send(WorkerCommand::Connect { name, url });
+    let _ = app.cmd_tx.send(WorkerCommand::Connect { name, url });
 }
 
 // ---------------------------------------------------------------------------
 // Clipboard helpers (shared across every TextArea-backed input)
 // ---------------------------------------------------------------------------
 
-fn paste_into(
-    input: &mut TextArea<'static>,
-    log: &crate::log::Logger,
-    supplied: Option<String>,
-) {
+fn paste_into(input: &mut TextArea<'static>, log: &crate::log::Logger, supplied: Option<String>) {
     let text = match supplied {
         Some(t) => t,
         None => match clipboard::read(log) {
@@ -1077,7 +1049,10 @@ fn result_exit_visual(app: &mut App) {
 }
 
 fn result_yank(app: &mut App) {
-    let Mode::ResultExpanded { id, cursor, view, .. } = &mut app.mode else {
+    let Mode::ResultExpanded {
+        id, cursor, view, ..
+    } = &mut app.mode
+    else {
         return;
     };
     match *view {
@@ -1109,7 +1084,10 @@ fn result_yank(app: &mut App) {
 
 fn result_yank_format(app: &mut App, fmt: ExportFormat) {
     let (id, cursor, anchor) = {
-        let Mode::ResultExpanded { id, cursor, view, .. } = &app.mode else {
+        let Mode::ResultExpanded {
+            id, cursor, view, ..
+        } = &app.mode
+        else {
             return;
         };
         let ResultViewMode::YankFormat { anchor } = view else {
@@ -1193,7 +1171,9 @@ fn export_command(app: &mut App, fmt: ExportFormat, target: ExportTarget) {
     // Two routes:
     // - Inside an expanded result with an active selection → export the rect.
     // - Otherwise → export the latest result block in full.
-    if let Mode::ResultExpanded { id, cursor, view, .. } = &app.mode
+    if let Mode::ResultExpanded {
+        id, cursor, view, ..
+    } = &app.mode
         && let Some(anchor) = view.anchor()
     {
         let id = *id;
@@ -1207,9 +1187,7 @@ fn export_command(app: &mut App, fmt: ExportFormat, target: ExportTarget) {
         };
         let drop_visual = matches!(target, ExportTarget::Clipboard);
         finish_export(app, fmt, target, rect.rows(), rect.cols(), payload);
-        if drop_visual
-            && let Mode::ResultExpanded { view, .. } = &mut app.mode
-        {
+        if drop_visual && let Mode::ResultExpanded { view, .. } = &mut app.mode {
             *view = ResultViewMode::Normal;
         }
         return;
@@ -1347,9 +1325,7 @@ pub(crate) fn flush_session(app: &mut App) {
     let path = session::path_for(&app.data_dir, &name);
     let text = app.editor.text();
     match session::save(&path, &text) {
-        Ok(()) => app
-            .log
-            .info("session", format!("saved {}", path.display())),
+        Ok(()) => app.log.info("session", format!("saved {}", path.display())),
         Err(err) => app
             .log
             .warn("session", format!("save {} failed: {err}", path.display())),
