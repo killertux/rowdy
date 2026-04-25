@@ -328,6 +328,13 @@ selection intact.
 active Visual selection it exports just the rectangle; otherwise it
 exports the latest result block in full.
 
+Pass a path after the format to write to disk instead of the clipboard:
+`:export csv path/to/out.csv`. A leading `>` is optional and ignored
+(`:export csv > out.csv` is the same call). `~` and `~/` expand to
+`$HOME`; everything else is passed verbatim to the OS. The parent
+directory must already exist; existing files are overwritten without a
+prompt.
+
 Format details:
 - **CSV** — RFC 4180. Fields with commas, quotes, or newlines are quoted;
   internal `"` is doubled; `NULL` becomes an empty field.
@@ -336,8 +343,10 @@ Format details:
   paste into a spreadsheet. Use CSV if you need exact round-trip.
 - **JSON** — `[{column: value, …}, …]`. `Bool` / `Int` / `UInt` / `Float`
   cells become native JSON values, `Null` becomes `null`, bytes render
-  as a hex string (`"0xdeadbeef"`), everything else is a string. NaN /
-  infinity floats fall through to `null`.
+  as a hex string (`"0xdeadbeef"`), and `NUMERIC` / `DECIMAL` come
+  through as JSON strings (preserves precision; round-trips into
+  `BigDecimal::from_str`). Everything else is a string. NaN / infinity
+  floats fall through to `null`.
 
 ### Command prompt
 
@@ -363,7 +372,7 @@ After pressing `:`.
 | `:width <cols>`              | Set schema panel width (clamped 12–80)                          |
 | `:theme dark` \| `light`     | Switch theme                                                    |
 | `:theme toggle` \| `:theme`  | Flip between Dark and Light                                     |
-| `:export csv` \| `tsv` \| `json` | Copy the latest result (or Visual selection) to the clipboard |
+| `:export csv` \| `tsv` \| `json` `[path]` | Copy the latest result (or Visual selection) to the clipboard, or write to `path` if given |
 | `:conn`, `:conn list`        | Open the connection list                                        |
 | `:conn add <name>`           | Open the form to create `<name>`                                |
 | `:conn edit <name>`          | Open the form pre-filled with `<name>`'s URL (overwrite on save) |
@@ -443,19 +452,12 @@ examples/
 
 Next likely steps, roughly ordered:
 
-- **`NUMERIC` / `DECIMAL`** decoding for Postgres and MySQL — currently
-  falls through to `Cell::Other`. Wiring sqlx's `bigdecimal` feature would
-  fix it.
 - **SQL export** (`:export sql`) — emit `INSERT` statements for the
   selected rows, dialect-aware so they round-trip back into the same
   driver. CSV / TSV / JSON exports are already wired (clipboard target);
   this would slot in alongside them.
-- **Export to file** (`:export csv > path.csv`) — current exports only
-  hit the clipboard. A path argument that writes to disk would close the
-  loop for larger result sets.
 - **Multiple result blocks** stacked under the editor with scrolling
   (currently only the latest is shown).
 - **A real SQL lexer** for statement splitting (the current `;` splitter is
   intentionally naive — see the TODO at `state/editor.rs`).
-- **Elapsed-time** rendering for in-flight queries.
 - **Query history** surfaced under each result block.

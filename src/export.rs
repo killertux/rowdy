@@ -156,6 +156,10 @@ fn cell_to_json(cell: &Cell) -> Value {
         // f64 NaN/Inf can't be represented in JSON; fall back to null rather
         // than producing invalid output or panicking.
         Cell::Float(v) => Number::from_f64(*v).map(Value::Number).unwrap_or(Value::Null),
+        // Emit NUMERIC/DECIMAL as a JSON string to avoid the precision loss
+        // we'd get from going through f64. Round-trips back into
+        // `BigDecimal::from_str` if the consumer needs the value.
+        Cell::Decimal(v) => Value::String(v.clone()),
         Cell::Text(v) => Value::String(v.clone()),
         Cell::Bytes(v) => Value::String(bytes_to_hex(v)),
         Cell::Timestamp(v) => Value::String(v.to_rfc3339()),

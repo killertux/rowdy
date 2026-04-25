@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
 pub enum QueryStatus {
@@ -6,6 +6,10 @@ pub enum QueryStatus {
     Idle,
     Running {
         query: String,
+        /// Wall-clock time the worker accepted the statement. Drives the
+        /// elapsed-time counter in the bottom bar; not used for routing
+        /// (request IDs are the source of truth for that).
+        started_at: Instant,
     },
     Succeeded {
         rows: usize,

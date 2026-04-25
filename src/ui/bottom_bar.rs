@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -112,7 +114,10 @@ fn render_status(status: &QueryStatus, area: Rect, buf: &mut Buffer, theme: &The
 fn describe(status: &QueryStatus, theme: &Theme) -> (Color, String) {
     match status {
         QueryStatus::Idle => (theme.status_idle, "idle".to_string()),
-        QueryStatus::Running { query, .. } => (theme.status_running, format!("running: {query}")),
+        QueryStatus::Running { query, started_at } => (
+            theme.status_running,
+            format!("running ({}): {query}", format_elapsed(started_at.elapsed())),
+        ),
         QueryStatus::Succeeded {
             rows,
             affected,
@@ -128,6 +133,23 @@ fn describe(status: &QueryStatus, theme: &Theme) -> (Color, String) {
         QueryStatus::Cancelled => (theme.status_idle, "cancelled".to_string()),
         QueryStatus::Notice { msg } => (theme.status_ok, msg.clone()),
     }
+}
+
+/// Human-friendly elapsed time. Sub-second values render in milliseconds so
+/// the user sees the counter move from the first frame; longer queries shift
+/// to seconds (one decimal) and minutes-and-seconds.
+fn format_elapsed(d: Duration) -> String {
+    let total_ms = d.as_millis();
+    if total_ms < 1000 {
+        return format!("{total_ms}ms");
+    }
+    let total_secs = d.as_secs();
+    if total_secs < 60 {
+        return format!("{:.1}s", d.as_secs_f32());
+    }
+    let m = total_secs / 60;
+    let s = total_secs % 60;
+    format!("{m}m {s}s")
 }
 
 fn render_yank_format_prompt(area: Rect, buf: &mut Buffer, theme: &Theme) {
@@ -150,4 +172,30 @@ fn render_yank_format_prompt(area: Rect, buf: &mut Buffer, theme: &Theme) {
         ),
     ]);
     line.render(area, buf);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_elapsed_uses_ms_below_one_second() {
+        assert_eq!(format_elapsed(Duration::from_millis(0)), "0ms");
+        assert_eq!(format_elapsed(Duration::from_millis(7)), "7ms");
+        assert_eq!(format_elapsed(Duration::from_millis(999)), "999ms");
+    }
+
+    #[test]
+    fn format_elapsed_uses_decimal_seconds_under_one_minute() {
+        assert_eq!(format_elapsed(Duration::from_millis(1000)), "1.0s");
+        assert_eq!(format_elapsed(Duration::from_millis(1500)), "1.5s");
+        assert_eq!(format_elapsed(Duration::from_secs(59)), "59.0s");
+    }
+
+    #[test]
+    fn format_elapsed_uses_minutes_seconds_at_or_above_one_minute() {
+        assert_eq!(format_elapsed(Duration::from_secs(60)), "1m 0s");
+        assert_eq!(format_elapsed(Duration::from_secs(83)), "1m 23s");
+        assert_eq!(format_elapsed(Duration::from_secs(3600)), "60m 0s");
+    }
 }

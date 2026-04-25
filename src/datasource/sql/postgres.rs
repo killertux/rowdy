@@ -344,9 +344,10 @@ fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
             .map(|opt| opt.map(|v| Cell::Float(v as f64)).unwrap_or(Cell::Null)),
         "FLOAT8" | "DOUBLE PRECISION" => decode_or_null::<f64>(row, idx)
             .map(|opt| opt.map(Cell::Float).unwrap_or(Cell::Null)),
-        // NUMERIC needs sqlx's `bigdecimal` or `decimal` feature to decode;
-        // without it we let it fall through to Cell::Other. Add the feature if
-        // we ever need exact-precision support here.
+        "NUMERIC" => decode_or_null::<sqlx::types::BigDecimal>(row, idx).map(|opt| {
+            opt.map(|v| Cell::Decimal(v.to_string()))
+                .unwrap_or(Cell::Null)
+        }),
         "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" => {
             decode_or_null::<String>(row, idx).map(|opt| opt.map(Cell::Text).unwrap_or(Cell::Null))
         }

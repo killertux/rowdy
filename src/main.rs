@@ -38,6 +38,7 @@ use crate::state::auth::{AuthKind, AuthState};
 use crate::state::conn_form::ConnFormState;
 use crate::state::conn_list::ConnListState;
 use crate::state::focus::{Mode, PendingChord};
+use crate::state::status::QueryStatus;
 use crate::terminal::Tui;
 use crate::worker::{WorkerCommand, WorkerEvent};
 
@@ -215,9 +216,10 @@ async fn run(
     let mut events = EventStream::new();
     while !app.should_quit {
         terminal.draw(|f| ui::render(app, f))?;
-        // Read the deadline once per iteration so the sleep is rebuilt each
-        // loop with whatever the latest edit pushed it to.
+        // Read the deadlines once per iteration so the sleeps are rebuilt
+        // each loop with whatever the latest edit pushed them to.
         let save_at = app.pending_save_at;
+        let tick_at = elapsed_tick_deadline(app);
         tokio::select! {
             terminal_event = events.next() => match terminal_event {
                 Some(Ok(ev)) => process_terminal_event(app, ev),
@@ -230,6 +232,11 @@ async fn run(
             },
             _ = wait_until_or_pending(save_at) => {
                 action::flush_session(app);
+            }
+            _ = wait_until_or_pending(tick_at) => {
+                // Wake the loop so the elapsed counter in the bottom bar
+                // advances. The redraw at the top of the next iteration
+                // does the actual work.
             }
         }
     }
@@ -248,6 +255,14 @@ async fn wait_until_or_pending(at: Option<tokio::time::Instant>) {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending::<()>().await,
     }
+}
+
+/// While a query is running, redraw every 500ms so the bottom-bar elapsed
+/// counter ticks even if the user is idle. Returns `None` otherwise so the
+/// branch stays dormant.
+fn elapsed_tick_deadline(app: &App) -> Option<tokio::time::Instant> {
+    matches!(app.status, QueryStatus::Running { .. })
+        .then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(500))
 }
 
 fn process_terminal_event(app: &mut App, ev: CtEvent) {

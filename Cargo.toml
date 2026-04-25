@@ -21,7 +21,7 @@ ratatui-textarea = "0.9.1"
 rpassword = "7.4.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "mysql", "chrono", "uuid", "json"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "mysql", "chrono", "uuid", "json", "bigdecimal"] }
 tokio = { version = "1.52.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 toml = "1.1.2"
 uuid = { version = "1.23.1", features = ["v4"] }

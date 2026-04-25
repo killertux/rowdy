@@ -8,6 +8,10 @@ pub enum Cell {
     Int(i64),
     UInt(u64),
     Float(f64),
+    /// Exact-precision numeric (Postgres NUMERIC, MySQL DECIMAL). Stored as
+    /// the canonical string form returned by the driver — keeps full
+    /// precision without dragging the `bigdecimal` type into our public API.
+    Decimal(String),
     Text(String),
     Bytes(Vec<u8>),
     Timestamp(DateTime<Utc>),
@@ -31,6 +35,7 @@ impl Cell {
             Self::Int(v) => v.to_string(),
             Self::UInt(v) => v.to_string(),
             Self::Float(v) => v.to_string(),
+            Self::Decimal(v) => v.clone(),
             Self::Text(v) => v.clone(),
             Self::Bytes(v) => format!("<{} bytes>", v.len()),
             Self::Timestamp(v) => v.to_rfc3339(),

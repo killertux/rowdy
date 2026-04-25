@@ -364,9 +364,10 @@ fn decode_typed(row: &MySqlRow, idx: usize, type_name: &str) -> Option<Cell> {
             .map(|opt| opt.map(|v| Cell::Float(v as f64)).unwrap_or(Cell::Null)),
         "DOUBLE" => decode_or_null::<f64>(row, idx)
             .map(|opt| opt.map(Cell::Float).unwrap_or(Cell::Null)),
-        // DECIMAL/NUMERIC need sqlx's `bigdecimal` feature; without it we let
-        // them fall through to Cell::Other. Add the feature if we ever need
-        // exact-precision support here.
+        "DECIMAL" | "NUMERIC" => decode_or_null::<sqlx::types::BigDecimal>(row, idx).map(|opt| {
+            opt.map(|v| Cell::Decimal(v.to_string()))
+                .unwrap_or(Cell::Null)
+        }),
         "VARCHAR" | "CHAR" | "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" | "ENUM" | "SET" => {
             decode_or_null::<String>(row, idx).map(|opt| opt.map(Cell::Text).unwrap_or(Cell::Null))
         }

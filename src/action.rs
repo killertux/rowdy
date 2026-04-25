@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::Event as CtEvent;
 use ratatui_textarea::{Input, TextArea};
@@ -50,12 +51,21 @@ pub enum Action {
     ResultYank,
     ResultYankFormat(ExportFormat),
     ResultCancelYankFormat,
-    Export(ExportFormat),
+    Export {
+        fmt: ExportFormat,
+        target: ExportTarget,
+    },
     ToggleTheme,
     Worker(WorkerEvent),
     Auth(AuthAction),
     ConnForm(ConnFormAction),
     ConnList(ConnListAction),
+}
+
+#[derive(Debug, Clone)]
+pub enum ExportTarget {
+    Clipboard,
+    File(PathBuf),
 }
 
 pub enum AuthAction {
@@ -154,7 +164,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::ResultYank => result_yank(app),
         Action::ResultYankFormat(fmt) => result_yank_format(app, fmt),
         Action::ResultCancelYankFormat => result_cancel_yank_format(app),
-        Action::Export(fmt) => export_command(app, fmt),
+        Action::Export { fmt, target } => export_command(app, fmt, target),
         Action::ToggleTheme => toggle_theme(app),
         Action::Worker(ev) => apply_worker_event(app, ev),
         Action::Auth(a) => apply_auth(app, a),
@@ -544,6 +554,7 @@ fn dispatch_query(app: &mut App, sql: String) {
     app.in_flight_query = Some(req);
     app.status = QueryStatus::Running {
         query: trimmed.clone(),
+        started_at: Instant::now(),
     };
     let _ = app
         .cmd_tx
@@ -1148,7 +1159,7 @@ fn result_cancel_yank_format(app: &mut App) {
 fn run_export_command(app: &mut App, args: &[&str]) {
     let Some(fmt_str) = args.first() else {
         app.status = QueryStatus::Failed {
-            error: "usage: :export csv|tsv|json".into(),
+            error: "usage: :export <csv|tsv|json> [path]".into(),
         };
         return;
     };
@@ -1158,10 +1169,27 @@ fn run_export_command(app: &mut App, args: &[&str]) {
         };
         return;
     };
-    apply(app, Action::Export(fmt));
+    // After the format token: nothing → clipboard. Otherwise the rest is a
+    // path; an optional leading `>` is allowed so users can write the
+    // shell-style `:export csv > out.csv`. Tokens are joined by single spaces
+    // (good enough for sane paths; the command line is already whitespace-
+    // tokenised by the time we get here).
+    let rest = &args[1..];
+    let target = match rest.first().copied() {
+        None => ExportTarget::Clipboard,
+        Some(">") if rest.len() == 1 => {
+            app.status = QueryStatus::Failed {
+                error: "missing path after `>`".into(),
+            };
+            return;
+        }
+        Some(">") => ExportTarget::File(expand_tilde(&rest[1..].join(" "))),
+        Some(_) => ExportTarget::File(expand_tilde(&rest.join(" "))),
+    };
+    apply(app, Action::Export { fmt, target });
 }
 
-fn export_command(app: &mut App, fmt: ExportFormat) {
+fn export_command(app: &mut App, fmt: ExportFormat, target: ExportTarget) {
     // Two routes:
     // - Inside an expanded result with an active selection → export the rect.
     // - Otherwise → export the latest result block in full.
@@ -1177,19 +1205,13 @@ fn export_command(app: &mut App, fmt: ExportFormat) {
             };
             return;
         };
-        clipboard::write(&app.log, &payload);
-        if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+        let drop_visual = matches!(target, ExportTarget::Clipboard);
+        finish_export(app, fmt, target, rect.rows(), rect.cols(), payload);
+        if drop_visual
+            && let Mode::ResultExpanded { view, .. } = &mut app.mode
+        {
             *view = ResultViewMode::Normal;
         }
-        app.status = QueryStatus::Notice {
-            msg: format!(
-                "exported {}×{} as {} ({} bytes)",
-                rect.rows(),
-                rect.cols(),
-                fmt.label(),
-                payload.len()
-            ),
-        };
         return;
     }
     let Some(block) = app.results.last() else {
@@ -1207,16 +1229,68 @@ fn export_command(app: &mut App, fmt: ExportFormat) {
     let payload = export::format(fmt, &columns, &rows);
     let row_count = rows.len();
     let col_count = columns.len();
-    clipboard::write(&app.log, &payload);
-    app.status = QueryStatus::Notice {
-        msg: format!(
-            "exported {}×{} as {} ({} bytes)",
-            row_count,
-            col_count,
-            fmt.label(),
-            payload.len()
-        ),
-    };
+    finish_export(app, fmt, target, row_count, col_count, payload);
+}
+
+/// Deliver `payload` to `target` and set the status line. The clipboard path
+/// is fire-and-forget (failures get logged inside `clipboard::write`); the
+/// file path surfaces I/O errors to the user since they typed the path.
+fn finish_export(
+    app: &mut App,
+    fmt: ExportFormat,
+    target: ExportTarget,
+    rows: usize,
+    cols: usize,
+    payload: String,
+) {
+    match target {
+        ExportTarget::Clipboard => {
+            clipboard::write(&app.log, &payload);
+            app.status = QueryStatus::Notice {
+                msg: format!(
+                    "exported {}×{} as {} ({} bytes)",
+                    rows,
+                    cols,
+                    fmt.label(),
+                    payload.len()
+                ),
+            };
+        }
+        ExportTarget::File(path) => match std::fs::write(&path, &payload) {
+            Ok(()) => {
+                app.status = QueryStatus::Notice {
+                    msg: format!(
+                        "exported {}×{} as {} to {} ({} bytes)",
+                        rows,
+                        cols,
+                        fmt.label(),
+                        path.display(),
+                        payload.len()
+                    ),
+                };
+            }
+            Err(err) => {
+                app.status = QueryStatus::Failed {
+                    error: format!("export failed: {err}"),
+                };
+            }
+        },
+    }
+}
+
+/// Expand a leading `~` / `~/` to `$HOME`. Anything else (including the
+/// `~user` form, which would need /etc/passwd) is passed through untouched.
+fn expand_tilde(path: &str) -> PathBuf {
+    if path == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    } else if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(path)
 }
 
 /// Slice the selected rectangle out of `block` and run it through the
@@ -1303,4 +1377,33 @@ fn load_session(app: &mut App, name: &str) {
     }
     app.editor_dirty = false;
     app.pending_save_at = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_tilde_substitutes_home() {
+        // SAFETY: tests run single-threaded by default in this crate; no
+        // other thread is racing on `HOME` here.
+        unsafe {
+            std::env::set_var("HOME", "/home/test-user");
+        }
+        assert_eq!(expand_tilde("~"), PathBuf::from("/home/test-user"));
+        assert_eq!(
+            expand_tilde("~/exports/foo.csv"),
+            PathBuf::from("/home/test-user/exports/foo.csv")
+        );
+        assert_eq!(
+            expand_tilde("/abs/path.csv"),
+            PathBuf::from("/abs/path.csv")
+        );
+        assert_eq!(
+            expand_tilde("relative/path.csv"),
+            PathBuf::from("relative/path.csv")
+        );
+        // A literal `~` inside a name (no slash) is left alone.
+        assert_eq!(expand_tilde("~foo/bar"), PathBuf::from("~foo/bar"));
+    }
 }
