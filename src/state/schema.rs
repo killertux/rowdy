@@ -51,6 +51,9 @@ pub struct SchemaPanel {
     pub root_load_state: LoadState,
     pub selected: Option<NodeId>,
     pub width: u16,
+    /// Index of the first visible row inside `visible_rows()`. Render keeps
+    /// this clamped so the selected node stays inside the viewport.
+    pub scroll_offset: usize,
 }
 
 /// Outcome of an `expand_or_descend`/`toggle` action: signals whether the
@@ -71,6 +74,33 @@ impl SchemaPanel {
             root_load_state: LoadState::NotLoaded,
             selected: None,
             width,
+            scroll_offset: 0,
+        }
+    }
+
+    /// Index of the selected node within `visible_rows()`, if any.
+    pub fn selected_index(&self) -> Option<usize> {
+        let sel = self.selected?;
+        self.visible_rows().iter().position(|r| r.id == sel)
+    }
+
+    /// Clamp `scroll_offset` so it never points past the last possible window
+    /// and so the currently-selected row sits inside the viewport. Called
+    /// from the render layer because `viewport_rows` depends on the rendered
+    /// area, which the state layer doesn't know.
+    pub fn clamp_scroll(&mut self, viewport_rows: usize) {
+        let total = self.visible_rows().len();
+        let view = viewport_rows.max(1);
+        let max_offset = total.saturating_sub(view);
+        if self.scroll_offset > max_offset {
+            self.scroll_offset = max_offset;
+        }
+        if let Some(idx) = self.selected_index() {
+            if idx < self.scroll_offset {
+                self.scroll_offset = idx;
+            } else if idx >= self.scroll_offset + view {
+                self.scroll_offset = idx + 1 - view;
+            }
         }
     }
 

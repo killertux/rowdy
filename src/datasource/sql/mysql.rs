@@ -12,17 +12,20 @@ use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
 use crate::datasource::{Column, Datasource, Dialect, QueryResult, Row as CellRow};
+use crate::log::Logger;
 
 const DEFAULT_POOL_SIZE: u32 = 3;
 const MARIADB_SCHEME: &str = "mariadb:";
 const MYSQL_SCHEME: &str = "mysql:";
+const TARGET: &str = "mysql";
 
 pub struct MysqlDatasource {
     pool: MySqlPool,
+    log: Logger,
 }
 
 impl MysqlDatasource {
-    pub async fn connect(url: &str) -> DatasourceResult<Self> {
+    pub async fn connect(url: &str, log: Logger) -> DatasourceResult<Self> {
         // sqlx only recognises `mysql://`; `mariadb://` is the same wire
         // protocol so we rewrite it before handing it off.
         let normalized = if let Some(rest) = url.strip_prefix(MARIADB_SCHEME) {
@@ -30,12 +33,20 @@ impl MysqlDatasource {
         } else {
             url.to_string()
         };
+        log.info(
+            TARGET,
+            format!("connecting to {}", super::redact_url(&normalized)),
+        );
         let pool = MySqlPoolOptions::new()
             .max_connections(DEFAULT_POOL_SIZE)
             .connect(&normalized)
             .await
-            .map_err(|e| DatasourceError::Connect(e.to_string()))?;
-        Ok(Self { pool })
+            .map_err(|e| {
+                log.error(TARGET, format!("connect failed: {e}"));
+                DatasourceError::Connect(e.to_string())
+            })?;
+        log.info(TARGET, "connected");
+        Ok(Self { pool, log })
     }
 }
 
@@ -184,37 +195,74 @@ impl Datasource for MysqlDatasource {
     }
 
     async fn execute(&self, statement: &str) -> DatasourceResult<QueryResult> {
+        self.log.info(
+            TARGET,
+            format!("execute: {}", super::one_line_sql(statement)),
+        );
         let started = Instant::now();
-        let rows = sqlx::query(statement)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(execute_err)?;
-        let elapsed = started.elapsed();
-        let columns = build_columns(&rows);
-        let rows = rows
-            .iter()
-            .map(|r| row_to_cells(r, columns.len()))
-            .collect();
-        Ok(QueryResult {
-            columns,
-            rows,
-            affected: None,
-            elapsed,
-        })
+        if super::is_row_returning(statement) {
+            let rows = sqlx::query(statement)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| {
+                    self.log.error(TARGET, format!("execute failed: {e}"));
+                    execute_err(e)
+                })?;
+            let elapsed = started.elapsed();
+            let columns = build_columns(&rows);
+            let rows: Vec<CellRow> = rows
+                .iter()
+                .map(|r| row_to_cells(r, columns.len()))
+                .collect();
+            self.log.info(
+                TARGET,
+                format!("execute ok: {} rows in {:?}", rows.len(), elapsed),
+            );
+            Ok(QueryResult {
+                columns,
+                rows,
+                affected: None,
+                elapsed,
+            })
+        } else {
+            let outcome = sqlx::query(statement)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| {
+                    self.log.error(TARGET, format!("execute failed: {e}"));
+                    execute_err(e)
+                })?;
+            let elapsed = started.elapsed();
+            let affected = outcome.rows_affected();
+            self.log.info(
+                TARGET,
+                format!("execute ok: {affected} affected in {elapsed:?}"),
+            );
+            Ok(QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                affected: Some(affected),
+                elapsed,
+            })
+        }
     }
 
     async fn cancel(&self) -> DatasourceResult<()> {
         // TODO: real cancel via `KILL QUERY <connection_id>` — needs the worker
         // to track the connection id of the in-flight query. For now the worker
         // aborts the JoinHandle, which drops the future on the client side.
+        self.log
+            .info(TARGET, "cancel (no-op until connection id tracking lands)");
         Ok(())
     }
 
     async fn close(self: Box<Self>) -> DatasourceResult<()> {
+        self.log.info(TARGET, "closing pool");
         self.pool.close().await;
         Ok(())
     }
 }
+
 
 fn build_columns(rows: &[MySqlRow]) -> Vec<Column> {
     let Some(first) = rows.first() else {
@@ -240,10 +288,26 @@ fn decode_cell(row: &MySqlRow, idx: usize) -> Cell {
     if let Some(cell) = decode_typed(row, idx, &type_name) {
         return cell;
     }
+    if let Some(cell) = decode_fallback(row, idx) {
+        return cell;
+    }
     Cell::Other {
         type_name,
         repr: String::new(),
     }
+}
+
+fn decode_fallback(row: &MySqlRow, idx: usize) -> Option<Cell> {
+    if let Some(opt) = decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx) {
+        return Some(opt.map(|w| Cell::Text(w.0.to_string())).unwrap_or(Cell::Null));
+    }
+    if let Some(opt) = decode_or_null::<String>(row, idx) {
+        return Some(opt.map(Cell::Text).unwrap_or(Cell::Null));
+    }
+    if let Some(opt) = decode_or_null::<Vec<u8>>(row, idx) {
+        return Some(opt.map(Cell::Bytes).unwrap_or(Cell::Null));
+    }
+    None
 }
 
 fn decode_typed(row: &MySqlRow, idx: usize, type_name: &str) -> Option<Cell> {
@@ -292,8 +356,8 @@ fn decode_typed(row: &MySqlRow, idx: usize, type_name: &str) -> Option<Cell> {
             .map(|opt| opt.map(|v| Cell::Text(v.to_string())).unwrap_or(Cell::Null)),
         "YEAR" => decode_or_null::<u16>(row, idx)
             .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
-        "JSON" => decode_or_null::<JsonValue>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Text(v.to_string())).unwrap_or(Cell::Null)),
+        "JSON" => decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx)
+            .map(|opt| opt.map(|w| Cell::Text(w.0.to_string())).unwrap_or(Cell::Null)),
         _ => None,
     }
 }

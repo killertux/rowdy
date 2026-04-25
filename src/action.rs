@@ -1,13 +1,19 @@
 use std::time::Instant;
 
 use ratatui::crossterm::event::Event as CtEvent;
+use ratatui_textarea::{Input, TextArea};
 
 use crate::app::{App, MAX_SCHEMA_WIDTH, MIN_SCHEMA_WIDTH};
+use crate::clipboard;
+use crate::connections::{self, ConnectionStore};
 use crate::datasource::QueryResult;
+use crate::state::auth::AuthKind;
 use crate::state::command::CommandBuffer;
+use crate::state::conn_form::{ConnFormPostSave, ConnFormState};
+use crate::state::conn_list::ConnListState;
 use crate::state::focus::{Focus, Mode, PendingChord};
 use crate::state::results::{ResultBlock, ResultCursor, ResultId, ResultPayload};
-use crate::state::schema::ExpandOutcome;
+use crate::state::schema::{ExpandOutcome, SchemaPanel};
 use crate::state::status::QueryStatus;
 use crate::ui::theme::{Theme, ThemeKind};
 use crate::worker::{IntrospectTarget, WorkerCommand, WorkerEvent};
@@ -34,13 +40,55 @@ pub enum Action {
     ResultNav(ResultNavAction),
     ToggleTheme,
     Worker(WorkerEvent),
+    Auth(AuthAction),
+    ConnForm(ConnFormAction),
+    ConnList(ConnListAction),
+}
+
+pub enum AuthAction {
+    Input(Input),
+    /// `None` reads the system clipboard; `Some(text)` is supplied directly
+    /// (bracketed paste from the terminal).
+    Paste(Option<String>),
+    Copy,
+    Cut,
+    Submit,
+    Cancel,
+}
+
+pub enum ConnFormAction {
+    Input(Input),
+    /// `None` reads the system clipboard; `Some(text)` is supplied directly
+    /// (bracketed paste from the terminal).
+    Paste(Option<String>),
+    Copy,
+    Cut,
+    ToggleFocus,
+    Submit,
+    Cancel,
+}
+
+pub enum ConnListAction {
+    Down,
+    Up,
+    Top,
+    Bottom,
+    UseSelected,
+    AddNew,
+    EditSelected,
+    BeginDelete,
+    ConfirmDelete,
+    CancelDelete,
+    Close,
 }
 
 pub enum CommandAction {
-    Insert(char),
-    Backspace,
-    MoveLeft,
-    MoveRight,
+    Input(Input),
+    /// `None` reads the system clipboard. `Some(text)` carries text supplied
+    /// by the terminal's bracketed-paste mode.
+    Paste(Option<String>),
+    Copy,
+    Cut,
     Submit,
     Cancel,
 }
@@ -89,6 +137,9 @@ pub fn apply(app: &mut App, action: Action) {
         Action::ResultNav(nav) => apply_result_nav(app, nav),
         Action::ToggleTheme => toggle_theme(app),
         Action::Worker(ev) => apply_worker_event(app, ev),
+        Action::Auth(a) => apply_auth(app, a),
+        Action::ConnForm(a) => apply_conn_form(app, a),
+        Action::ConnList(a) => apply_conn_list(app, a),
     }
 }
 
@@ -96,6 +147,7 @@ fn resize_schema(app: &mut App, delta: i16) {
     let next = (app.schema.width as i32 + delta as i32)
         .clamp(MIN_SCHEMA_WIDTH as i32, MAX_SCHEMA_WIDTH as i32);
     app.schema.width = next as u16;
+    persist_schema_width(app);
 }
 
 fn apply_command(app: &mut App, action: CommandAction) {
@@ -103,10 +155,12 @@ fn apply_command(app: &mut App, action: CommandAction) {
         return;
     };
     match action {
-        CommandAction::Insert(ch) => buf.insert(ch),
-        CommandAction::Backspace => buf.backspace(),
-        CommandAction::MoveLeft => buf.move_left(),
-        CommandAction::MoveRight => buf.move_right(),
+        CommandAction::Input(input) => {
+            let _ = buf.input.input(input);
+        }
+        CommandAction::Paste(text) => paste_into(&mut buf.input, &app.log, text),
+        CommandAction::Copy => copy_from(&mut buf.input, &app.log),
+        CommandAction::Cut => cut_from(&mut buf.input, &app.log),
         CommandAction::Cancel => app.mode = Mode::Normal,
         CommandAction::Submit => submit_command(app),
     }
@@ -116,7 +170,7 @@ fn submit_command(app: &mut App) {
     let Mode::Command(buf) = &app.mode else {
         return;
     };
-    let raw = buf.input.trim().to_string();
+    let raw = buf.text().trim().to_string();
     app.mode = Mode::Normal;
     run_command_line(app, &raw);
 }
@@ -135,12 +189,182 @@ fn run_command_line(app: &mut App, line: &str) {
         "expand" | "e" => expand_latest(app),
         "collapse" | "c" => app.mode = Mode::Normal,
         "theme" => set_theme(app, &args),
+        "conn" | "conns" => run_conn_command(app, &args),
         _ => {
             app.status = QueryStatus::Failed {
                 error: format!("unknown command: {cmd}"),
             };
         }
     }
+}
+
+fn run_conn_command(app: &mut App, args: &[&str]) {
+    let sub = args.first().copied();
+    let rest: Vec<&str> = args.iter().skip(1).copied().collect();
+    match sub {
+        None | Some("list") | Some("ls") => open_conn_list(app),
+        Some("add") => open_conn_form_create(app, rest.first().copied()),
+        Some("edit") => open_conn_form_edit_command(app, rest.first().copied()),
+        Some("delete") | Some("rm") => delete_connection_command(app, rest.first().copied()),
+        Some("use") => use_connection_command(app, rest.first().copied()),
+        Some(other) => {
+            app.status = QueryStatus::Failed {
+                error: format!("unknown :conn subcommand: {other} (use list/add/edit/delete/use)"),
+            };
+        }
+    }
+}
+
+fn open_conn_list(app: &mut App) {
+    let entries = app.config.connection_names();
+    if entries.is_empty() {
+        // Nothing to list — bounce straight to the create form so the user
+        // doesn't get an empty modal and have to type `:conn add` next.
+        app.mode = Mode::EditConnection(
+            ConnFormState::new_create().with_post_save(ConnFormPostSave::ReturnToList),
+        );
+        return;
+    }
+    let mut state = ConnListState::new(entries);
+    if let Some(active) = &app.active_connection
+        && let Some(idx) = state.entries.iter().position(|n| n == active)
+    {
+        state.selected = idx;
+    }
+    app.mode = Mode::ConnectionList(state);
+}
+
+fn open_conn_form_create(app: &mut App, name: Option<&str>) {
+    let mut form = ConnFormState::new_create().with_post_save(ConnFormPostSave::ReturnToList);
+    if let Some(n) = name {
+        form = form.with_prefilled_name(n);
+    }
+    app.mode = Mode::EditConnection(form);
+}
+
+fn open_conn_form_edit_command(app: &mut App, name: Option<&str>) {
+    let Some(name) = name else {
+        app.status = QueryStatus::Failed {
+            error: "usage: :conn edit <name>".into(),
+        };
+        return;
+    };
+    open_conn_form_edit(app, name, ConnFormPostSave::ReturnToList);
+}
+
+fn open_conn_form_edit(app: &mut App, name: &str, post_save: ConnFormPostSave) {
+    let entry = match app.config.connection(name).cloned() {
+        Some(e) => e,
+        None => {
+            app.status = QueryStatus::Failed {
+                error: format!("no connection named {name:?}"),
+            };
+            return;
+        }
+    };
+    let store = match app.connection_store.as_ref() {
+        Some(s) => s,
+        None => {
+            app.status = QueryStatus::Failed {
+                error: "internal: no connection store available".into(),
+            };
+            return;
+        }
+    };
+    let url = match store.lookup(&entry) {
+        Ok(s) => s.to_string(),
+        Err(err) => {
+            app.status = QueryStatus::Failed {
+                error: format!("decrypt {name:?} failed: {err}"),
+            };
+            return;
+        }
+    };
+    app.mode = Mode::EditConnection(
+        ConnFormState::editing(name.to_string(), url).with_post_save(post_save),
+    );
+}
+
+fn delete_connection_command(app: &mut App, name: Option<&str>) {
+    let Some(name) = name else {
+        app.status = QueryStatus::Failed {
+            error: "usage: :conn delete <name>".into(),
+        };
+        return;
+    };
+    perform_delete(app, name);
+}
+
+fn perform_delete(app: &mut App, name: &str) {
+    if Some(name) == app.active_connection.as_deref() {
+        app.status = QueryStatus::Failed {
+            error: format!("{name:?} is the active connection — :conn use another first"),
+        };
+        return;
+    }
+    match app.config.delete_connection(name) {
+        Ok(true) => {
+            app.log.info("conn", format!("deleted connection {name}"));
+            app.status = QueryStatus::Idle;
+        }
+        Ok(false) => {
+            app.status = QueryStatus::Failed {
+                error: format!("no connection named {name:?}"),
+            };
+        }
+        Err(err) => {
+            app.status = QueryStatus::Failed {
+                error: format!("delete failed: {err}"),
+            };
+        }
+    }
+}
+
+fn use_connection_command(app: &mut App, name: Option<&str>) {
+    let Some(name) = name else {
+        app.status = QueryStatus::Failed {
+            error: "usage: :conn use <name>".into(),
+        };
+        return;
+    };
+    use_connection(app, name);
+}
+
+fn use_connection(app: &mut App, name: &str) {
+    if Some(name) == app.active_connection.as_deref() {
+        app.status = QueryStatus::Failed {
+            error: format!("{name:?} is already active"),
+        };
+        return;
+    }
+    let entry = match app.config.connection(name).cloned() {
+        Some(e) => e,
+        None => {
+            app.status = QueryStatus::Failed {
+                error: format!("no connection named {name:?}"),
+            };
+            return;
+        }
+    };
+    let store = match app.connection_store.as_ref() {
+        Some(s) => s,
+        None => {
+            app.status = QueryStatus::Failed {
+                error: "internal: no connection store available".into(),
+            };
+            return;
+        }
+    };
+    let url = match store.lookup(&entry) {
+        Ok(s) => s.to_string(),
+        Err(err) => {
+            app.status = QueryStatus::Failed {
+                error: format!("decrypt {name:?} failed: {err}"),
+            };
+            return;
+        }
+    };
+    dispatch_connect(app, name.to_string(), url);
 }
 
 fn set_schema_width(app: &mut App, args: &[&str]) {
@@ -151,13 +375,14 @@ fn set_schema_width(app: &mut App, args: &[&str]) {
         return;
     };
     app.schema.width = value.clamp(MIN_SCHEMA_WIDTH, MAX_SCHEMA_WIDTH);
+    persist_schema_width(app);
 }
 
 fn set_theme(app: &mut App, args: &[&str]) {
     match args.first().copied() {
         None | Some("toggle") => toggle_theme(app),
         Some(name) => match ThemeKind::parse(name) {
-            Some(k) => app.theme = Theme::for_kind(k),
+            Some(k) => apply_theme(app, k),
             None => {
                 app.status = QueryStatus::Failed {
                     error: format!("unknown theme: {name} (use dark|light|toggle)"),
@@ -168,7 +393,21 @@ fn set_theme(app: &mut App, args: &[&str]) {
 }
 
 fn toggle_theme(app: &mut App) {
-    app.theme = Theme::for_kind(app.theme.kind.toggled());
+    apply_theme(app, app.theme.kind.toggled());
+}
+
+fn apply_theme(app: &mut App, kind: ThemeKind) {
+    app.theme = Theme::for_kind(kind);
+    if let Err(err) = app.config.set_theme(kind) {
+        app.log.warn("config", format!("save theme failed: {err}"));
+    }
+}
+
+fn persist_schema_width(app: &mut App) {
+    if let Err(err) = app.config.set_schema_width(app.schema.width) {
+        app.log
+            .warn("config", format!("save schema_width failed: {err}"));
+    }
 }
 
 fn apply_schema(app: &mut App, action: SchemaAction) {
@@ -302,11 +541,14 @@ fn expand_latest(app: &mut App) {
     app.mode = Mode::ResultExpanded {
         id: block.id,
         cursor: ResultCursor::default(),
+        col_offset: 0,
+        row_offset: 0,
     };
 }
 
 fn apply_result_nav(app: &mut App, nav: ResultNavAction) {
-    let Mode::ResultExpanded { id, cursor } = &mut app.mode else {
+    let Mode::ResultExpanded { id, cursor, .. } = &mut app.mode
+    else {
         return;
     };
     let Some(block) = app.results.iter().find(|b| b.id == *id) else {
@@ -345,6 +587,73 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
         WorkerEvent::SchemaFailed { target, error, .. } => {
             on_schema_failed(app, target, error.to_string())
         }
+        WorkerEvent::Connected { name } => on_connected(app, name),
+        WorkerEvent::ConnectFailed { name, error } => on_connect_failed(app, name, error.to_string()),
+    }
+}
+
+fn on_connected(app: &mut App, name: String) {
+    // Only react if we're still expecting this connection. A late event from
+    // an aborted swap would otherwise clobber the active connection.
+    let expected = matches!(&app.mode, Mode::Connecting { name: pending } if pending == &name);
+    if !expected {
+        return;
+    }
+    app.active_connection = Some(name.clone());
+    app.mode = Mode::Normal;
+    app.status = QueryStatus::Idle;
+    // Fresh tree — drop any nodes left over from the previous connection
+    // and re-fire the catalog load.
+    app.schema = SchemaPanel::new(app.schema.width);
+    app.results.clear();
+    let req = app.requests.next();
+    app.schema.begin_root_load();
+    let _ = app.cmd_tx.send(WorkerCommand::Introspect {
+        req,
+        target: IntrospectTarget::Catalogs,
+    });
+    app.log
+        .info("app", format!("connected to {name}"));
+}
+
+fn on_connect_failed(app: &mut App, name: String, error: String) {
+    let was_pending = matches!(&app.mode, Mode::Connecting { name: pending } if pending == &name);
+    if !was_pending {
+        return;
+    }
+    app.log
+        .warn("app", format!("connect failed for {name}: {error}"));
+
+    // Live switch (`:conn use`) — the previous datasource is still alive in
+    // the worker, so just surface the error and stay in Normal.
+    if app.active_connection.is_some() {
+        app.mode = Mode::Normal;
+        app.status = QueryStatus::Failed {
+            error: format!("connect to {name} failed: {error}"),
+        };
+        return;
+    }
+
+    // Initial connect — re-open the form pre-filled so the user can fix
+    // the URL and retry without losing what they typed.
+    let entry = app.config.connection(&name).cloned();
+    let store = app.connection_store.as_ref();
+    let prefill_url = match (entry, store) {
+        (Some(entry), Some(store)) => store.lookup(&entry).ok().map(|s| s.to_string()),
+        _ => None,
+    };
+    match prefill_url {
+        Some(url) => {
+            let mut form = ConnFormState::editing(name.clone(), url);
+            form.error = Some(format!("connect failed: {error}"));
+            app.mode = Mode::EditConnection(form);
+        }
+        None => {
+            app.mode = Mode::Normal;
+            app.status = QueryStatus::Failed {
+                error: format!("connect to {name} failed: {error}"),
+            };
+        }
     }
 }
 
@@ -376,22 +685,29 @@ fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResu
 
     let took = result.elapsed;
     let total_rows = result.rows.len();
-    let payload = build_payload(result.rows, total_rows);
-    let id = ResultId(app.results.len());
-    let query = match &app.status {
-        QueryStatus::Running { query, .. } => query.clone(),
-        _ => String::new(),
-    };
+    let affected = result.affected;
 
-    app.results.push(ResultBlock {
-        id,
-        query,
-        took,
-        columns: result.columns,
-        payload,
-    });
+    // Statements run via `execute()` (DML/DDL) report no columns — there's
+    // nothing to render in a result block, so skip pushing one.
+    if !result.columns.is_empty() {
+        let payload = build_payload(result.rows, total_rows);
+        let id = ResultId(app.results.len());
+        let query = match &app.status {
+            QueryStatus::Running { query, .. } => query.clone(),
+            _ => String::new(),
+        };
+        app.results.push(ResultBlock {
+            id,
+            query,
+            took,
+            columns: result.columns,
+            payload,
+        });
+    }
+
     app.status = QueryStatus::Succeeded {
         rows: total_rows,
+        affected,
         took,
     };
 }
@@ -417,4 +733,289 @@ fn on_query_failed(app: &mut App, req: crate::worker::RequestId, error: String) 
     }
     app.in_flight_query = None;
     app.status = QueryStatus::Failed { error };
+}
+
+// ---------------------------------------------------------------------------
+// Auth flow
+// ---------------------------------------------------------------------------
+
+fn apply_auth(app: &mut App, action: AuthAction) {
+    let Mode::Auth(state) = &mut app.mode else {
+        return;
+    };
+    match action {
+        AuthAction::Input(input) => {
+            let _ = state.input.input(input);
+        }
+        AuthAction::Paste(text) => paste_into(&mut state.input, &app.log, text),
+        // Copying a masked password buffer would defeat the masking;
+        // ignore copy/cut here.
+        AuthAction::Copy | AuthAction::Cut => {}
+        AuthAction::Cancel => app.should_quit = true,
+        AuthAction::Submit => auth_submit(app),
+    }
+}
+
+fn auth_submit(app: &mut App) {
+    let Mode::Auth(state) = &mut app.mode else {
+        return;
+    };
+    state.error = None;
+    let attempt = state
+        .input
+        .lines()
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    let kind = state.kind.clone();
+
+    match kind {
+        AuthKind::FirstSetup => {
+            let store = if attempt.is_empty() {
+                app.log.info("auth", "plaintext store chosen");
+                ConnectionStore::plaintext()
+            } else {
+                match connections::initialise_crypto(&attempt) {
+                    Ok((block, key)) => {
+                        if let Err(err) = app.config.set_crypto(block) {
+                            set_auth_error(app, format!("save crypto block failed: {err}"));
+                            return;
+                        }
+                        app.log.info("auth", "encrypted store initialised");
+                        ConnectionStore::encrypted(key)
+                    }
+                    Err(err) => {
+                        set_auth_error(app, format!("crypto setup failed: {err}"));
+                        return;
+                    }
+                }
+            };
+            app.connection_store = Some(store);
+            transition_post_auth(app);
+        }
+        AuthKind::Unlock { block } => match connections::unlock(&attempt, &block) {
+            Ok(key) => {
+                app.connection_store = Some(ConnectionStore::encrypted(key));
+                app.log.info("auth", "store unlocked");
+                transition_post_auth(app);
+            }
+            Err(_) => {
+                if let Mode::Auth(state) = &mut app.mode {
+                    state.attempts = state.attempts.saturating_add(1);
+                    state.clear_input();
+                    let remaining = state.attempts_remaining();
+                    if remaining == 0 {
+                        app.log.error("auth", "too many failed attempts; exiting");
+                        app.exit_code = 1;
+                        app.should_quit = true;
+                    } else {
+                        state.error = Some(format!(
+                            "wrong password ({} {} left)",
+                            remaining,
+                            if remaining == 1 { "attempt" } else { "attempts" }
+                        ));
+                    }
+                }
+            }
+        },
+    }
+}
+
+fn set_auth_error(app: &mut App, msg: String) {
+    if let Mode::Auth(state) = &mut app.mode {
+        state.error = Some(msg);
+    }
+}
+
+/// Decides what to render after the auth Mode resolves. Either jumps
+/// straight into a connection form (no saved connections) or opens the
+/// connection picker so the user can choose one.
+fn transition_post_auth(app: &mut App) {
+    let entries = app.config.connection_names();
+    if entries.is_empty() {
+        app.mode = Mode::EditConnection(ConnFormState::new_create());
+        return;
+    }
+    app.mode = Mode::ConnectionList(ConnListState::new(entries));
+}
+
+// ---------------------------------------------------------------------------
+// Connection-form flow
+// ---------------------------------------------------------------------------
+
+fn apply_conn_form(app: &mut App, action: ConnFormAction) {
+    let Mode::EditConnection(state) = &mut app.mode else {
+        return;
+    };
+    match action {
+        ConnFormAction::Input(input) => {
+            let _ = state.current_input_mut().input(input);
+        }
+        ConnFormAction::Paste(text) => paste_into(state.current_input_mut(), &app.log, text),
+        ConnFormAction::Copy => copy_from(state.current_input_mut(), &app.log),
+        ConnFormAction::Cut => cut_from(state.current_input_mut(), &app.log),
+        ConnFormAction::ToggleFocus => state.toggle_focus(),
+        ConnFormAction::Cancel => app.should_quit = true,
+        ConnFormAction::Submit => conn_form_submit(app),
+    }
+}
+
+fn conn_form_submit(app: &mut App) {
+    let Mode::EditConnection(state) = &mut app.mode else {
+        return;
+    };
+    state.error = None;
+    let name = state.name_value();
+    let url = state.url_value();
+    let post_save = state.post_save;
+
+    if name.is_empty() {
+        state.error = Some("name is required".into());
+        return;
+    }
+    if url.is_empty() {
+        state.error = Some("url is required".into());
+        return;
+    }
+
+    let store = match app.connection_store.as_ref() {
+        Some(s) => s,
+        None => {
+            state.error = Some("internal: no connection store available".into());
+            return;
+        }
+    };
+
+    let entry = match store.make_entry(name.clone(), &url) {
+        Ok(e) => e,
+        Err(err) => {
+            state.error = Some(format!("encrypt failed: {err}"));
+            return;
+        }
+    };
+    if let Err(err) = app.config.upsert_connection(entry) {
+        state.error = Some(format!("save failed: {err}"));
+        return;
+    }
+
+    app.log.info("conn", format!("saved connection {name}"));
+    match post_save {
+        ConnFormPostSave::AutoConnect => dispatch_connect(app, name, url),
+        ConnFormPostSave::ReturnToList => {
+            let entries = app.config.connection_names();
+            let mut list = ConnListState::new(entries);
+            if let Some(idx) = list.entries.iter().position(|n| n == &name) {
+                list.selected = idx;
+            }
+            app.mode = Mode::ConnectionList(list);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connection list
+// ---------------------------------------------------------------------------
+
+fn apply_conn_list(app: &mut App, action: ConnListAction) {
+    let Mode::ConnectionList(state) = &mut app.mode else {
+        return;
+    };
+    // While confirming a delete, only y/Enter and n/Esc do anything (handled
+    // via ConfirmDelete / CancelDelete).
+    if state.is_confirming() {
+        match action {
+            ConnListAction::ConfirmDelete => {
+                if let Some(name) = state.take_pending_delete() {
+                    perform_delete(app, &name);
+                    refresh_conn_list(app);
+                }
+            }
+            ConnListAction::CancelDelete => state.cancel_delete(),
+            _ => {}
+        }
+        return;
+    }
+    match action {
+        ConnListAction::Down => state.move_selection(1),
+        ConnListAction::Up => state.move_selection(-1),
+        ConnListAction::Top => state.jump_top(),
+        ConnListAction::Bottom => state.jump_bottom(),
+        ConnListAction::AddNew => {
+            app.mode = Mode::EditConnection(
+                ConnFormState::new_create().with_post_save(ConnFormPostSave::ReturnToList),
+            );
+        }
+        ConnListAction::EditSelected => {
+            if let Some(name) = state.selected_name().map(str::to_string) {
+                open_conn_form_edit(app, &name, ConnFormPostSave::ReturnToList);
+            }
+        }
+        ConnListAction::UseSelected => {
+            if let Some(name) = state.selected_name().map(str::to_string) {
+                use_connection(app, &name);
+            }
+        }
+        ConnListAction::BeginDelete => state.begin_delete(),
+        ConnListAction::Close => app.mode = Mode::Normal,
+        // Handled in the confirming branch above.
+        ConnListAction::ConfirmDelete | ConnListAction::CancelDelete => {}
+    }
+}
+
+fn refresh_conn_list(app: &mut App) {
+    if let Mode::ConnectionList(state) = &mut app.mode {
+        state.refresh(app.config.connection_names());
+        if state.entries.is_empty() {
+            app.mode = Mode::Normal;
+        }
+    }
+}
+
+pub(crate) fn dispatch_connect(app: &mut App, name: String, url: String) {
+    app.mode = Mode::Connecting { name: name.clone() };
+    app.status = QueryStatus::Idle;
+    let _ = app
+        .cmd_tx
+        .send(WorkerCommand::Connect { name, url });
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard helpers (shared across every TextArea-backed input)
+// ---------------------------------------------------------------------------
+
+fn paste_into(
+    input: &mut TextArea<'static>,
+    log: &crate::log::Logger,
+    supplied: Option<String>,
+) {
+    let text = match supplied {
+        Some(t) => t,
+        None => match clipboard::read(log) {
+            Some(t) => t,
+            None => return,
+        },
+    };
+    let _ = input.insert_str(text);
+}
+
+fn copy_from(input: &mut TextArea<'static>, log: &crate::log::Logger) {
+    // No-op when nothing is selected — TextArea's `copy()` would just no-op
+    // anyway, but we don't want to clobber the system clipboard with
+    // whatever's left in the yank buffer.
+    if input.selection_range().is_none() {
+        return;
+    }
+    input.copy();
+    let text = input.yank_text();
+    clipboard::write(log, &text);
+}
+
+fn cut_from(input: &mut TextArea<'static>, log: &crate::log::Logger) {
+    if input.selection_range().is_none() {
+        return;
+    }
+    let did_cut = input.cut();
+    if did_cut {
+        clipboard::write(log, &input.yank_text());
+    }
 }

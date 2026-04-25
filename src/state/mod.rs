@@ -1,4 +1,7 @@
+pub mod auth;
 pub mod command;
+pub mod conn_form;
+pub mod conn_list;
 pub mod editor;
 pub mod focus;
 pub mod results;

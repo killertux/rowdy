@@ -14,6 +14,7 @@ use crate::datasource::{
     CatalogInfo, ColumnInfo, Datasource, DatasourceError, IndexInfo, QueryResult, SchemaInfo,
     TableInfo,
 };
+use crate::log::Logger;
 pub use request::{RequestCounter, RequestId};
 
 #[derive(Debug)]
@@ -26,6 +27,13 @@ pub enum WorkerCommand {
     Introspect {
         req: RequestId,
         target: IntrospectTarget,
+    },
+    /// Open a new connection. On success the worker swaps its active
+    /// datasource (the previous one, if any, is dropped — its sqlx pool
+    /// closes on drop).
+    Connect {
+        name: String,
+        url: String,
     },
     Close,
 }
@@ -72,6 +80,13 @@ pub enum WorkerEvent {
         target: IntrospectTarget,
         error: DatasourceError,
     },
+    Connected {
+        name: String,
+    },
+    ConnectFailed {
+        name: String,
+        error: DatasourceError,
+    },
 }
 
 #[derive(Debug)]
@@ -84,24 +99,68 @@ pub enum SchemaPayload {
 }
 
 /// Runs until either the command channel closes or `Close` is received.
+/// Starts with no active datasource — the App is expected to send `Connect`
+/// once the user has chosen one.
 pub async fn run(
-    datasource: Box<dyn Datasource>,
+    logger: Logger,
     mut commands: UnboundedReceiver<WorkerCommand>,
     events: UnboundedSender<WorkerEvent>,
 ) {
-    let datasource: Arc<dyn Datasource> = Arc::from(datasource);
+    let mut datasource: Option<Arc<dyn Datasource>> = None;
     let mut current_query: Option<JoinHandle<()>> = None;
 
     while let Some(cmd) = commands.recv().await {
         match cmd {
             WorkerCommand::Close => break,
-            WorkerCommand::Cancel => cancel_query(&datasource, &mut current_query),
-            WorkerCommand::Execute { req, sql } => {
-                spawn_query(&datasource, &events, &mut current_query, req, sql);
+            WorkerCommand::Connect { name, url } => {
+                handle_connect(&logger, &events, &mut datasource, name, url).await;
             }
-            WorkerCommand::Introspect { req, target } => {
-                spawn_introspect(&datasource, &events, req, target);
-            }
+            WorkerCommand::Cancel => match &datasource {
+                Some(ds) => cancel_query(ds, &mut current_query),
+                None => logger.warn("worker", "cancel ignored: no active connection"),
+            },
+            WorkerCommand::Execute { req, sql } => match &datasource {
+                Some(ds) => spawn_query(ds, &events, &mut current_query, req, sql),
+                None => {
+                    let _ = events.send(WorkerEvent::QueryFailed {
+                        req,
+                        error: DatasourceError::Connect("no active connection".into()),
+                    });
+                }
+            },
+            WorkerCommand::Introspect { req, target } => match &datasource {
+                Some(ds) => spawn_introspect(ds, &events, req, target),
+                None => {
+                    let _ = events.send(WorkerEvent::SchemaFailed {
+                        req,
+                        target,
+                        error: DatasourceError::Connect("no active connection".into()),
+                    });
+                }
+            },
+        }
+    }
+}
+
+async fn handle_connect(
+    logger: &Logger,
+    events: &UnboundedSender<WorkerEvent>,
+    current: &mut Option<Arc<dyn Datasource>>,
+    name: String,
+    url: String,
+) {
+    logger.info("worker", format!("connect to {name}"));
+    match crate::datasource::connect(&url, logger.clone()).await {
+        Ok(new_ds) => {
+            // Drop the previous datasource — sqlx's pool closes on drop. We
+            // can't call `Datasource::close` on an `Arc<dyn …>` cleanly, and
+            // nothing today depends on graceful close.
+            *current = Some(Arc::from(new_ds));
+            let _ = events.send(WorkerEvent::Connected { name });
+        }
+        Err(error) => {
+            logger.warn("worker", format!("connect failed: {error}"));
+            let _ = events.send(WorkerEvent::ConnectFailed { name, error });
         }
     }
 }

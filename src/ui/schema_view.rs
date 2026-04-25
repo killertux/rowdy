@@ -17,9 +17,25 @@ impl Widget for SchemaPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let theme = &self.app.theme;
         let focused = self.app.focus == Focus::Schema;
-        let block = themed_block(theme, focused);
 
-        let lines: Vec<Line> = build_lines(&self.app.schema, theme);
+        let visible_rows = self.app.schema.visible_rows();
+        let viewport = area.height.saturating_sub(2) as usize;
+        let total = visible_rows.len();
+        let offset = self.app.schema.scroll_offset.min(total.saturating_sub(1));
+        let end = (offset + viewport).min(total);
+
+        let block = themed_block(theme, focused, scroll_indicator(offset, end, total));
+
+        let lines: Vec<Line> = if visible_rows.is_empty() {
+            root_placeholder_line(&self.app.schema, theme)
+                .map(|l| vec![l])
+                .unwrap_or_default()
+        } else {
+            visible_rows[offset..end]
+                .iter()
+                .map(|row| render_row(&self.app.schema, *row, theme))
+                .collect()
+        };
 
         Paragraph::new(lines)
             .block(block)
@@ -28,15 +44,15 @@ impl Widget for SchemaPane<'_> {
     }
 }
 
-fn build_lines(schema: &SchemaPanel, theme: &Theme) -> Vec<Line<'static>> {
-    if let Some(line) = root_placeholder_line(schema, theme) {
-        return vec![line];
+/// Renders nothing when the whole list fits, otherwise a `[a-b/total]` range
+/// with arrow markers showing which directions can still scroll.
+fn scroll_indicator(offset: usize, end: usize, total: usize) -> Option<String> {
+    if total == 0 || end - offset >= total {
+        return None;
     }
-    schema
-        .visible_rows()
-        .iter()
-        .map(|row| render_row(schema, *row, theme))
-        .collect()
+    let up = if offset > 0 { "↑" } else { " " };
+    let down = if end < total { "↓" } else { " " };
+    Some(format!(" {up}{down} {}-{}/{} ", offset + 1, end, total))
 }
 
 fn root_placeholder_line(schema: &SchemaPanel, theme: &Theme) -> Option<Line<'static>> {
@@ -122,16 +138,20 @@ fn node_glyph(kind: NodeKind, expanded: bool, has_children: bool) -> &'static st
     }
 }
 
-fn themed_block<'a>(theme: &Theme, focused: bool) -> Block<'a> {
+fn themed_block<'a>(theme: &Theme, focused: bool, scroll: Option<String>) -> Block<'a> {
     let border = if focused {
         theme.border_focus
     } else {
         theme.border
     };
+    let title = match scroll {
+        Some(extra) => format!(" schema{extra}"),
+        None => " schema ".to_string(),
+    };
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border).bg(theme.bg))
-        .title(" schema ")
+        .title(title)
         .title_style(Style::default().fg(theme.fg).bg(theme.bg))
         .style(Style::default().bg(theme.bg))
 }

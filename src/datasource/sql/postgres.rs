@@ -13,21 +13,29 @@ use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
 use crate::datasource::{Column, Datasource, Dialect, QueryResult, Row as CellRow};
+use crate::log::Logger;
 
 const DEFAULT_POOL_SIZE: u32 = 3;
+const TARGET: &str = "postgres";
 
 pub struct PostgresDatasource {
     pool: PgPool,
+    log: Logger,
 }
 
 impl PostgresDatasource {
-    pub async fn connect(url: &str) -> DatasourceResult<Self> {
+    pub async fn connect(url: &str, log: Logger) -> DatasourceResult<Self> {
+        log.info(TARGET, format!("connecting to {}", super::redact_url(url)));
         let pool = PgPoolOptions::new()
             .max_connections(DEFAULT_POOL_SIZE)
             .connect(url)
             .await
-            .map_err(|e| DatasourceError::Connect(e.to_string()))?;
-        Ok(Self { pool })
+            .map_err(|e| {
+                log.error(TARGET, format!("connect failed: {e}"));
+                DatasourceError::Connect(e.to_string())
+            })?;
+        log.info(TARGET, "connected");
+        Ok(Self { pool, log })
     }
 }
 
@@ -167,37 +175,74 @@ impl Datasource for PostgresDatasource {
     }
 
     async fn execute(&self, statement: &str) -> DatasourceResult<QueryResult> {
+        self.log.info(
+            TARGET,
+            format!("execute: {}", super::one_line_sql(statement)),
+        );
         let started = Instant::now();
-        let rows = sqlx::query(statement)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(execute_err)?;
-        let elapsed = started.elapsed();
-        let columns = build_columns(&rows);
-        let rows = rows
-            .iter()
-            .map(|r| row_to_cells(r, columns.len()))
-            .collect();
-        Ok(QueryResult {
-            columns,
-            rows,
-            affected: None,
-            elapsed,
-        })
+        if super::is_row_returning(statement) {
+            let rows = sqlx::query(statement)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| {
+                    self.log.error(TARGET, format!("execute failed: {e}"));
+                    execute_err(e)
+                })?;
+            let elapsed = started.elapsed();
+            let columns = build_columns(&rows);
+            let rows: Vec<CellRow> = rows
+                .iter()
+                .map(|r| row_to_cells(r, columns.len()))
+                .collect();
+            self.log.info(
+                TARGET,
+                format!("execute ok: {} rows in {:?}", rows.len(), elapsed),
+            );
+            Ok(QueryResult {
+                columns,
+                rows,
+                affected: None,
+                elapsed,
+            })
+        } else {
+            let outcome = sqlx::query(statement)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| {
+                    self.log.error(TARGET, format!("execute failed: {e}"));
+                    execute_err(e)
+                })?;
+            let elapsed = started.elapsed();
+            let affected = outcome.rows_affected();
+            self.log.info(
+                TARGET,
+                format!("execute ok: {affected} affected in {elapsed:?}"),
+            );
+            Ok(QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                affected: Some(affected),
+                elapsed,
+            })
+        }
     }
 
     async fn cancel(&self) -> DatasourceResult<()> {
         // TODO: real cancel via pg_cancel_backend(pid) — needs the worker to
         // track the backend PID of the in-flight query. For now the worker
         // aborts the JoinHandle, which drops the future on the client side.
+        self.log
+            .info(TARGET, "cancel (no-op until backend pid tracking lands)");
         Ok(())
     }
 
     async fn close(self: Box<Self>) -> DatasourceResult<()> {
+        self.log.info(TARGET, "closing pool");
         self.pool.close().await;
         Ok(())
     }
 }
+
 
 fn build_columns(rows: &[PgRow]) -> Vec<Column> {
     let Some(first) = rows.first() else {
@@ -223,13 +268,35 @@ fn decode_cell(row: &PgRow, idx: usize) -> Cell {
     if let Some(cell) = decode_typed(row, idx, &type_name) {
         return cell;
     }
+    // Defensive fallback for types not enumerated above (or branches whose
+    // decoder failed). sqlx's `compatible()` check makes each attempt a
+    // no-op against incompatible columns, so this is safe.
+    if let Some(cell) = decode_fallback(row, idx) {
+        return cell;
+    }
     Cell::Other {
         type_name,
         repr: String::new(),
     }
 }
 
+fn decode_fallback(row: &PgRow, idx: usize) -> Option<Cell> {
+    if let Some(opt) = decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx) {
+        return Some(opt.map(|w| Cell::Text(w.0.to_string())).unwrap_or(Cell::Null));
+    }
+    if let Some(opt) = decode_or_null::<String>(row, idx) {
+        return Some(opt.map(Cell::Text).unwrap_or(Cell::Null));
+    }
+    if let Some(opt) = decode_or_null::<Vec<u8>>(row, idx) {
+        return Some(opt.map(Cell::Bytes).unwrap_or(Cell::Null));
+    }
+    None
+}
+
 fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
+    if let Some(inner) = type_name.strip_suffix("[]") {
+        return decode_array(row, idx, type_name, inner);
+    }
     match type_name {
         "BOOL" => decode_or_null::<bool>(row, idx)
             .map(|opt| opt.map(Cell::Bool).unwrap_or(Cell::Null)),
@@ -262,8 +329,8 @@ fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
             .map(|opt| opt.map(Cell::Time).unwrap_or(Cell::Null)),
         "UUID" => decode_or_null::<Uuid>(row, idx)
             .map(|opt| opt.map(Cell::Uuid).unwrap_or(Cell::Null)),
-        "JSON" | "JSONB" => decode_or_null::<JsonValue>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Text(v.to_string())).unwrap_or(Cell::Null)),
+        "JSON" | "JSONB" => decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx)
+            .map(|opt| opt.map(|w| Cell::Text(w.0.to_string())).unwrap_or(Cell::Null)),
         _ => None,
     }
 }
@@ -273,6 +340,63 @@ where
     T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
 {
     row.try_get::<Option<T>, _>(idx).ok()
+}
+
+/// Postgres exposes arrays with a `[]` suffix on the type name (e.g.
+/// `JSONB[]`). Strip it, decode `Vec<Option<T>>` for the inner type, and
+/// render as a JSON-shaped literal so the TUI shows something useful.
+fn decode_array(row: &PgRow, idx: usize, type_name: &str, inner: &str) -> Option<Cell> {
+    match inner {
+        "BOOL" => format_array::<bool, _>(row, idx, type_name, |v| v.to_string()),
+        "INT2" | "SMALLINT" => format_array::<i16, _>(row, idx, type_name, |v| v.to_string()),
+        "INT4" | "INT" | "INTEGER" => {
+            format_array::<i32, _>(row, idx, type_name, |v| v.to_string())
+        }
+        "INT8" | "BIGINT" => format_array::<i64, _>(row, idx, type_name, |v| v.to_string()),
+        "FLOAT4" | "REAL" => format_array::<f32, _>(row, idx, type_name, |v| v.to_string()),
+        "FLOAT8" | "DOUBLE PRECISION" => {
+            format_array::<f64, _>(row, idx, type_name, |v| v.to_string())
+        }
+        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" => {
+            format_array::<String, _>(row, idx, type_name, json_string)
+        }
+        "UUID" => format_array::<Uuid, _>(row, idx, type_name, |v| json_string(v.to_string())),
+        "JSON" | "JSONB" => format_array::<sqlx::types::Json<JsonValue>, _>(
+            row,
+            idx,
+            type_name,
+            |w| w.0.to_string(),
+        ),
+        _ => None,
+    }
+}
+
+fn format_array<'r, T, F>(row: &'r PgRow, idx: usize, type_name: &str, fmt: F) -> Option<Cell>
+where
+    T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+    F: Fn(T) -> String,
+    Vec<Option<T>>: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+{
+    let opt: Option<Vec<Option<T>>> = row.try_get::<Option<Vec<Option<T>>>, _>(idx).ok()?;
+    Some(match opt {
+        None => Cell::Null,
+        Some(items) => {
+            let parts: Vec<String> = items
+                .into_iter()
+                .map(|o| o.map(&fmt).unwrap_or_else(|| "null".to_string()))
+                .collect();
+            Cell::Other {
+                type_name: type_name.to_string(),
+                repr: format!("[{}]", parts.join(", ")),
+            }
+        }
+    })
+}
+
+/// JSON-encodes a string (handles quoting and escaping). Used so array
+/// elements render as valid JSON literals.
+fn json_string(s: String) -> String {
+    serde_json::Value::String(s).to_string()
 }
 
 fn introspect_err(err: sqlx::Error) -> DatasourceError {

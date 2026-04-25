@@ -35,7 +35,11 @@ exploring schemas, and inspecting results — all without leaving the terminal.
   - **MySQL / MariaDB** — schema via `information_schema`, `column_type` for
     declared types (preserves `unsigned`, display widths, etc.).
 - **Two themes** (Dark / Light) switchable at runtime, both tuned for high
-  text contrast.
+  text contrast. Theme + schema-panel width persist to
+  `./.rowdy/config.toml` (lazily — the file is only created the first time
+  you change a default).
+- **File logger** at `./.rowdy/<datetime>.log`. The app and every datasource
+  write into the same file (connect / execute / cancel / errors).
 - **Vim-style modal input** end-to-end: editor uses real vim bindings via
   edtui; the schema panel and result viewer use the same `hjkl` / `gg` / `G`
   vocabulary.
@@ -86,9 +90,10 @@ State is encoded so that invalid combinations are unrepresentable wherever
 possible:
 
 - `Focus { Editor, Schema }` — exactly one panel owns input.
-- `Mode { Normal, Command(CommandBuffer), ResultExpanded { id, cursor },
-  ConfirmRun { statement } }` — no "expanded but no result" state, no "in
-  command mode but no buffer", no "awaiting confirmation but no statement".
+- `Mode { Normal, Command(CommandBuffer), ResultExpanded { id, cursor,
+  col_offset }, ConfirmRun { statement } }` — no "expanded but no result"
+  state, no "in command mode but no buffer", no "awaiting confirmation but
+  no statement".
 - `QueryStatus { Idle, Running, Succeeded, Failed, Cancelled }` — replaces a
   bag of booleans / `Option<String>` fields.
 - `ResultPayload { Clipped, Full }` — variant says whether more rows exist;
@@ -136,6 +141,39 @@ cargo run -- --connection sqlite:./sample.db
 Requires Rust 2024 edition (≥ 1.85) and a terminal that supports truecolor
 for accurate theme rendering.
 
+### Non-TUI connection management
+
+You can manage saved connections without launching the TUI:
+
+```sh
+rowdy connections list
+rowdy connections add <name> --url <url> [--password <pw>]
+rowdy connections edit <name> --url <url> [--password <pw>]   # overwrite
+rowdy connections delete <name>
+```
+
+Password handling mirrors the TUI:
+
+- **Flag absent** — prompts on stdin (masked). `rpassword` falls back to
+  reading from a pipe if stdin isn't a TTY.
+- **`--password X`** (non-empty) — uses `X`. On a fresh store this also
+  initialises the crypto block.
+- **`--password ""`** — explicit "no encryption". Only valid against an empty
+  store or an existing plaintext store; refused against an encrypted one.
+
+`list` and `delete` never touch the password — they're pure config edits.
+
+### Per-directory state: `.rowdy/`
+
+On startup rowdy creates `.rowdy/` in the current working directory if it
+doesn't exist. It holds:
+
+- `config.toml` — theme + schema panel width. Written **lazily** on the
+  first change away from defaults; a vanilla session never creates it.
+- `<datetime>.log` — one file per session, named for the launch time.
+  Append-only. The app and every datasource log into it (connect /
+  execute / cancel / errors). URL passwords are redacted.
+
 ### Sample database
 
 A seed program creates a small e-commerce schema (4 tables, 1 view, 5
@@ -165,6 +203,26 @@ panel is focused).
 | `Ctrl+W` then `h`/`l` | Focus editor / schema                                 |
 | `Ctrl+W` then `<`/`>` | Grow / shrink schema panel width                      |
 | `Ctrl+C`              | Panic exit (use `:q` for a clean quit)                |
+
+### Clipboard
+
+In any input modal (auth prompt, connection form, `:` command prompt) the
+standard system-clipboard shortcuts are wired up:
+
+| Keys                                                    | Action |
+|---------------------------------------------------------|--------|
+| `Ctrl+V` / `Ctrl+Shift+V` / `Cmd+V`                     | Paste  |
+| `Ctrl+C` / `Ctrl+Shift+C` / `Cmd+C` (with selection)    | Copy   |
+| `Ctrl+X` / `Ctrl+Shift+X` / `Cmd+X` (with selection)    | Cut    |
+
+Copy is suppressed in the password prompt — exposing the masked buffer
+would defeat the masking. Bracketed paste from the terminal (which is what
+most macOS terminals deliver for `Cmd+V`) is also accepted.
+
+In the SQL editor, edtui's vim bindings drive the clipboard: `y` yanks,
+`p` pastes, `d` cuts. They go through the system clipboard automatically
+(via `arboard`), so you can yank in rowdy and paste into another app, or
+vice versa.
 
 ### Editor — leader chord (Space)
 
@@ -226,6 +284,12 @@ When you've expanded a result block (`<Space>e` or `:expand`).
 | `gg` / `G`   | First / last row             |
 | `q` / `Esc`  | Close expanded view          |
 
+When the result has more columns than fit on screen the view scrolls
+horizontally to keep the cursor visible. The title shows `cols X-Y of Z`
+with `‹`/`›` markers when there are columns off-screen on either side. The
+inline preview shows only the leftmost columns that fit and a `+N →` count
+of how many were truncated — expand it to navigate.
+
 ### Command prompt
 
 After pressing `:`.
@@ -250,6 +314,26 @@ After pressing `:`.
 | `:width <cols>`              | Set schema panel width (clamped 12–80)                          |
 | `:theme dark` \| `light`     | Switch theme                                                    |
 | `:theme toggle` \| `:theme`  | Flip between Dark and Light                                     |
+| `:conn`, `:conn list`        | Open the connection list                                        |
+| `:conn add <name>`           | Open the form to create `<name>`                                |
+| `:conn edit <name>`          | Open the form pre-filled with `<name>`'s URL (overwrite on save) |
+| `:conn delete <name>`        | Remove `<name>` (refuses if it's the active connection)         |
+| `:conn use <name>`           | Switch the active connection live                               |
+
+### Connection list
+
+Opened via `:conn`. Browseable with vim keys; the active connection is
+marked with `●`.
+
+| Keys           | Action                                                |
+|----------------|-------------------------------------------------------|
+| `j` / `k`      | Move selection                                        |
+| `g` / `G`      | Jump to top / bottom                                  |
+| `Enter` / `u`  | Switch to the selected connection                     |
+| `a`            | Add a new connection (form opens)                     |
+| `e`            | Edit the selected (form opens, pre-filled)            |
+| `d`            | Delete the selected (`y`/`Enter` confirms, `n`/`Esc`) |
+| `Esc` / `q`    | Close the list                                        |
 
 ## Project layout
 
@@ -259,7 +343,12 @@ src/
   app.rs                  App state + cmd_tx handle to the worker
   action.rs               Action enum, apply() dispatcher, command parser
   event.rs                crossterm Event → Action translation
-  cli.rs                  clap arg parsing (--connection)
+  cli.rs                  clap arg parsing (--connection NAME, --password)
+  crypto.rs               argon2id KDF + chacha20poly1305 AEAD primitives
+  connections.rs          ConnectionStore: encrypt/decrypt, unlock, make_entry
+  config.rs               .rowdy/config.toml load + lazy save
+  log.rs                  Logger — Arc<Mutex<File>>, info/warn/error
+  subcommands.rs          non-TUI `rowdy connections …` handlers
   terminal.rs             terminal init / restore / panic hook
   state/                  sub-state modules
     editor.rs             EditorPanel + statement-under-cursor parser
@@ -268,6 +357,9 @@ src/
     command.rs            CommandBuffer
     focus.rs              Focus + Mode + PendingChord
     status.rs             QueryStatus
+    auth.rs               AuthState (password buffer + attempt counter)
+    conn_form.rs          ConnFormState (name + url two-field form)
+    conn_list.rs          ConnListState (saved connections, with delete-confirm)
   datasource/
     mod.rs                Datasource trait + connect() factory
     cell.rs               typed Cell enum + display helpers
@@ -285,6 +377,9 @@ src/
     editor_view.rs        edtui rendering with themed block + highlights
     schema_view.rs        tree + load-state glyphs
     results_view.rs       inline preview + expanded grid
+    auth_view.rs          centered password prompt
+    conn_form_view.rs     centered name+url form
+    conn_list_view.rs     centered connection picker
     bottom_bar.rs         status / command / confirm-run prompt
     theme.rs              Dark + Light palettes
 examples/

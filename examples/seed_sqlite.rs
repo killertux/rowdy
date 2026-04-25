@@ -43,17 +43,41 @@ async fn main() -> Result<()> {
     let item_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM order_items")
         .fetch_one(&pool)
         .await?;
+    let event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(&pool)
+        .await?;
+    let metric_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM wide_metrics")
+        .fetch_one(&pool)
+        .await?;
 
     pool.close().await;
 
     println!("seeded {path}");
-    println!("  users:       {user_count}");
-    println!("  orders:      {order_count}");
-    println!("  order_items: {item_count}");
+    println!("  users:        {user_count}");
+    println!("  orders:       {order_count}");
+    println!("  order_items:  {item_count}");
+    println!("  events:       {event_count}   (vertical scroll)");
+    println!("  wide_metrics: {metric_count}   (horizontal scroll, 35 columns)");
+    println!("  + 10 lookup tables to stretch the schema tree");
     println!("\ntry:");
     println!("  cargo run -- --connection sqlite:{path}");
     Ok(())
 }
+
+const LOOKUP_TABLES: &[&str] = &[
+    "regions",
+    "currencies",
+    "languages",
+    "time_zones",
+    "feature_flags",
+    "settings",
+    "sessions",
+    "api_keys",
+    "webhooks",
+    "email_templates",
+];
+
+const METRIC_COLUMN_COUNT: usize = 32;
 
 async fn drop_objects(pool: &sqlx::SqlitePool) -> Result<()> {
     for stmt in [
@@ -62,8 +86,15 @@ async fn drop_objects(pool: &sqlx::SqlitePool) -> Result<()> {
         "DROP TABLE IF EXISTS orders",
         "DROP TABLE IF EXISTS products",
         "DROP TABLE IF EXISTS users",
+        "DROP TABLE IF EXISTS events",
+        "DROP TABLE IF EXISTS wide_metrics",
     ] {
         sqlx::query(stmt).execute(pool).await?;
+    }
+    for table in LOOKUP_TABLES {
+        sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
@@ -115,7 +146,51 @@ async fn create_schema(pool: &sqlx::SqlitePool) -> Result<()> {
     for stmt in schema.split(';').map(str::trim).filter(|s| !s.is_empty()) {
         sqlx::query(stmt).execute(pool).await?;
     }
+
+    sqlx::query(
+        "CREATE TABLE events (
+            id           INTEGER PRIMARY KEY,
+            kind         TEXT    NOT NULL,
+            actor        TEXT    NOT NULL,
+            severity     TEXT    NOT NULL,
+            payload      TEXT,
+            occurred_at  TEXT    NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX events_occurred_at_idx ON events(occurred_at)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query(&wide_metrics_create()).execute(pool).await?;
+
+    for table in LOOKUP_TABLES {
+        sqlx::query(&format!(
+            "CREATE TABLE {table} (\
+                id    INTEGER PRIMARY KEY, \
+                name  TEXT NOT NULL, \
+                notes TEXT\
+             )"
+        ))
+        .execute(pool)
+        .await?;
+    }
+
     Ok(())
+}
+
+/// Builds the `CREATE TABLE wide_metrics` statement with `METRIC_COLUMN_COUNT`
+/// generated metric columns alternating between INTEGER and REAL.
+fn wide_metrics_create() -> String {
+    let mut cols = String::from(
+        "id INTEGER PRIMARY KEY, recorded_on TEXT NOT NULL, source TEXT NOT NULL",
+    );
+    for i in 1..=METRIC_COLUMN_COUNT {
+        let ty = if i % 2 == 0 { "INTEGER" } else { "REAL" };
+        cols.push_str(&format!(", metric_{i:02} {ty}"));
+    }
+    format!("CREATE TABLE wide_metrics ({cols})")
 }
 
 async fn seed_data(pool: &sqlx::SqlitePool) -> Result<()> {
@@ -123,6 +198,9 @@ async fn seed_data(pool: &sqlx::SqlitePool) -> Result<()> {
     seed_products(pool).await?;
     seed_orders(pool).await?;
     seed_order_items(pool).await?;
+    seed_events(pool).await?;
+    seed_wide_metrics(pool).await?;
+    seed_lookup_tables(pool).await?;
     Ok(())
 }
 
@@ -241,6 +319,115 @@ async fn seed_order_items(pool: &sqlx::SqlitePool) -> Result<()> {
             .execute(pool)
             .await?;
         }
+    }
+    Ok(())
+}
+
+async fn seed_events(pool: &sqlx::SqlitePool) -> Result<()> {
+    const N: i64 = 5_000;
+    let kinds = [
+        "login",
+        "logout",
+        "view",
+        "click",
+        "purchase",
+        "refund",
+        "signup",
+        "error",
+    ];
+    let severities = ["info", "info", "info", "warn", "error"];
+
+    // One transaction so 5k inserts stay snappy.
+    let mut tx = pool.begin().await?;
+    for i in 0..N {
+        let kind = kinds[(i as usize) % kinds.len()];
+        let severity = severities[(i as usize) % severities.len()];
+        let actor = format!("user_{:04}", (i % 250) + 1);
+        let payload = if i % 5 == 0 {
+            None
+        } else {
+            Some(format!("{{\"seq\":{i},\"kind\":\"{kind}\"}}"))
+        };
+        let day = (i % 28) + 1;
+        let month = ((i / 28) % 12) + 1;
+        let hour = i % 24;
+        let minute = (i * 7) % 60;
+        let occurred_at = format!("2025-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z");
+        sqlx::query(
+            "INSERT INTO events(kind, actor, severity, payload, occurred_at) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(kind)
+        .bind(&actor)
+        .bind(severity)
+        .bind(payload.as_deref())
+        .bind(&occurred_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn seed_wide_metrics(pool: &sqlx::SqlitePool) -> Result<()> {
+    const N: i64 = 60;
+    let placeholders = std::iter::repeat_n("?", METRIC_COLUMN_COUNT + 2)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let columns = {
+        let mut c = String::from("recorded_on, source");
+        for i in 1..=METRIC_COLUMN_COUNT {
+            c.push_str(&format!(", metric_{i:02}"));
+        }
+        c
+    };
+    let stmt = format!("INSERT INTO wide_metrics({columns}) VALUES ({placeholders})");
+
+    let sources = ["web", "mobile", "api", "batch"];
+    let mut tx = pool.begin().await?;
+    for i in 0..N {
+        let day = (i % 28) + 1;
+        let month = ((i / 28) % 12) + 1;
+        let recorded_on = format!("2025-{month:02}-{day:02}");
+        let source = sources[(i as usize) % sources.len()];
+        let mut q = sqlx::query(&stmt).bind(&recorded_on).bind(source);
+        for col in 1..=(METRIC_COLUMN_COUNT as i64) {
+            // Sprinkle NULLs into ~one column in ten so the dim styling is visible.
+            let null_slot = (i + col) % 10 == 0;
+            if null_slot {
+                q = q.bind(Option::<f64>::None);
+            } else if col % 2 == 0 {
+                q = q.bind((i * 31 + col * 7) % 10_000);
+            } else {
+                q = q.bind(((i as f64) * 1.7 + (col as f64) * 0.3).sin() * 100.0);
+            }
+        }
+        q.execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn seed_lookup_tables(pool: &sqlx::SqlitePool) -> Result<()> {
+    // A handful of rows each — enough that the table isn't empty, but the
+    // point of these is to stretch the schema tree, not to be queried.
+    let rows = [
+        ("seed-1", "auto-generated"),
+        ("seed-2", "auto-generated"),
+        ("seed-3", "auto-generated"),
+    ];
+    for table in LOOKUP_TABLES {
+        let mut tx = pool.begin().await?;
+        for (name, notes) in rows {
+            sqlx::query(&format!(
+                "INSERT INTO {table}(name, notes) VALUES (?, ?)"
+            ))
+            .bind(name)
+            .bind(notes)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
     }
     Ok(())
 }

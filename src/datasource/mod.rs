@@ -15,6 +15,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::log::Logger;
+
 pub use cell::Cell;
 pub use error::{DatasourceError, DatasourceResult};
 pub use schema::{CatalogInfo, ColumnInfo, IndexInfo, SchemaInfo, TableInfo};
@@ -72,23 +74,28 @@ pub trait Datasource: Send + Sync {
 }
 
 /// Builds a datasource from a connection string. Scheme dispatches to the driver.
-pub async fn connect(connection: &str) -> DatasourceResult<Box<dyn Datasource>> {
+pub async fn connect(connection: &str, logger: Logger) -> DatasourceResult<Box<dyn Datasource>> {
     let scheme = connection
         .split_once(':')
         .map(|(s, _)| s)
         .unwrap_or(connection);
     match scheme {
-        "sqlite" => sql::sqlite::SqliteDatasource::connect(connection)
+        "sqlite" => sql::sqlite::SqliteDatasource::connect(connection, logger)
             .await
             .map(|ds| Box::new(ds) as Box<dyn Datasource>),
-        "postgres" | "postgresql" => sql::postgres::PostgresDatasource::connect(connection)
+        "postgres" | "postgresql" => {
+            sql::postgres::PostgresDatasource::connect(connection, logger)
+                .await
+                .map(|ds| Box::new(ds) as Box<dyn Datasource>)
+        }
+        "mysql" | "mariadb" => sql::mysql::MysqlDatasource::connect(connection, logger)
             .await
             .map(|ds| Box::new(ds) as Box<dyn Datasource>),
-        "mysql" | "mariadb" => sql::mysql::MysqlDatasource::connect(connection)
-            .await
-            .map(|ds| Box::new(ds) as Box<dyn Datasource>),
-        other => Err(DatasourceError::Connect(format!(
-            "unsupported scheme: {other}"
-        ))),
+        other => {
+            logger.error("datasource", format!("unsupported scheme: {other}"));
+            Err(DatasourceError::Connect(format!(
+                "unsupported scheme: {other}"
+            )))
+        }
     }
 }

@@ -7,7 +7,7 @@ use ratatui::widgets::{
 };
 
 use crate::datasource::Cell;
-use crate::state::results::{ResultBlock, ResultCursor, ResultPayload};
+use crate::state::results::{ResultBlock, ResultCursor, ResultPayload, fit_columns};
 use crate::ui::theme::Theme;
 
 pub struct InlineResult<'a> {
@@ -18,24 +18,29 @@ pub struct InlineResult<'a> {
 
 impl Widget for InlineResult<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = format!(
-            " result #{} — {} preview / {} total — {:?} ",
-            self.block.id.0 + 1,
-            self.block.rows().len().min(self.max_preview_rows),
-            self.block.total_rows(),
-            self.block.took,
-        );
-        let block_widget = themed_block(self.theme, title, false);
-
+        let total_cols = self.block.columns.len();
+        let block_widget = themed_block(self.theme, String::new(), false);
         let inner = block_widget.inner(area);
+
+        let visible_cols = fit_columns(inner.width).min(total_cols.max(1));
+        let title = inline_title(self.block, self.max_preview_rows, visible_cols, total_cols);
+        let block_widget = themed_block(self.theme, title, false);
         block_widget.render(area, buf);
 
         if inner.height < 2 {
             return;
         }
 
-        let table = build_table(self.block, None, self.max_preview_rows, self.theme);
-        let widths = column_widths(self.block.columns.len());
+        let table = build_table(
+            self.block,
+            None,
+            0,
+            self.max_preview_rows,
+            0,
+            visible_cols,
+            self.theme,
+        );
+        let widths = column_widths(visible_cols);
         Widget::render(
             Table::new(table.rows, widths)
                 .header(table.header)
@@ -71,26 +76,41 @@ impl Widget for InlineResult<'_> {
 pub struct ExpandedResult<'a> {
     pub block: &'a ResultBlock,
     pub cursor: ResultCursor,
+    pub col_offset: usize,
+    pub visible_cols: usize,
+    pub row_offset: usize,
+    pub visible_rows: usize,
     pub theme: &'a Theme,
 }
 
 impl Widget for ExpandedResult<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = format!(
-            " result #{} — {} rows shown / {} total — cell ({}, {}) — q/Esc to close ",
-            self.block.id.0 + 1,
-            self.block.rows().len(),
-            self.block.total_rows(),
-            self.cursor.row + 1,
-            self.cursor.col + 1,
+        let total_cols = self.block.columns.len();
+        let total_rows = self.block.rows().len();
+        let title = expanded_title(
+            self.block,
+            self.cursor,
+            self.col_offset,
+            self.visible_cols,
+            total_cols,
+            self.row_offset,
+            self.visible_rows,
+            total_rows,
         );
         let block_widget = themed_block(self.theme, title, true);
         let inner = block_widget.inner(area);
         block_widget.render(area, buf);
 
-        let max_rows = inner.height.saturating_sub(1) as usize;
-        let table = build_table(self.block, Some(self.cursor), max_rows, self.theme);
-        let widths = column_widths(self.block.columns.len());
+        let table = build_table(
+            self.block,
+            Some(self.cursor),
+            self.row_offset,
+            self.visible_rows,
+            self.col_offset,
+            self.visible_cols,
+            self.theme,
+        );
+        let widths = column_widths(self.visible_cols);
         Widget::render(
             Table::new(table.rows, widths)
                 .header(table.header)
@@ -106,13 +126,18 @@ struct BuiltTable<'a> {
     rows: Vec<TableRow<'a>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_table<'a>(
     block: &'a ResultBlock,
     cursor: Option<ResultCursor>,
-    max_rows: usize,
+    row_offset: usize,
+    visible_rows: usize,
+    col_offset: usize,
+    visible_cols: usize,
     theme: &Theme,
 ) -> BuiltTable<'a> {
-    let header = TableRow::new(block.columns.iter().map(|c| {
+    let col_end = (col_offset + visible_cols).min(block.columns.len());
+    let header = TableRow::new(block.columns[col_offset..col_end].iter().map(|c| {
         TableCell::from(c.name.as_str()).style(
             Style::default()
                 .fg(theme.header_fg)
@@ -120,22 +145,34 @@ fn build_table<'a>(
                 .add_modifier(Modifier::BOLD),
         )
     }));
-    let visible = block.rows().iter().take(max_rows.max(1));
-    let rows = visible
+    let row_end = (row_offset + visible_rows).min(block.rows().len());
+    let row_start = row_offset.min(row_end);
+    let rows = block.rows()[row_start..row_end]
+        .iter()
         .enumerate()
-        .map(|(r, row)| build_row(row, r, cursor, theme))
+        .map(|(local, row)| {
+            let absolute_row = row_offset + local;
+            build_row(row, absolute_row, col_offset, col_end, cursor, theme)
+        })
         .collect();
     BuiltTable { header, rows }
 }
 
 fn build_row<'a>(
     row: &[Cell],
-    r: usize,
+    absolute_row: usize,
+    col_offset: usize,
+    col_end: usize,
     cursor: Option<ResultCursor>,
     theme: &Theme,
 ) -> TableRow<'a> {
-    TableRow::new(row.iter().enumerate().map(|(c, value)| {
-        let cell_style = if matches!(cursor, Some(cur) if cur.row == r && cur.col == c) {
+    // Slice defensively — a row that lost cells (driver bug or NULL handling
+    // mismatch) shouldn't panic the renderer.
+    let end = col_end.min(row.len());
+    let start = col_offset.min(end);
+    TableRow::new(row[start..end].iter().enumerate().map(|(local, value)| {
+        let absolute_col = col_offset + local;
+        let cell_style = if matches!(cursor, Some(cur) if cur.row == absolute_row && cur.col == absolute_col) {
             Style::default()
                 .fg(theme.selection_fg)
                 .bg(theme.selection_bg)
@@ -150,6 +187,64 @@ fn build_row<'a>(
 
 fn column_widths(n: usize) -> Vec<Constraint> {
     (0..n).map(|_| Constraint::Min(8)).collect()
+}
+
+fn inline_title(
+    block: &ResultBlock,
+    max_preview_rows: usize,
+    visible_cols: usize,
+    total_cols: usize,
+) -> String {
+    let shown_rows = block.rows().len().min(max_preview_rows);
+    let cols = if visible_cols < total_cols {
+        format!(" — {visible_cols}/{total_cols} cols (+{} →)", total_cols - visible_cols)
+    } else {
+        format!(" — {total_cols} cols")
+    };
+    format!(
+        " result #{} — {} preview / {} total{} — {:?} ",
+        block.id.0 + 1,
+        shown_rows,
+        block.total_rows(),
+        cols,
+        block.took,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expanded_title(
+    block: &ResultBlock,
+    cursor: ResultCursor,
+    col_offset: usize,
+    visible_cols: usize,
+    total_cols: usize,
+    row_offset: usize,
+    visible_rows: usize,
+    total_rows: usize,
+) -> String {
+    let cols_end = (col_offset + visible_cols).min(total_cols);
+    let rows_end = (row_offset + visible_rows).min(total_rows);
+    let cols_left = if col_offset > 0 { "‹ " } else { "" };
+    let cols_right = if cols_end < total_cols { " ›" } else { "" };
+    let rows_up = if row_offset > 0 { "↑ " } else { "" };
+    let rows_down = if rows_end < total_rows { " ↓" } else { "" };
+    format!(
+        " result #{} — {}rows {}-{} of {}{} (loaded {}) — {}cols {}-{} of {}{} — cell ({}, {}) — q/Esc to close ",
+        block.id.0 + 1,
+        rows_up,
+        row_offset + 1,
+        rows_end,
+        total_rows,
+        rows_down,
+        block.total_rows(),
+        cols_left,
+        col_offset + 1,
+        cols_end,
+        total_cols,
+        cols_right,
+        cursor.row + 1,
+        cursor.col + 1,
+    )
 }
 
 fn themed_block<'a>(theme: &Theme, title: String, focused: bool) -> Block<'a> {

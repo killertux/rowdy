@@ -37,7 +37,13 @@ impl Cell {
             Self::Date(v) => v.to_string(),
             Self::Time(v) => v.to_string(),
             Self::Uuid(v) => v.to_string(),
-            Self::Other { repr, .. } => repr.clone(),
+            Self::Other { type_name, repr } => {
+                if repr.is_empty() {
+                    format!("<{type_name}>")
+                } else {
+                    repr.clone()
+                }
+            }
         }
     }
 

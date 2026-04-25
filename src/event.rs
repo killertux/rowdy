@@ -1,7 +1,11 @@
 use edtui::EditorMode;
 use ratatui::crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui_textarea::Input;
 
-use crate::action::{Action, CommandAction, ResultNavAction, SchemaAction};
+use crate::action::{
+    Action, AuthAction, CommandAction, ConnFormAction, ConnListAction, ResultNavAction,
+    SchemaAction,
+};
 use crate::app::App;
 use crate::state::focus::{Focus, Mode, PendingChord};
 
@@ -9,13 +13,37 @@ pub fn translate(app: &App, event: CtEvent) -> Option<Action> {
     match event {
         CtEvent::Key(key) if key.kind == KeyEventKind::Press => translate_key(app, key, event),
         CtEvent::Key(_) => None,
+        CtEvent::Paste(_) => translate_paste(app, event),
         _ if app.focus == Focus::Editor && app.mode.is_normal() => Some(Action::EditorEvent(event)),
         _ => None,
     }
 }
 
+/// Bracketed-paste flow: many terminals (and macOS by default) handle
+/// `Cmd+V` / `Ctrl+Shift+V` themselves and deliver the result as a single
+/// `Event::Paste(text)` rather than a key event. Route it to the focused
+/// input or, if the editor is the active surface, hand the original event
+/// to edtui (which has its own paste support).
+fn translate_paste(app: &App, event: CtEvent) -> Option<Action> {
+    let CtEvent::Paste(text) = &event else {
+        return None;
+    };
+    let text = text.clone();
+    match &app.mode {
+        Mode::Command(_) => Some(Action::Command(CommandAction::Paste(Some(text)))),
+        Mode::Auth(_) => Some(Action::Auth(AuthAction::Paste(Some(text)))),
+        Mode::EditConnection(_) => Some(Action::ConnForm(ConnFormAction::Paste(Some(text)))),
+        Mode::Normal if app.focus == Focus::Editor => Some(Action::EditorEvent(event)),
+        _ => None,
+    }
+}
+
 fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
-    if let Some(action) = panic_quit(key) {
+    // Ctrl+C is the global escape hatch — except in TextArea-input modes,
+    // where it's bound to "copy" instead.
+    if !consumes_ctrl_c(&app.mode)
+        && let Some(action) = panic_quit(key)
+    {
         return Some(action);
     }
     match &app.mode {
@@ -23,6 +51,103 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
         Mode::Normal => translate_normal_key(app, key, raw),
         Mode::ResultExpanded { .. } => translate_expanded_key(app, key),
         Mode::ConfirmRun { .. } => translate_confirm_key(key),
+        Mode::Auth(_) => translate_auth_key(key),
+        Mode::EditConnection(_) => translate_conn_form_key(key),
+        Mode::ConnectionList(state) => translate_conn_list_key(key, state.is_confirming()),
+        Mode::Connecting { .. } => None, // keys are inert until the worker responds
+    }
+}
+
+fn consumes_ctrl_c(mode: &Mode) -> bool {
+    matches!(
+        mode,
+        Mode::Command(_) | Mode::Auth(_) | Mode::EditConnection(_)
+    )
+}
+
+fn translate_conn_list_key(key: KeyEvent, confirming: bool) -> Option<Action> {
+    use ConnListAction::*;
+    if confirming {
+        let action = match (key.code, key.modifiers) {
+            (KeyCode::Char('y') | KeyCode::Char('Y'), _) | (KeyCode::Enter, _) => ConfirmDelete,
+            (KeyCode::Char('n') | KeyCode::Char('N'), _) | (KeyCode::Esc, _) => CancelDelete,
+            _ => return None,
+        };
+        return Some(Action::ConnList(action));
+    }
+    let action = match (key.code, key.modifiers) {
+        (KeyCode::Char('j') | KeyCode::Down, _) => Down,
+        (KeyCode::Char('k') | KeyCode::Up, _) => Up,
+        (KeyCode::Char('g'), _) => Top,
+        (KeyCode::Char('G'), _) => Bottom,
+        (KeyCode::Enter | KeyCode::Char('u'), _) => UseSelected,
+        (KeyCode::Char('a'), _) => AddNew,
+        (KeyCode::Char('e'), _) => EditSelected,
+        (KeyCode::Char('d'), _) => BeginDelete,
+        (KeyCode::Esc | KeyCode::Char('q'), _) => Close,
+        _ => return None,
+    };
+    Some(Action::ConnList(action))
+}
+
+fn translate_auth_key(key: KeyEvent) -> Option<Action> {
+    if let Some(clip) = clipboard_action(key) {
+        return Some(Action::Auth(match clip {
+            ClipboardOp::Paste => AuthAction::Paste(None),
+            ClipboardOp::Copy => AuthAction::Copy,
+            ClipboardOp::Cut => AuthAction::Cut,
+        }));
+    }
+    match key.code {
+        KeyCode::Esc => Some(Action::Auth(AuthAction::Cancel)),
+        KeyCode::Enter => Some(Action::Auth(AuthAction::Submit)),
+        _ => Some(Action::Auth(AuthAction::Input(Input::from(key)))),
+    }
+}
+
+fn translate_conn_form_key(key: KeyEvent) -> Option<Action> {
+    if let Some(clip) = clipboard_action(key) {
+        return Some(Action::ConnForm(match clip {
+            ClipboardOp::Paste => ConnFormAction::Paste(None),
+            ClipboardOp::Copy => ConnFormAction::Copy,
+            ClipboardOp::Cut => ConnFormAction::Cut,
+        }));
+    }
+    match key.code {
+        KeyCode::Esc => Some(Action::ConnForm(ConnFormAction::Cancel)),
+        KeyCode::Enter => Some(Action::ConnForm(ConnFormAction::Submit)),
+        KeyCode::Tab | KeyCode::BackTab => Some(Action::ConnForm(ConnFormAction::ToggleFocus)),
+        _ => Some(Action::ConnForm(ConnFormAction::Input(Input::from(key)))),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClipboardOp {
+    Paste,
+    Copy,
+    Cut,
+}
+
+/// Recognises the standard system-clipboard shortcuts:
+/// - `Ctrl+C` / `Ctrl+V` / `Ctrl+X`
+/// - `Ctrl+Shift+C` / `Ctrl+Shift+V` / `Ctrl+Shift+X` (terminal default)
+/// - `Cmd+C` / `Cmd+V` / `Cmd+X` (macOS, via `KeyModifiers::SUPER`, when the
+///   terminal forwards Cmd via the kitty keyboard protocol; otherwise the
+///   terminal handles it itself and we receive an `Event::Paste` instead)
+///
+/// Returns `None` for any other key — caller falls through to the regular
+/// per-mode handling.
+fn clipboard_action(key: KeyEvent) -> Option<ClipboardOp> {
+    let mods = key.modifiers;
+    let triggered = mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::SUPER);
+    if !triggered {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('v') | KeyCode::Char('V') => Some(ClipboardOp::Paste),
+        KeyCode::Char('c') | KeyCode::Char('C') => Some(ClipboardOp::Copy),
+        KeyCode::Char('x') | KeyCode::Char('X') => Some(ClipboardOp::Cut),
+        _ => None,
     }
 }
 
@@ -35,22 +160,29 @@ fn translate_confirm_key(key: KeyEvent) -> Option<Action> {
 }
 
 fn panic_quit(key: KeyEvent) -> Option<Action> {
-    let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
-    ctrl_c.then_some(Action::Quit)
+    // Plain Ctrl+C only — `Ctrl+Shift+C` and `Cmd+C` are clipboard shortcuts
+    // and must never accidentally quit.
+    let mods = key.modifiers;
+    let bare_ctrl_c = key.code == KeyCode::Char('c')
+        && mods.contains(KeyModifiers::CONTROL)
+        && !mods.contains(KeyModifiers::SHIFT)
+        && !mods.contains(KeyModifiers::SUPER);
+    bare_ctrl_c.then_some(Action::Quit)
 }
 
 fn translate_command_key(key: KeyEvent) -> Option<Action> {
-    use CommandAction::*;
-    let action = match (key.code, key.modifiers) {
-        (KeyCode::Esc, _) => Cancel,
-        (KeyCode::Enter, _) => Submit,
-        (KeyCode::Backspace, _) => Backspace,
-        (KeyCode::Left, _) => MoveLeft,
-        (KeyCode::Right, _) => MoveRight,
-        (KeyCode::Char(ch), m) if !m.contains(KeyModifiers::CONTROL) => Insert(ch),
-        _ => return None,
-    };
-    Some(Action::Command(action))
+    if let Some(clip) = clipboard_action(key) {
+        return Some(Action::Command(match clip {
+            ClipboardOp::Paste => CommandAction::Paste(None),
+            ClipboardOp::Copy => CommandAction::Copy,
+            ClipboardOp::Cut => CommandAction::Cut,
+        }));
+    }
+    match key.code {
+        KeyCode::Esc => Some(Action::Command(CommandAction::Cancel)),
+        KeyCode::Enter => Some(Action::Command(CommandAction::Submit)),
+        _ => Some(Action::Command(CommandAction::Input(Input::from(key)))),
+    }
 }
 
 fn translate_normal_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {

@@ -55,6 +55,20 @@ impl ResultPayload {
     }
 }
 
+/// Minimum chars per column (`Constraint::Min`) plus the 1-cell separator
+/// ratatui's `Table` inserts between columns.
+const MIN_COL_WIDTH: u16 = 8;
+const COL_SEPARATOR: u16 = 1;
+
+/// How many columns can fit side-by-side in `width` cells, given the
+/// per-column floor + separator. Always at least 1 so we can show *something*
+/// even on absurdly narrow terminals.
+pub fn fit_columns(width: u16) -> usize {
+    let cell = MIN_COL_WIDTH + COL_SEPARATOR;
+    let raw = ((width as u32 + COL_SEPARATOR as u32) / cell as u32) as usize;
+    raw.max(1)
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ResultCursor {
     pub row: usize,

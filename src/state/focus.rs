@@ -1,4 +1,7 @@
+use crate::state::auth::AuthState;
 use crate::state::command::CommandBuffer;
+use crate::state::conn_form::ConnFormState;
+use crate::state::conn_list::ConnListState;
 use crate::state::results::{ResultCursor, ResultId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7,24 +10,44 @@ pub enum Focus {
     Schema,
 }
 
+// `TextArea` is ~700 bytes (the `Auth`/`EditConnection` variants carry one or
+// two each), so the variants are uneven. Mode lives once per App and is
+// swapped in place — boxing buys nothing here.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Mode {
     Normal,
     Command(CommandBuffer),
-    ResultExpanded { id: ResultId, cursor: ResultCursor },
-    ConfirmRun { statement: String },
+    ResultExpanded {
+        id: ResultId,
+        cursor: ResultCursor,
+        /// Absolute index of the leftmost visible column. Render keeps this in
+        /// sync with `cursor.col` so the active cell is always on-screen.
+        col_offset: usize,
+        /// Absolute index of the topmost visible row. Same render-time clamp
+        /// as `col_offset`, but for vertical scroll.
+        row_offset: usize,
+    },
+    ConfirmRun {
+        statement: String,
+    },
+    /// Pre-app password prompt — shown when the store is encrypted, or on
+    /// first launch before the user has chosen plaintext-vs-encrypted mode.
+    Auth(AuthState),
+    /// Inline create/edit form for a single connection.
+    EditConnection(ConnFormState),
+    /// Browseable list of saved connections — opens via `:conn`.
+    ConnectionList(ConnListState),
+    /// Async connection in flight; UI shows "connecting to <name>…" and
+    /// keys are mostly inert until `Connected`/`ConnectFailed` lands.
+    Connecting {
+        name: String,
+    },
 }
 
 impl Mode {
     pub fn is_normal(&self) -> bool {
         matches!(self, Self::Normal)
-    }
-
-    pub fn command_buffer(&self) -> Option<&CommandBuffer> {
-        match self {
-            Self::Command(buf) => Some(buf),
-            _ => None,
-        }
     }
 }
 

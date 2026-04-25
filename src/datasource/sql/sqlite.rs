@@ -10,21 +10,29 @@ use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
 use crate::datasource::{Column, Datasource, Dialect, QueryResult, Row as CellRow};
+use crate::log::Logger;
 
 const DEFAULT_POOL_SIZE: u32 = 3;
+const TARGET: &str = "sqlite";
 
 pub struct SqliteDatasource {
     pool: SqlitePool,
+    log: Logger,
 }
 
 impl SqliteDatasource {
-    pub async fn connect(url: &str) -> DatasourceResult<Self> {
+    pub async fn connect(url: &str, log: Logger) -> DatasourceResult<Self> {
+        log.info(TARGET, format!("connecting to {url}"));
         let pool = SqlitePoolOptions::new()
             .max_connections(DEFAULT_POOL_SIZE)
             .connect(url)
             .await
-            .map_err(|e| DatasourceError::Connect(e.to_string()))?;
-        Ok(Self { pool })
+            .map_err(|e| {
+                log.error(TARGET, format!("connect failed: {e}"));
+                DatasourceError::Connect(e.to_string())
+            })?;
+        log.info(TARGET, "connected");
+        Ok(Self { pool, log })
     }
 }
 
@@ -136,36 +144,72 @@ impl Datasource for SqliteDatasource {
     }
 
     async fn execute(&self, statement: &str) -> DatasourceResult<QueryResult> {
+        self.log.info(
+            TARGET,
+            format!("execute: {}", super::one_line_sql(statement)),
+        );
         let started = Instant::now();
-        let rows = sqlx::query(statement)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(execute_err)?;
-        let elapsed = started.elapsed();
-        let columns = build_columns(&rows);
-        let rows = rows
-            .iter()
-            .map(|r| row_to_cells(r, columns.len()))
-            .collect();
-        Ok(QueryResult {
-            columns,
-            rows,
-            affected: None,
-            elapsed,
-        })
+        if super::is_row_returning(statement) {
+            let rows = sqlx::query(statement)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| {
+                    self.log.error(TARGET, format!("execute failed: {e}"));
+                    execute_err(e)
+                })?;
+            let elapsed = started.elapsed();
+            let columns = build_columns(&rows);
+            let rows: Vec<CellRow> = rows
+                .iter()
+                .map(|r| row_to_cells(r, columns.len()))
+                .collect();
+            self.log.info(
+                TARGET,
+                format!("execute ok: {} rows in {:?}", rows.len(), elapsed),
+            );
+            Ok(QueryResult {
+                columns,
+                rows,
+                affected: None,
+                elapsed,
+            })
+        } else {
+            let outcome = sqlx::query(statement)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| {
+                    self.log.error(TARGET, format!("execute failed: {e}"));
+                    execute_err(e)
+                })?;
+            let elapsed = started.elapsed();
+            let affected = outcome.rows_affected();
+            self.log.info(
+                TARGET,
+                format!("execute ok: {affected} affected in {elapsed:?}"),
+            );
+            Ok(QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                affected: Some(affected),
+                elapsed,
+            })
+        }
     }
 
     async fn cancel(&self) -> DatasourceResult<()> {
         // SQLite has no server-side cancel; the worker aborts the in-flight
         // task instead, which drops the future and releases the connection.
+        self.log.info(TARGET, "cancel (no-op for sqlite)");
         Ok(())
     }
 
     async fn close(self: Box<Self>) -> DatasourceResult<()> {
+        self.log.info(TARGET, "closing pool");
         self.pool.close().await;
         Ok(())
     }
 }
+
 
 fn build_columns(rows: &[SqliteRow]) -> Vec<Column> {
     let Some(first) = rows.first() else {
@@ -266,7 +310,10 @@ mod tests {
             .connect(url)
             .await
             .expect("connect");
-        let ds = SqliteDatasource { pool };
+        let ds = SqliteDatasource {
+            pool,
+            log: Logger::discard(),
+        };
         ds.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, score REAL)")
             .await
             .expect("create table");

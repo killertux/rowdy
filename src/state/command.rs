@@ -1,51 +1,30 @@
-#[derive(Debug, Default)]
+use ratatui::style::Style;
+use ratatui_textarea::TextArea;
+
+/// Wrapper around a `TextArea` so the rest of the app keeps pattern-matching
+/// on `Mode::Command(CommandBuffer)` while the editor primitives live in
+/// `ratatui_textarea`.
+#[derive(Debug)]
 pub struct CommandBuffer {
-    pub input: String,
-    pub cursor: usize,
+    pub input: TextArea<'static>,
+}
+
+impl Default for CommandBuffer {
+    fn default() -> Self {
+        let mut input = TextArea::default();
+        // Single-line command line — drop the cursor-line highlight so it
+        // doesn't paint a band across the whole bar.
+        input.set_cursor_line_style(Style::default());
+        Self { input }
+    }
 }
 
 impl CommandBuffer {
-    pub fn insert(&mut self, ch: char) {
-        self.input.insert(self.cursor, ch);
-        self.cursor += ch.len_utf8();
+    pub fn text(&self) -> &str {
+        self.input
+            .lines()
+            .first()
+            .map(String::as_str)
+            .unwrap_or("")
     }
-
-    pub fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let prev_len = char_len_before(&self.input, self.cursor);
-        self.cursor -= prev_len;
-        self.input.remove(self.cursor);
-    }
-
-    pub fn move_left(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        self.cursor -= char_len_before(&self.input, self.cursor);
-    }
-
-    pub fn move_right(&mut self) {
-        if self.cursor >= self.input.len() {
-            return;
-        }
-        self.cursor += char_len_after(&self.input, self.cursor);
-    }
-}
-
-fn char_len_before(s: &str, byte_idx: usize) -> usize {
-    s[..byte_idx]
-        .chars()
-        .next_back()
-        .map(char::len_utf8)
-        .unwrap_or(0)
-}
-
-fn char_len_after(s: &str, byte_idx: usize) -> usize {
-    s[byte_idx..]
-        .chars()
-        .next()
-        .map(char::len_utf8)
-        .unwrap_or(0)
 }

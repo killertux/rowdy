@@ -12,6 +12,9 @@ pub enum QueryStatus {
     },
     Succeeded {
         rows: usize,
+        /// Set for INSERT/UPDATE/DELETE/etc. — drives the "X affected" status
+        /// label. `None` for SELECT-shaped statements.
+        affected: Option<u64>,
         took: Duration,
     },
     Failed {

@@ -1,67 +1,226 @@
 mod action;
 mod app;
 mod cli;
+mod clipboard;
+mod config;
+mod connections;
+mod crypto;
 mod datasource;
 mod event;
+mod log;
 mod state;
+mod subcommands;
 mod terminal;
 mod ui;
 mod worker;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use crossterm::event::{Event as CtEvent, EventStream};
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io::Stdout;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-use crate::action::{Action, apply};
+use crate::action::{Action, apply, dispatch_connect};
 use crate::app::App;
-use crate::cli::Args;
+use crate::cli::{Args, Command};
+use crate::config::ConfigStore;
+use crate::connections::ConnectionStore;
 use crate::event::translate;
-use crate::state::focus::PendingChord;
+use crate::log::Logger;
+use crate::state::auth::{AuthKind, AuthState};
+use crate::state::conn_form::ConnFormState;
+use crate::state::conn_list::ConnListState;
+use crate::state::focus::{Mode, PendingChord};
 use crate::terminal::Tui;
 use crate::worker::{WorkerCommand, WorkerEvent};
 
+const DATA_DIR: &str = ".rowdy";
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
+    match run_app().await {
+        Ok(0) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code as u8),
+        Err(err) => {
+            eprintln!("rowdy: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_app() -> Result<i32> {
     let args = Args::parse();
-    let datasource = datasource::connect(&args.connection)
-        .await
-        .with_context(|| format!("connecting to {}", args.connection))?;
+    let data_dir = init_data_dir().context("preparing .rowdy/ directory")?;
+
+    // Subcommands run without the TUI or a log file — they're one-shot CLI
+    // operations and shouldn't litter `.rowdy/` with empty session logs.
+    if let Some(cmd) = args.command {
+        return match cmd {
+            Command::Connections(sub) => subcommands::run_connections(&data_dir, sub, args.password),
+        };
+    }
+
+    let log_path = log_file_path(&data_dir);
+    let logger = Logger::open(&log_path)
+        .with_context(|| format!("opening log file {}", log_path.display()))?;
+    logger.info("rowdy", format!("starting; log file: {}", log_path.display()));
+
+    let mut config = ConfigStore::load(&data_dir)
+        .with_context(|| format!("loading config from {}", data_dir.display()))?;
+
+    // Resolve as much of the auth/connection picture as we can before
+    // reaching for the TUI. `Decision::*` tells us how to seed the App.
+    let decision = decide_startup(&mut config, &args, &logger)?;
+    drop(args);
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();
-
-    let worker_handle = tokio::spawn(worker::run(datasource, cmd_rx, evt_tx));
+    let worker_handle = tokio::spawn(worker::run(logger.clone(), cmd_rx, evt_tx));
 
     let mut tui = Tui::init()?;
-    let app = App::new(cmd_tx);
-    let result = run(&mut tui.terminal, app, evt_rx).await;
+    let mut app = App::new(cmd_tx, config, logger.clone());
+    apply_decision(&mut app, decision);
+
+    let result = run(&mut tui.terminal, &mut app, evt_rx).await;
     Tui::restore()?;
     worker_handle.abort();
 
-    result
+    logger.info("rowdy", "shutdown");
+    result.map(|()| app.exit_code)
+}
+
+/// What `decide_startup` resolved before the TUI came up.
+// `AuthState` carries a TextArea (~700 bytes); the other variants are smaller.
+// We construct one Decision and immediately destructure it into App, so the
+// short-lived size imbalance isn't worth boxing.
+#[allow(clippy::large_enum_variant)]
+enum Decision {
+    /// Need a password from the user.
+    Auth(AuthState),
+    /// Already have a store; let the user create their first connection.
+    CreateFirst { store: ConnectionStore },
+    /// Already have a store and a target connection — fire Connect on launch.
+    AutoConnect {
+        store: ConnectionStore,
+        name: String,
+        url: String,
+    },
+    /// Already have a store and saved connections, but no `--connection`
+    /// hint — open the picker so the user can choose.
+    PickConnection {
+        store: ConnectionStore,
+        names: Vec<String>,
+    },
+}
+
+fn decide_startup(config: &mut ConfigStore, args: &Args, logger: &Logger) -> Result<Decision> {
+    let cli_password = args.password.as_deref().filter(|p| !p.is_empty());
+
+    // Phase 1: do we already have a store unlocked?
+    let store = match (config.crypto().cloned(), cli_password) {
+        (Some(block), Some(pw)) => {
+            // CLI password short-circuits the in-TUI prompt.
+            let key = connections::unlock(pw, &block)
+                .map_err(|e| anyhow!("unlock failed: {e}"))?;
+            logger.info("auth", "unlocked via --password");
+            Some(ConnectionStore::encrypted(key))
+        }
+        (Some(block), None) => {
+            // Defer to in-TUI prompt.
+            return Ok(Decision::Auth(AuthState::new(AuthKind::Unlock { block })));
+        }
+        (None, Some(pw)) => {
+            // First setup with a CLI-supplied password — initialise crypto now.
+            let (block, key) = connections::initialise_crypto(pw)
+                .map_err(|e| anyhow!("crypto setup failed: {e}"))?;
+            config.set_crypto(block).context("save crypto block")?;
+            logger.info("auth", "encrypted store initialised via --password");
+            Some(ConnectionStore::encrypted(key))
+        }
+        (None, None) if config.connections().is_empty() => {
+            // Empty store, no CLI password — let the user choose plaintext-vs-encrypted in the prompt.
+            return Ok(Decision::Auth(AuthState::new(AuthKind::FirstSetup)));
+        }
+        (None, None) => {
+            // Existing plaintext store; skip the prompt entirely.
+            Some(ConnectionStore::plaintext())
+        }
+    };
+    let store = store.expect("store resolved");
+
+    // Phase 2: which connection to open?
+    let names = config.connection_names();
+    if names.is_empty() {
+        return Ok(Decision::CreateFirst { store });
+    }
+    if let Some(requested) = args.connection.as_deref() {
+        let entry = config
+            .connection(requested)
+            .ok_or_else(|| anyhow!("no connection named {requested:?} (have: {names:?})"))?;
+        let url = store
+            .lookup(entry)
+            .map_err(|e| anyhow!("decrypt {requested:?} failed: {e}"))?;
+        return Ok(Decision::AutoConnect {
+            store,
+            name: requested.to_string(),
+            url: url.to_string(),
+        });
+    }
+    Ok(Decision::PickConnection { store, names })
+}
+
+fn apply_decision(app: &mut App, decision: Decision) {
+    match decision {
+        Decision::Auth(state) => {
+            app.mode = Mode::Auth(state);
+        }
+        Decision::CreateFirst { store } => {
+            app.connection_store = Some(store);
+            app.mode = Mode::EditConnection(ConnFormState::new_create());
+        }
+        Decision::AutoConnect { store, name, url } => {
+            app.connection_store = Some(store);
+            dispatch_connect(app, name, url);
+        }
+        Decision::PickConnection { store, names } => {
+            app.connection_store = Some(store);
+            app.mode = Mode::ConnectionList(ConnListState::new(names));
+        }
+    }
+}
+
+fn init_data_dir() -> std::io::Result<PathBuf> {
+    let dir = std::env::current_dir()?.join(DATA_DIR);
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn log_file_path(dir: &Path) -> PathBuf {
+    let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+    dir.join(format!("{stamp}.log"))
 }
 
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    mut app: App,
+    app: &mut App,
     mut evt_rx: UnboundedReceiver<WorkerEvent>,
 ) -> Result<()> {
     let mut events = EventStream::new();
     while !app.should_quit {
-        terminal.draw(|f| ui::render(&mut app, f))?;
+        terminal.draw(|f| ui::render(app, f))?;
         tokio::select! {
             terminal_event = events.next() => match terminal_event {
-                Some(Ok(ev)) => process_terminal_event(&mut app, ev),
+                Some(Ok(ev)) => process_terminal_event(app, ev),
                 Some(Err(err)) => return Err(err.into()),
                 None => break,
             },
             worker_event = evt_rx.recv() => match worker_event {
-                Some(ev) => apply(&mut app, Action::Worker(ev)),
+                Some(ev) => apply(app, Action::Worker(ev)),
                 None => break,
             },
         }
