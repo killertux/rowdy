@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::datasource::{Cell, Column};
+use crate::datasource::{Cell, Column, DriverKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResultId(pub usize);
@@ -15,6 +15,14 @@ pub struct ResultBlock {
     /// Every row returned by the query. The inline preview slices the first
     /// few; the expanded view paginates over the full set.
     pub rows: Vec<Row>,
+    /// The SQL that produced this block. Stored so `:export sql` can run
+    /// source-table inference against the original query even after the
+    /// editor buffer has moved on.
+    pub sql: String,
+    /// The driver kind active when the query ran. Snapshotted onto the
+    /// block so a `:conn use` switch later doesn't change the export
+    /// dialect of older results.
+    pub dialect: DriverKind,
 }
 
 impl ResultBlock {

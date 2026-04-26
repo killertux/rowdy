@@ -18,6 +18,28 @@ pub struct Column {
     pub name: String,
 }
 
+/// Which SQL backend a connection (or stored result) belongs to. Drives
+/// dialect-specific behaviour at the edges: parsing for source-table
+/// inference, literal escaping when emitting INSERTs, etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DriverKind {
+    Sqlite,
+    Postgres,
+    Mysql,
+}
+
+impl DriverKind {
+    pub fn from_url(url: &str) -> Option<Self> {
+        let scheme = url.split_once(':').map(|(s, _)| s).unwrap_or(url);
+        match scheme {
+            "sqlite" => Some(Self::Sqlite),
+            "postgres" | "postgresql" => Some(Self::Postgres),
+            "mysql" | "mariadb" => Some(Self::Mysql),
+            _ => None,
+        }
+    }
+}
+
 pub type Row = Vec<Cell>;
 
 #[derive(Debug)]

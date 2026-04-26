@@ -51,6 +51,14 @@ pub enum Action {
         fmt: ExportFormat,
         target: ExportTarget,
     },
+    /// `:export sql [table] [path]`. The table name is optional — when
+    /// absent we run source-table inference against the originating
+    /// query and only fall back to an error if inference can't pin a
+    /// single table.
+    ExportSql {
+        table: Option<String>,
+        target: ExportTarget,
+    },
     ToggleTheme,
     Worker(WorkerEvent),
     Auth(AuthAction),
@@ -167,6 +175,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::ResultYankFormat(fmt) => result_yank_format(app, fmt),
         Action::ResultCancelYankFormat => result_cancel_yank_format(app),
         Action::Export { fmt, target } => export_command(app, fmt, target),
+        Action::ExportSql { table, target } => export_sql_command(app, table, target),
         Action::ToggleTheme => toggle_theme(app),
         Action::Worker(ev) => apply_worker_event(app, ev),
         Action::Auth(a) => apply_auth(app, a),
@@ -570,7 +579,10 @@ fn dispatch_query(app: &mut App, sql: String) {
         return;
     }
     let req = app.requests.next();
-    app.in_flight_query = Some(req);
+    app.in_flight_query = Some(crate::app::InFlightQuery {
+        req,
+        sql: trimmed.clone(),
+    });
     app.status = QueryStatus::Running {
         query: trimmed.clone(),
         started_at: Instant::now(),
@@ -734,10 +746,13 @@ fn on_schema_failed(app: &mut App, target: IntrospectTarget, error: String) {
 }
 
 fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResult) {
-    if app.in_flight_query != Some(req) {
+    let Some(in_flight) = app.in_flight_query.as_ref() else {
+        return;
+    };
+    if in_flight.req != req {
         return;
     }
-    app.in_flight_query = None;
+    let in_flight = app.in_flight_query.take().expect("checked above");
 
     let took = result.elapsed;
     let total_rows = result.rows.len();
@@ -747,11 +762,19 @@ fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResu
     // nothing to render in a result block, so skip pushing one.
     if !result.columns.is_empty() {
         let id = ResultId(app.results.len());
+        // `active_dialect` should always be Some here (we only run queries
+        // through an active connection), but fall back to Sqlite rather than
+        // panic if the invariant ever breaks.
+        let dialect = app
+            .active_dialect
+            .unwrap_or(crate::datasource::DriverKind::Sqlite);
         app.results.push(ResultBlock {
             id,
             took,
             columns: result.columns,
             rows: result.rows,
+            sql: in_flight.sql,
+            dialect,
         });
     }
 
@@ -763,7 +786,10 @@ fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResu
 }
 
 fn on_query_failed(app: &mut App, req: crate::worker::RequestId, error: String) {
-    if app.in_flight_query != Some(req) {
+    let Some(in_flight) = app.in_flight_query.as_ref() else {
+        return;
+    };
+    if in_flight.req != req {
         return;
     }
     app.in_flight_query = None;
@@ -1009,6 +1035,10 @@ pub(crate) fn dispatch_connect(app: &mut App, name: String, url: String) {
     // If we're swapping connections, persist the current session before the
     // editor's contents get replaced by the next `Connected` event.
     flush_session(app);
+    // Snapshot the dialect off the URL up front. Result blocks created by
+    // this connection will pin to it; if the connect fails before any rows
+    // come back, the stale value is harmless (no result block uses it).
+    app.active_dialect = crate::datasource::DriverKind::from_url(&url);
     app.mode = Mode::Connecting { name: name.clone() };
     app.status = QueryStatus::Idle;
     let _ = app.cmd_tx.send(WorkerCommand::Connect { name, url });
@@ -1119,19 +1149,33 @@ fn result_yank_format(app: &mut App, fmt: ExportFormat) {
         (*id, *cursor, *anchor)
     };
     let rect = SelectionRect::new(anchor, cursor);
-    let payload = match render_selection(app, id, &rect, fmt) {
-        Some(p) => p,
-        None => {
-            // Block disappeared between expand and yank — drop back to Normal
-            // and surface the error.
-            if let Mode::ResultExpanded { view, .. } = &mut app.mode {
-                *view = ResultViewMode::Normal;
+    let payload = match fmt {
+        ExportFormat::Sql => match render_selection_sql(app, id, &rect) {
+            Ok(p) => p,
+            Err(e) => {
+                // Stay in Visual on error — the user might want to copy the
+                // selection in another format, or expand it.
+                if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+                    *view = ResultViewMode::Visual { anchor };
+                }
+                app.status = QueryStatus::Failed { error: e };
+                return;
             }
-            app.status = QueryStatus::Failed {
-                error: "result no longer available".into(),
-            };
-            return;
-        }
+        },
+        _ => match render_selection(app, id, &rect, fmt) {
+            Some(p) => p,
+            None => {
+                // Block disappeared between expand and yank — drop back to
+                // Normal and surface the error.
+                if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+                    *view = ResultViewMode::Normal;
+                }
+                app.status = QueryStatus::Failed {
+                    error: "result no longer available".into(),
+                };
+                return;
+            }
+        },
     };
     clipboard::write(&app.log, &payload);
     if let Mode::ResultExpanded { view, .. } = &mut app.mode {
@@ -1160,21 +1204,24 @@ fn result_cancel_yank_format(app: &mut App) {
 fn run_export_command(app: &mut App, args: &[&str]) {
     let Some(fmt_str) = args.first() else {
         app.status = QueryStatus::Failed {
-            error: "usage: :export <csv|tsv|json> [path]".into(),
+            error: "usage: :export <csv|tsv|json|sql> [args...]".into(),
         };
         return;
     };
     let Some(fmt) = ExportFormat::parse(fmt_str) else {
         app.status = QueryStatus::Failed {
-            error: format!("unknown export format: {fmt_str} (use csv|tsv|json)"),
+            error: format!("unknown export format: {fmt_str} (use csv|tsv|json|sql)"),
         };
         return;
     };
-    // After the format token: nothing → clipboard. Otherwise the rest is a
-    // path; an optional leading `>` is allowed so users can write the
-    // shell-style `:export csv > out.csv`. Tokens are joined by single spaces
-    // (good enough for sane paths; the command line is already whitespace-
-    // tokenised by the time we get here).
+    // SQL export takes an optional `[table]` between the format and the
+    // path, so it has its own arg parser. The rest share the simple
+    // "everything after the format is a path (with optional `>` prefix)"
+    // shape.
+    if matches!(fmt, ExportFormat::Sql) {
+        run_export_sql_command(app, &args[1..]);
+        return;
+    }
     let rest = &args[1..];
     let target = match rest.first().copied() {
         None => ExportTarget::Clipboard,
@@ -1188,6 +1235,140 @@ fn run_export_command(app: &mut App, args: &[&str]) {
         Some(_) => ExportTarget::File(expand_tilde(&rest.join(" "))),
     };
     apply(app, Action::Export { fmt, target });
+}
+
+/// Parse the args after `:export sql`. Shape:
+///   `:export sql`               → infer table, clipboard
+///   `:export sql <table>`        → table given, clipboard
+///   `:export sql <table> <path>` → table given, file
+///   `:export sql <table> > <path>` → table given, file (shell-style)
+///   `:export sql > <path>`       → infer table, file
+fn run_export_sql_command(app: &mut App, args: &[&str]) {
+    let (table, rest): (Option<String>, &[&str]) = match args.first().copied() {
+        None => (None, args),
+        Some(">") => (None, args),
+        Some(name) => (Some(name.to_string()), &args[1..]),
+    };
+    let target = match rest.first().copied() {
+        None => ExportTarget::Clipboard,
+        Some(">") if rest.len() == 1 => {
+            app.status = QueryStatus::Failed {
+                error: "missing path after `>`".into(),
+            };
+            return;
+        }
+        Some(">") => ExportTarget::File(expand_tilde(&rest[1..].join(" "))),
+        Some(_) => ExportTarget::File(expand_tilde(&rest.join(" "))),
+    };
+    apply(app, Action::ExportSql { table, target });
+}
+
+/// `:export sql` handler. Mirrors `export_command` (selection wins over
+/// whole-block) but resolves the target table via inference when the
+/// caller didn't provide one. Failure modes surface as a status error
+/// so the user knows to retry with `:export sql <table>`.
+fn export_sql_command(app: &mut App, table: Option<String>, target: ExportTarget) {
+    // Same selection-vs-block dispatch shape as `export_command`. The
+    // selection branch passes the column-index slice down to inference
+    // so a Visual subset can succeed even when the full projection
+    // wouldn't.
+    if let Mode::ResultExpanded {
+        id, cursor, view, ..
+    } = &app.mode
+        && let Some(anchor) = view.anchor()
+    {
+        let id = *id;
+        let cursor = *cursor;
+        let rect = SelectionRect::new(anchor, cursor);
+        let Some(block) = app.results.iter().find(|b| b.id == id) else {
+            app.status = QueryStatus::Failed {
+                error: "result no longer available".into(),
+            };
+            return;
+        };
+        let col_end = (rect.col_end + 1).min(block.columns.len());
+        let col_start = rect.col_start.min(col_end);
+        let row_end = (rect.row_end + 1).min(block.rows().len());
+        let row_start = rect.row_start.min(row_end);
+        let column_indices: Vec<usize> = (col_start..col_end).collect();
+        let resolved_table = match resolve_export_table(table, block, Some(&column_indices)) {
+            Ok(t) => t,
+            Err(e) => {
+                app.status = QueryStatus::Failed { error: e };
+                return;
+            }
+        };
+        let columns: Vec<&Column> = block.columns[col_start..col_end].iter().collect();
+        let rows: Vec<Vec<&Cell>> = block.rows()[row_start..row_end]
+            .iter()
+            .map(|row| {
+                let end = col_end.min(row.len());
+                let start = col_start.min(end);
+                row[start..end].iter().collect()
+            })
+            .collect();
+        let dialect = block.dialect;
+        let payload = export::format_insert(dialect, &resolved_table, &columns, &rows);
+        let drop_visual = matches!(target, ExportTarget::Clipboard);
+        finish_export(
+            app,
+            ExportFormat::Sql,
+            target,
+            rect.rows(),
+            rect.cols(),
+            payload,
+        );
+        if drop_visual && let Mode::ResultExpanded { view, .. } = &mut app.mode {
+            *view = ResultViewMode::Normal;
+        }
+        return;
+    }
+    let Some(block) = app.results.last() else {
+        app.status = QueryStatus::Failed {
+            error: "no result to export".into(),
+        };
+        return;
+    };
+    let resolved_table = match resolve_export_table(table, block, None) {
+        Ok(t) => t,
+        Err(e) => {
+            app.status = QueryStatus::Failed { error: e };
+            return;
+        }
+    };
+    let columns: Vec<&Column> = block.columns.iter().collect();
+    let rows: Vec<Vec<&Cell>> = block
+        .rows()
+        .iter()
+        .map(|row| row.iter().collect())
+        .collect();
+    let dialect = block.dialect;
+    let payload = export::format_insert(dialect, &resolved_table, &columns, &rows);
+    let row_count = rows.len();
+    let col_count = columns.len();
+    finish_export(
+        app,
+        ExportFormat::Sql,
+        target,
+        row_count,
+        col_count,
+        payload,
+    );
+}
+
+/// Returns the target table for `:export sql`. If the user passed one
+/// explicitly, use it; otherwise run inference and surface the (always
+/// human-readable) failure reason verbatim.
+fn resolve_export_table(
+    explicit: Option<String>,
+    block: &ResultBlock,
+    column_indices: Option<&[usize]>,
+) -> Result<String, String> {
+    if let Some(t) = explicit {
+        return Ok(t);
+    }
+    crate::sql_infer::infer_source_table(&block.sql, block.dialect, column_indices)
+        .map_err(|e| format!("can't infer source table — {e}"))
 }
 
 fn export_command(app: &mut App, fmt: ExportFormat, target: ExportTarget) {
@@ -1356,6 +1537,41 @@ fn render_selection(
         })
         .collect();
     Some(export::format(fmt, &columns, &rows))
+}
+
+/// SQL-flavoured render path for the Visual yank prompt. There's no
+/// place to type a table from inside the prompt, so this always relies
+/// on `infer_source_table`; on miss the caller surfaces the error and
+/// keeps the user in Visual so they can retry via `:export sql <table>`.
+fn render_selection_sql(app: &App, id: ResultId, rect: &SelectionRect) -> Result<String, String> {
+    let block = app
+        .results
+        .iter()
+        .find(|b| b.id == id)
+        .ok_or_else(|| "result no longer available".to_string())?;
+    let col_end = (rect.col_end + 1).min(block.columns.len());
+    let col_start = rect.col_start.min(col_end);
+    let row_end = (rect.row_end + 1).min(block.rows().len());
+    let row_start = rect.row_start.min(row_end);
+    let column_indices: Vec<usize> = (col_start..col_end).collect();
+    let table =
+        crate::sql_infer::infer_source_table(&block.sql, block.dialect, Some(&column_indices))
+            .map_err(|e| format!("can't infer source table — {e}"))?;
+    let columns: Vec<&Column> = block.columns[col_start..col_end].iter().collect();
+    let rows: Vec<Vec<&Cell>> = block.rows()[row_start..row_end]
+        .iter()
+        .map(|row| {
+            let end = col_end.min(row.len());
+            let start = col_start.min(end);
+            row[start..end].iter().collect()
+        })
+        .collect();
+    Ok(export::format_insert(
+        block.dialect,
+        &table,
+        &columns,
+        &rows,
+    ))
 }
 
 // ---------------------------------------------------------------------------

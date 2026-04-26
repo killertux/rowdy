@@ -172,7 +172,7 @@ fn render_yank_format_prompt(area: Rect, buf: &mut Buffer, theme: &Theme) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "[c]sv  [t]sv  [j]son",
+            "[c]sv  [t]sv  [j]son  [s]ql",
             Style::default().fg(theme.fg).bg(theme.bg),
         ),
         Span::styled(

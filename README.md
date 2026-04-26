@@ -360,13 +360,13 @@ of how many were truncated — expand it to navigate.
 to the system clipboard — no header, no quoting.
 
 `y` in Visual sub-mode opens a tiny prompt at the bottom of the screen:
-`yank as: [c]sv [t]sv [j]son · Esc cancel`. A single key picks the
+`yank as: [c]sv [t]sv [j]son [s]ql · Esc cancel`. A single key picks the
 format and the selection is copied; `Esc` returns you to Visual with the
 selection intact.
 
-`:export csv|tsv|json` does the same thing from the command bar. With an
-active Visual selection it exports just the rectangle; otherwise it
-exports the latest result block in full.
+`:export csv|tsv|json|sql` does the same thing from the command bar.
+With an active Visual selection it exports just the rectangle; otherwise
+it exports the latest result block in full.
 
 Pass a path after the format to write to disk instead of the clipboard:
 `:export csv path/to/out.csv`. A leading `>` is optional and ignored
@@ -387,6 +387,25 @@ Format details:
   through as JSON strings (preserves precision; round-trips into
   `BigDecimal::from_str`). Everything else is a string. NaN / infinity
   floats fall through to `null`.
+- **SQL** — multi-row `INSERT INTO <table> (cols) VALUES (...);`,
+  chunked at 100 rows per statement. Identifiers are dialect-quoted
+  (`"x"` for SQLite/Postgres, `` `x` `` for MySQL); strings double
+  internal `'`; bytes render as `X'…'` for SQLite/MySQL or
+  `'\x…'::bytea` for Postgres; SQLite booleans become `1`/`0`.
+  - **Source-table inference**. `:export sql` (no table) parses the
+    originating query and accepts: a single bare-table `FROM` (no
+    JOIN/CTE/subquery) plus a projection that's either a pure
+    wildcard (`*` or `<table>.*`) or a list of bare/qualified
+    identifiers without aliases. Anything else (joins, aggregates,
+    aliased projections, computed columns) refuses inference and
+    asks for `:export sql <table>`. Visual selection only requires
+    the *selected* projection items to satisfy the rule, so a
+    column-subset of a join can still infer if those particular
+    columns are clean.
+  - **Limitations**. No `CREATE TABLE` prelude (target schema must
+    already exist), no `BEGIN`/`COMMIT` wrapping, no `ON CONFLICT` /
+    `ON DUPLICATE KEY` clauses; selecting a column subset that
+    excludes `NOT NULL` columns won't round-trip cleanly.
 
 ### Command prompt
 
@@ -414,6 +433,7 @@ After pressing `:`.
 | `:theme dark` \| `light`     | Switch theme                                                    |
 | `:theme toggle` \| `:theme`  | Flip between Dark and Light                                     |
 | `:export csv` \| `tsv` \| `json` `[path]` | Copy the latest result (or Visual selection) to the clipboard, or write to `path` if given |
+| `:export sql [table] [path]` | Emit `INSERT` statements. Table is inferred from the query for simple `SELECT * FROM t` / `SELECT cols FROM t` shapes; pass `<table>` explicitly for joins, aggregates, aliases, etc. `:export sql > path` writes to disk with inferred table |
 | `:format`, `:fmt`            | Format the SQL buffer (or active Visual selection) via `sqlformat`. Undo via edtui's `u` won't restore the pre-format text — yank first if you need a backup |
 | `:conn`, `:conn list`        | Open the connection list                                        |
 | `:conn add <name>`           | Open the form to create `<name>`                                |
@@ -543,10 +563,3 @@ Next likely steps, roughly ordered:
 - **"Test connection"** action in the connection form — fire a one-shot
   connect-and-disconnect so URL typos surface before the user saves and
   switches.
-
-### Export
-
-- **SQL export** (`:export sql`) — emit `INSERT` statements for the
-  selected rows, dialect-aware so they round-trip back into the same
-  driver. CSV / TSV / JSON exports are already wired; this would slot in
-  alongside them.
