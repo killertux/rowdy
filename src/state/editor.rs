@@ -32,6 +32,48 @@ impl EditorPanel {
     }
 }
 
+/// The statement containing the cursor (semicolon-bounded, same naive
+/// rule as `statement_under_cursor`), plus where the cursor sits inside
+/// it. The autocomplete engine needs *both*:
+///
+/// - `statement` — full text including content past the cursor, so
+///   FROM/JOIN bindings written *after* the cursor still contribute
+///   aliases.
+/// - `cursor_byte_in_stmt` — byte offset within `statement` (what
+///   sqlparser's tokenizer slices by).
+/// - `cursor_char_in_buffer` — char offset within the flattened
+///   buffer, used by the editor primitive when applying an accept.
+pub struct StatementCursor {
+    pub statement: String,
+    pub cursor_byte_in_stmt: usize,
+    pub cursor_char_in_buffer: usize,
+}
+
+pub fn current_statement_with_cursor(state: &EditorState) -> StatementCursor {
+    let chars: Vec<char> = state.lines.flatten(&Some('\n'));
+    let cursor_char_in_buffer = cursor_to_offset(state).min(chars.len());
+    let stmt_start_char = chars[..cursor_char_in_buffer]
+        .iter()
+        .rposition(|c| *c == ';')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let stmt_end_char = chars[cursor_char_in_buffer..]
+        .iter()
+        .position(|c| *c == ';')
+        .map(|i| cursor_char_in_buffer + i)
+        .unwrap_or(chars.len());
+    let statement: String = chars[stmt_start_char..stmt_end_char].iter().collect();
+    let cursor_byte_in_stmt: usize = chars[stmt_start_char..cursor_char_in_buffer]
+        .iter()
+        .map(|c| c.len_utf8())
+        .sum();
+    StatementCursor {
+        statement,
+        cursor_byte_in_stmt,
+        cursor_char_in_buffer,
+    }
+}
+
 impl Default for EditorPanel {
     fn default() -> Self {
         Self::new()

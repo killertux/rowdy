@@ -32,3 +32,12 @@ pub struct IndexInfo {
     pub name: String,
     pub unique: bool,
 }
+
+/// Where unqualified identifiers resolve, per the active connection.
+/// Resolved once on connect so the autocomplete cache (and any other
+/// "default location" UX) doesn't have to re-query on every keystroke.
+#[derive(Debug, Clone)]
+pub struct DefaultSchema {
+    pub catalog: String,
+    pub schema: String,
+}

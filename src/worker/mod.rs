@@ -1,10 +1,11 @@
 pub mod request;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
+use crate::autocomplete::{CachedColumn, CachedTable, SchemaCache};
 use crate::datasource::{
     CatalogInfo, ColumnInfo, Datasource, DatasourceError, IndexInfo, QueryResult, SchemaInfo,
     TableInfo,
@@ -28,6 +29,27 @@ pub enum WorkerCommand {
     Connect {
         name: String,
         url: String,
+    },
+    /// Eagerly populate the autocomplete `SchemaCache` for the active
+    /// connection. Phase 1 prime: default schema + catalogs + schemas of
+    /// the default catalog + tables of the default schema. Columns are
+    /// loaded lazily by `LoadCompletionColumns`.
+    PrimeCompletionCache {
+        connection: String,
+    },
+    /// Drop the autocomplete cache and re-prime. User-facing as
+    /// `:reload`. Cheap: same path as the connect prime.
+    Reload {
+        connection: String,
+    },
+    /// Lazy column load. Fired when the engine references a table
+    /// whose columns aren't in the cache yet — typically the first
+    /// time a user types `<table>.` or qualifies into a not-yet-seen
+    /// table.
+    LoadCompletionColumns {
+        catalog: String,
+        schema: String,
+        table: String,
     },
     Close,
 }
@@ -79,6 +101,40 @@ pub enum WorkerEvent {
         name: String,
         error: DatasourceError,
     },
+    /// Cache prime stage finished. The data is already written into the
+    /// shared `SchemaCache`; this event is purely a signal so the UI can
+    /// re-render the popover (and a future schema panel) when fresh
+    /// data lands.
+    CompletionCacheStage {
+        stage: CacheStage,
+    },
+    CompletionCacheFailed {
+        stage: CacheStage,
+        error: DatasourceError,
+    },
+}
+
+/// Phase markers for cache prime / lazy loads. `Tables` carries the
+/// (catalog, schema) so the UI can scope its re-render; `Columns`
+/// carries the table identity so the popover can decide whether the
+/// fresh data matches its current qualifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheStage {
+    DefaultSchema,
+    Catalogs,
+    Schemas {
+        catalog: String,
+    },
+    Tables {
+        catalog: String,
+        schema: String,
+    },
+    Columns {
+        catalog: String,
+        schema: String,
+        table: String,
+    },
+    Reloaded,
 }
 
 #[derive(Debug)]
@@ -97,6 +153,7 @@ pub async fn run(
     logger: Logger,
     mut commands: UnboundedReceiver<WorkerCommand>,
     events: UnboundedSender<WorkerEvent>,
+    cache: Arc<RwLock<SchemaCache>>,
 ) {
     let mut datasource: Option<Arc<dyn Datasource>> = None;
     let mut current_query: Option<JoinHandle<()>> = None;
@@ -128,6 +185,24 @@ pub async fn run(
                         error: DatasourceError::Connect("no active connection".into()),
                     });
                 }
+            },
+            WorkerCommand::PrimeCompletionCache { connection } => match &datasource {
+                Some(ds) => spawn_prime_cache(ds, &events, cache.clone(), connection, false),
+                None => logger.warn("worker", "prime ignored: no active connection"),
+            },
+            WorkerCommand::Reload { connection } => match &datasource {
+                Some(ds) => spawn_prime_cache(ds, &events, cache.clone(), connection, true),
+                None => logger.warn("worker", "reload ignored: no active connection"),
+            },
+            WorkerCommand::LoadCompletionColumns {
+                catalog,
+                schema,
+                table,
+            } => match &datasource {
+                Some(ds) => {
+                    spawn_load_columns(ds, &events, cache.clone(), catalog, schema, table);
+                }
+                None => logger.warn("worker", "column load ignored: no active connection"),
             },
         }
     }
@@ -210,6 +285,229 @@ async fn handle_execute(datasource: &dyn Datasource, req: RequestId, sql: String
     match datasource.execute(&sql).await {
         Ok(result) => WorkerEvent::QueryDone { req, result },
         Err(error) => WorkerEvent::QueryFailed { req, error },
+    }
+}
+
+fn spawn_load_columns(
+    datasource: &Arc<dyn Datasource>,
+    events: &UnboundedSender<WorkerEvent>,
+    cache: Arc<RwLock<SchemaCache>>,
+    catalog: String,
+    schema: String,
+    table: String,
+) {
+    let datasource = datasource.clone();
+    let events = events.clone();
+    tokio::spawn(async move {
+        load_columns(datasource.as_ref(), &events, &cache, catalog, schema, table).await;
+    });
+}
+
+async fn load_columns(
+    datasource: &dyn Datasource,
+    events: &UnboundedSender<WorkerEvent>,
+    cache: &RwLock<SchemaCache>,
+    catalog: String,
+    schema: String,
+    table: String,
+) {
+    // If another caller already populated this entry while we were
+    // queued, skip the round-trip. The check is racy (a second
+    // identical load could still get through), but the worst case is a
+    // duplicated read — acceptable for an autocomplete prime.
+    if let Ok(guard) = cache.read()
+        && guard
+            .columns
+            .contains_key(&(catalog.clone(), schema.clone(), table.clone()))
+    {
+        return;
+    }
+    match datasource
+        .introspect_columns(&catalog, &schema, &table)
+        .await
+    {
+        Ok(cols) => {
+            let cached: Vec<CachedColumn> = cols
+                .into_iter()
+                .map(|c| CachedColumn {
+                    name: c.name,
+                    type_name: c.type_name,
+                })
+                .collect();
+            if let Ok(mut guard) = cache.write() {
+                guard
+                    .columns
+                    .insert((catalog.clone(), schema.clone(), table.clone()), cached);
+            }
+            let _ = events.send(WorkerEvent::CompletionCacheStage {
+                stage: CacheStage::Columns {
+                    catalog,
+                    schema,
+                    table,
+                },
+            });
+        }
+        Err(error) => {
+            let _ = events.send(WorkerEvent::CompletionCacheFailed {
+                stage: CacheStage::Columns {
+                    catalog,
+                    schema,
+                    table,
+                },
+                error,
+            });
+        }
+    }
+}
+
+fn spawn_prime_cache(
+    datasource: &Arc<dyn Datasource>,
+    events: &UnboundedSender<WorkerEvent>,
+    cache: Arc<RwLock<SchemaCache>>,
+    connection: String,
+    is_reload: bool,
+) {
+    let datasource = datasource.clone();
+    let events = events.clone();
+    tokio::spawn(async move {
+        prime_cache(datasource.as_ref(), &events, &cache, connection, is_reload).await;
+    });
+}
+
+/// Phase 1 cache prime: default schema + catalogs + schemas of the
+/// default catalog + tables of the default schema. Each step writes its
+/// result into the shared cache and emits a `CompletionCacheStage`
+/// event. Failures are logged via `CompletionCacheFailed` but don't
+/// abort later stages — partial data is more useful than none.
+async fn prime_cache(
+    datasource: &dyn Datasource,
+    events: &UnboundedSender<WorkerEvent>,
+    cache: &RwLock<SchemaCache>,
+    connection: String,
+    is_reload: bool,
+) {
+    if is_reload && let Ok(mut guard) = cache.write() {
+        guard.clear();
+    }
+
+    // Stage 1: default schema. If this fails we still try the rest, but
+    // unqualified contexts won't have anywhere to look.
+    let default = match datasource.default_schema().await {
+        Ok(d) => {
+            if let Ok(mut guard) = cache.write() {
+                guard.connection = Some(connection.clone());
+                guard.default_catalog = Some(d.catalog.clone());
+                guard.default_schema = Some(d.schema.clone());
+            }
+            let _ = events.send(WorkerEvent::CompletionCacheStage {
+                stage: CacheStage::DefaultSchema,
+            });
+            Some(d)
+        }
+        Err(error) => {
+            let _ = events.send(WorkerEvent::CompletionCacheFailed {
+                stage: CacheStage::DefaultSchema,
+                error,
+            });
+            None
+        }
+    };
+
+    // Stage 2: catalogs.
+    match datasource.introspect_catalogs().await {
+        Ok(catalogs) => {
+            if let Ok(mut guard) = cache.write() {
+                guard.catalogs = catalogs.iter().map(|c| c.name.clone()).collect();
+            }
+            let _ = events.send(WorkerEvent::CompletionCacheStage {
+                stage: CacheStage::Catalogs,
+            });
+        }
+        Err(error) => {
+            let _ = events.send(WorkerEvent::CompletionCacheFailed {
+                stage: CacheStage::Catalogs,
+                error,
+            });
+        }
+    }
+
+    // Stage 3+4 only run if we know where to look.
+    let Some(default) = default else {
+        if is_reload {
+            let _ = events.send(WorkerEvent::CompletionCacheStage {
+                stage: CacheStage::Reloaded,
+            });
+        }
+        return;
+    };
+
+    // Stage 3: schemas of the default catalog.
+    match datasource.introspect_schemas(&default.catalog).await {
+        Ok(schemas) => {
+            if let Ok(mut guard) = cache.write() {
+                guard.schemas.insert(
+                    default.catalog.clone(),
+                    schemas.iter().map(|s| s.name.clone()).collect(),
+                );
+            }
+            let _ = events.send(WorkerEvent::CompletionCacheStage {
+                stage: CacheStage::Schemas {
+                    catalog: default.catalog.clone(),
+                },
+            });
+        }
+        Err(error) => {
+            let _ = events.send(WorkerEvent::CompletionCacheFailed {
+                stage: CacheStage::Schemas {
+                    catalog: default.catalog.clone(),
+                },
+                error,
+            });
+        }
+    }
+
+    // Stage 4: tables of the default schema. (Columns are lazy.)
+    if !default.schema.is_empty() {
+        match datasource
+            .introspect_tables(&default.catalog, &default.schema)
+            .await
+        {
+            Ok(tables) => {
+                let cached: Vec<CachedTable> = tables
+                    .into_iter()
+                    .map(|t| CachedTable {
+                        name: t.name,
+                        kind: t.kind,
+                    })
+                    .collect();
+                if let Ok(mut guard) = cache.write() {
+                    guard
+                        .tables
+                        .insert((default.catalog.clone(), default.schema.clone()), cached);
+                }
+                let _ = events.send(WorkerEvent::CompletionCacheStage {
+                    stage: CacheStage::Tables {
+                        catalog: default.catalog.clone(),
+                        schema: default.schema.clone(),
+                    },
+                });
+            }
+            Err(error) => {
+                let _ = events.send(WorkerEvent::CompletionCacheFailed {
+                    stage: CacheStage::Tables {
+                        catalog: default.catalog.clone(),
+                        schema: default.schema.clone(),
+                    },
+                    error,
+                });
+            }
+        }
+    }
+
+    if is_reload {
+        let _ = events.send(WorkerEvent::CompletionCacheStage {
+            stage: CacheStage::Reloaded,
+        });
     }
 }
 

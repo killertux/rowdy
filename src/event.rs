@@ -3,8 +3,8 @@ use ratatui::crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKin
 use ratatui_textarea::Input;
 
 use crate::action::{
-    Action, AuthAction, CommandAction, ConnFormAction, ConnListAction, ResultNavAction,
-    SchemaAction,
+    Action, AuthAction, CommandAction, CompletionAction, ConnFormAction, ConnListAction,
+    ResultNavAction, SchemaAction,
 };
 use crate::app::App;
 use crate::export::ExportFormat;
@@ -70,10 +70,14 @@ fn translate_help_key(key: KeyEvent) -> Option<Action> {
         (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => Some(Action::CloseHelp),
         (KeyCode::Char('j') | KeyCode::Down, false) => Some(Action::HelpScroll(1)),
         (KeyCode::Char('k') | KeyCode::Up, false) => Some(Action::HelpScroll(-1)),
+        (KeyCode::Char('h') | KeyCode::Left, false) => Some(Action::HelpScrollH(-2)),
+        (KeyCode::Char('l') | KeyCode::Right, false) => Some(Action::HelpScrollH(2)),
         (KeyCode::Char('d'), true) => Some(Action::HelpScroll(8)),
         (KeyCode::Char('u'), true) => Some(Action::HelpScroll(-8)),
         (KeyCode::Char('g'), false) => Some(Action::HelpScroll(i32::MIN / 2)),
         (KeyCode::Char('G'), false) => Some(Action::HelpScroll(i32::MAX / 2)),
+        (KeyCode::Char('0') | KeyCode::Home, _) => Some(Action::HelpScrollH(i32::MIN / 2)),
+        (KeyCode::Char('$') | KeyCode::End, _) => Some(Action::HelpScrollH(i32::MAX / 2)),
         _ => None,
     }
 }
@@ -211,6 +215,20 @@ fn translate_normal_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action
     if let Some(action) = translate_pending_chord(app, key) {
         return Some(action);
     }
+    // Completion popover preempts edtui — without this, Esc would drop
+    // the user out of Insert mode and Tab would insert a tab.
+    if app.completion.is_some()
+        && app.focus == Focus::Editor
+        && let Some(action) = translate_completion_popover_key(key)
+    {
+        return Some(action);
+    }
+    // Manual `Ctrl+Space` opens the popover; works in any editor mode
+    // (Normal/Insert/Visual). Intercepted before the global/edtui
+    // branches so the chord never reaches edtui.
+    if app.focus == Focus::Editor && is_ctrl_space(key) {
+        return Some(Action::Completion(CompletionAction::Open));
+    }
     if can_intercept_globally(app)
         && let Some(action) = translate_global(key)
     {
@@ -219,6 +237,29 @@ fn translate_normal_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action
     match app.focus {
         Focus::Editor => Some(Action::EditorEvent(raw)),
         Focus::Schema => translate_schema_key(key),
+    }
+}
+
+fn is_ctrl_space(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char(' ')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::SHIFT)
+}
+
+/// Keys consumed by the popover when it's open. `None` means "fall
+/// through to whatever would normally handle this key" — the user can
+/// keep typing while the popover stays open and refreshes itself.
+fn translate_completion_popover_key(key: KeyEvent) -> Option<Action> {
+    use CompletionAction::*;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match (key.code, ctrl) {
+        (KeyCode::Esc, _) => Some(Action::Completion(Close)),
+        (KeyCode::Tab, _) | (KeyCode::Enter, _) => Some(Action::Completion(Accept)),
+        (KeyCode::Up, _) => Some(Action::Completion(Up)),
+        (KeyCode::Down, _) => Some(Action::Completion(Down)),
+        (KeyCode::Char('n'), true) => Some(Action::Completion(Down)),
+        (KeyCode::Char('p'), true) => Some(Action::Completion(Up)),
+        _ => None,
     }
 }
 

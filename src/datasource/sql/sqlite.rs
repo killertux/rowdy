@@ -7,7 +7,7 @@ use sqlx::{Column as _, Row, TypeInfo};
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
-    CatalogInfo, ColumnInfo, IndexInfo, SchemaInfo, TableInfo, TableKind,
+    CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
 use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
@@ -38,6 +38,17 @@ impl SqliteDatasource {
 
 #[async_trait]
 impl Datasource for SqliteDatasource {
+    async fn default_schema(&self) -> DatasourceResult<DefaultSchema> {
+        // SQLite has a single (synthetic) catalog and the attached database
+        // is always called `main` unless the user attaches more — which we
+        // don't support in the UI. Hard-coding both is correct and avoids a
+        // round-trip on connect.
+        Ok(DefaultSchema {
+            catalog: "main".into(),
+            schema: "main".into(),
+        })
+    }
+
     async fn introspect_catalogs(&self) -> DatasourceResult<Vec<CatalogInfo>> {
         // SQLite has no notion of catalogs; expose a single synthetic root.
         Ok(vec![CatalogInfo {
@@ -344,6 +355,14 @@ mod tests {
                 .iter()
                 .any(|i| i.name == "users_name_idx" && !i.unique)
         );
+    }
+
+    #[tokio::test]
+    async fn default_schema_is_main() {
+        let ds = fresh().await;
+        let d = ds.default_schema().await.unwrap();
+        assert_eq!(d.catalog, "main");
+        assert_eq!(d.schema, "main");
     }
 
     #[tokio::test]

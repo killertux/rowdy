@@ -31,6 +31,20 @@ exploring schemas, and inspecting results — all without leaving the terminal.
   current cell to the clipboard, `v` enters Visual mode for a
   rectangular selection, and `:export csv|tsv|json` (or `y` from Visual)
   copies the result — full or selected — in the chosen format.
+- **SQL autocomplete** (Phase 4): syntax-aware popover via sqlparser's
+  tokenizer — keywords, tables, columns, **SQL functions**, and
+  **CTE names** with FROM/JOIN alias resolution. Auto-triggers in
+  Insert mode after `.` or 2+ identifier chars (`Ctrl+Space` forces
+  it open). Fuzzy-ranked via `nucleo-matcher`, kind-boosted so
+  columns dominate column slots and tables dominate FROM/JOIN slots.
+  Identifiers are dialect-quoted on insert when they need it (mixed
+  case for Postgres, special chars, reserved keywords); accepting a
+  table appends a space; accepting an arg-taking function inserts
+  `()` with the cursor between them. Schema cache primed at connect
+  time (catalogs + default-schema tables); columns load lazily on
+  first reference. DDL run from within rowdy
+  (CREATE/ALTER/DROP/TRUNCATE/RENAME) auto-reloads the cache;
+  `:reload` re-primes manually.
 - **Three SQL drivers** sharing the same `Datasource` trait:
   - **SQLite** — in-memory or file-based, schema via `sqlite_master` and
     `pragma_*` virtual tables.
@@ -298,6 +312,7 @@ Triggered when the editor is in vim Normal or Visual mode.
 | `<Space> c` | Cancel the in-flight query                                      |
 | `<Space> t` | Toggle Dark / Light theme                                       |
 | `=`         | Format SQL (Visual: selection; Normal: whole buffer)            |
+| `Ctrl+Space`| Open SQL autocomplete popover (works in any editor mode)        |
 
 The editor itself is a full vim implementation — `i`, `Esc`, `hjkl`, `w`,
 `b`, `dd`, `yy`, `p`, `u`, `Ctrl+R`, visual mode, search, etc. See
@@ -407,6 +422,81 @@ Format details:
     `ON DUPLICATE KEY` clauses; selecting a column subset that
     excludes `NOT NULL` columns won't round-trip cleanly.
 
+### Autocomplete
+
+The popover **auto-opens** in editor Insert mode after you type `.` or
+two identifier characters; `Ctrl+Space` forces it open in any editor
+mode. Selection and acceptance:
+
+| Keys                  | Action                                          |
+|-----------------------|-------------------------------------------------|
+| `Up`, `Ctrl+P`        | Previous candidate                              |
+| `Down`, `Ctrl+N`      | Next candidate                                  |
+| `Enter`, `Tab`        | Accept the highlighted candidate                |
+| `Esc`                 | Close the popover (and snooze auto-trigger here) |
+
+While the popover is open you can keep typing — each keystroke
+re-filters the candidate list. Pressing `Esc` snoozes auto-trigger for
+the current word; move the cursor or start a new word to re-enable it.
+`Ctrl+Space` always opens regardless of snooze.
+
+**Context awareness.** Tokens around the cursor determine the
+suggestions:
+
+- After `FROM` / `JOIN` / `INTO` / `UPDATE` / `TABLE` → **tables** in
+  the default schema (or the named schema after `<schema>.`), plus
+  any **CTE names** declared with `WITH`.
+- After `<alias>.` or `<table>.` → **columns** of that bound table.
+  Bound CTEs return no columns (Phase 5 will parse the CTE body).
+- After `SELECT` / `WHERE` / `ON` / `AND` / `,` / operators →
+  **columns** unioned across FROM/JOIN bindings (qualifier-free)
+  plus **SQL functions** (per-dialect curated list).
+- Statement start, after `;`, or unrecognised slot → **keywords**.
+
+FROM/JOIN aliases are resolved by a forward pass over the *whole*
+statement, so `SELECT u.|` autocompletes correctly even when the
+`FROM users u` clause comes after the cursor. CTE definitions
+(`WITH name AS (…)`, optional `RECURSIVE`, multiple comma-separated
+CTEs) are recognized too; subqueries / derived-table aliases stay on
+the Phase 5 list.
+
+**Ranking.** Candidates are scored with `nucleo-matcher` (fuzzy
+subsequence match) and re-ordered by:
+
+1. Score (higher = better, with a +500 bonus when the label has the
+   user's exact prefix).
+2. **Kind bonus** matched to the syntactic context: `+1000` for
+   columns in column slots, tables in table slots, etc., so a
+   shorter coincidentally-matching keyword can't shadow the right
+   answer.
+3. Shorter labels first.
+4. Alphabetical.
+
+**Insert.** Accepting an item writes into the buffer with three
+refinements:
+
+- **Quoting** when the identifier can't sit unquoted: any uppercase
+  char (Postgres folds unquoted to lowercase), any non-`[A-Za-z0-9_]`
+  char, leading digit, or one of the curated reserved keywords. The
+  quote style follows the dialect — `"x"` for SQLite/Postgres,
+  `` `x` `` for MySQL — and any internal quote chars are doubled.
+  Keywords and functions are inserted *as displayed*, never quoted.
+- **Trail** depends on item kind:
+  - **Table / view** in a FROM/JOIN slot → trailing space.
+  - **Function** with arguments → appended `()` with the cursor
+    between them, ready for arguments.
+  - **Function** with no arguments (`NOW`, `CURRENT_TIMESTAMP`,
+    `CURDATE`, …) → appended `()`, cursor at the end.
+  - **Column / keyword / CTE** → no trail.
+
+**Schema cache.** Catalogs, schemas of the default catalog, and tables
+of the default schema are eagerly loaded on connect. **Columns load
+lazily** the first time you reference a table; the popover shows a
+"loading…" placeholder briefly and refreshes when the data arrives.
+DDL statements (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `RENAME`)
+executed from rowdy auto-reload the cache. For schema changes made
+outside rowdy, run `:reload` to re-prime.
+
 ### Command prompt
 
 After pressing `:`.
@@ -435,6 +525,7 @@ After pressing `:`.
 | `:export csv` \| `tsv` \| `json` `[path]` | Copy the latest result (or Visual selection) to the clipboard, or write to `path` if given |
 | `:export sql [table] [path]` | Emit `INSERT` statements. Table is inferred from the query for simple `SELECT * FROM t` / `SELECT cols FROM t` shapes; pass `<table>` explicitly for joins, aggregates, aliases, etc. `:export sql > path` writes to disk with inferred table |
 | `:format`, `:fmt`            | Format the SQL buffer (or active Visual selection) via `sqlformat`. Undo via edtui's `u` won't restore the pre-format text — yank first if you need a backup |
+| `:reload`                    | Drop and re-prime the autocomplete schema cache against the active connection (use after DDL outside the app) |
 | `:conn`, `:conn list`        | Open the connection list                                        |
 | `:conn add <name>`           | Open the form to create `<name>`                                |
 | `:conn edit <name>`          | Open the form pre-filled with `<name>`'s URL (overwrite on save) |
@@ -535,10 +626,14 @@ Next likely steps, roughly ordered:
 
 ### Authoring
 
-- **Schema-aware autocomplete** in the editor. The introspected tree
-  already lives in `SchemaPanel`; surfacing table and column names as
-  prefix-match completions in the editor is mostly a wiring exercise on
-  top of edtui.
+- **Autocomplete Phase 5+.** Phases 1–4 are shipped (manual + auto
+  trigger; keyword / table / column / function / CTE completion with
+  FROM/JOIN alias resolution and schema-qualified contexts; lazy
+  column loads; fuzzy ranking; smart insert with quoting and per-kind
+  trails; DDL-aware cache invalidation; CTE name detection). Phase 5
+  ideas: parse CTE bodies to surface column completion against them,
+  derived-table aliases (`FROM (SELECT …) sub`), auto-alias
+  suggestion, configurable trigger thresholds.
 - **A real SQL lexer** for statement splitting (the current `;` splitter is
   intentionally naive — see the TODO at `state/editor.rs`).
 - **Multiple sessions per connection.** Each connection has a single

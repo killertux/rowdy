@@ -1,4 +1,5 @@
 pub mod auth_view;
+pub mod autocomplete_popover;
 pub mod bottom_bar;
 pub mod conn_form_view;
 pub mod conn_list_view;
@@ -17,6 +18,7 @@ use crate::app::App;
 use crate::state::focus::Mode;
 use crate::state::results::{ResultBlock, SelectionRect, fit_columns};
 use auth_view::AuthPrompt;
+use autocomplete_popover::CompletionPopover;
 use bottom_bar::{BottomBar, COMMAND_PREFIX};
 use conn_form_view::ConnForm;
 use conn_list_view::ConnList;
@@ -54,6 +56,22 @@ fn render_workspace(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: R
 
     render_immutable_panes(app, frame, schema_area, bottom_area, inline_area);
     frame.render_widget(EditorPane { app }, editor_area);
+
+    // After the editor renders, edtui has populated `cursor_screen_position()`;
+    // anchor the popover from there so it tracks the cursor exactly.
+    if let Some(state) = app.completion.as_ref()
+        && let Some(pos) = app.editor.state.cursor_screen_position()
+    {
+        frame.render_widget(
+            CompletionPopover {
+                state,
+                theme: &app.theme,
+                editor_area,
+                cursor_screen_pos: pos,
+            },
+            editor_area,
+        );
+    }
 }
 
 fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Rect) {
@@ -166,6 +184,22 @@ fn command_input_area(bottom_area: Rect) -> Rect {
 }
 
 fn render_modal(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {
+    // The help popover is the only modal that mutates state during
+    // render (clamping scroll against the actual content size), so it
+    // gets the `&mut App`. Everything else takes an immutable reborrow.
+    if matches!(&app.mode, Mode::Help { .. }) {
+        frame.render_widget(BottomBar::new(app), bottom_area);
+        let App { mode, theme, .. } = &mut *app;
+        if let Mode::Help { scroll, h_scroll } = mode {
+            let popover = HelpPopover {
+                scroll,
+                h_scroll,
+                theme,
+            };
+            frame.render_widget(popover, full);
+        }
+        return;
+    }
     let app: &App = app;
     frame.render_widget(BottomBar::new(app), bottom_area);
     match &app.mode {
@@ -190,13 +224,6 @@ fn render_modal(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect)
                 theme: &app.theme,
             };
             frame.render_widget(list, full);
-        }
-        Mode::Help { scroll } => {
-            let popover = HelpPopover {
-                scroll: *scroll,
-                theme: &app.theme,
-            };
-            frame.render_widget(popover, full);
         }
         _ => {}
     }
