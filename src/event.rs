@@ -70,10 +70,14 @@ fn translate_help_key(key: KeyEvent) -> Option<Action> {
         (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => Some(Action::CloseHelp),
         (KeyCode::Char('j') | KeyCode::Down, false) => Some(Action::HelpScroll(1)),
         (KeyCode::Char('k') | KeyCode::Up, false) => Some(Action::HelpScroll(-1)),
+        (KeyCode::Char('h') | KeyCode::Left, false) => Some(Action::HelpScrollH(-2)),
+        (KeyCode::Char('l') | KeyCode::Right, false) => Some(Action::HelpScrollH(2)),
         (KeyCode::Char('d'), true) => Some(Action::HelpScroll(8)),
         (KeyCode::Char('u'), true) => Some(Action::HelpScroll(-8)),
         (KeyCode::Char('g'), false) => Some(Action::HelpScroll(i32::MIN / 2)),
         (KeyCode::Char('G'), false) => Some(Action::HelpScroll(i32::MAX / 2)),
+        (KeyCode::Char('0') | KeyCode::Home, _) => Some(Action::HelpScrollH(i32::MIN / 2)),
+        (KeyCode::Char('$') | KeyCode::End, _) => Some(Action::HelpScrollH(i32::MAX / 2)),
         _ => None,
     }
 }

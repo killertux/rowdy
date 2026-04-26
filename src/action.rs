@@ -66,7 +66,10 @@ pub enum Action {
     ConnList(ConnListAction),
     OpenHelp,
     CloseHelp,
+    /// Scroll the help popover vertically by `delta` lines.
     HelpScroll(i32),
+    /// Scroll the help popover horizontally by `delta` columns.
+    HelpScrollH(i32),
     /// Run the editor buffer (or active selection) through the SQL
     /// formatter and replace the source in-place.
     FormatEditor,
@@ -175,6 +178,8 @@ pub fn apply(app: &mut App, action: Action) {
             app.editor.events.on_event(ev, &mut app.editor.state);
             if app.completion.is_some() {
                 refresh_completion(app);
+            } else {
+                maybe_auto_trigger(app);
             }
             schedule_session_save(app);
         }
@@ -202,9 +207,15 @@ pub fn apply(app: &mut App, action: Action) {
         Action::Auth(a) => apply_auth(app, a),
         Action::ConnForm(a) => apply_conn_form(app, a),
         Action::ConnList(a) => apply_conn_list(app, a),
-        Action::OpenHelp => app.mode = Mode::Help { scroll: 0 },
+        Action::OpenHelp => {
+            app.mode = Mode::Help {
+                scroll: 0,
+                h_scroll: 0,
+            }
+        }
         Action::CloseHelp => app.mode = Mode::Normal,
         Action::HelpScroll(delta) => apply_help_scroll(app, delta),
+        Action::HelpScrollH(delta) => apply_help_scroll_h(app, delta),
         Action::FormatEditor => format_editor(app),
         Action::Completion(c) => apply_completion(app, c),
         Action::ReloadSchemaCache => reload_schema_cache(app),
@@ -213,8 +224,8 @@ pub fn apply(app: &mut App, action: Action) {
 
 fn apply_completion(app: &mut App, action: CompletionAction) {
     match action {
-        CompletionAction::Open => open_completion(app),
-        CompletionAction::Close => app.completion = None,
+        CompletionAction::Open => open_completion(app, OpenSource::Manual),
+        CompletionAction::Close => close_completion(app, true),
         CompletionAction::Up => {
             if let Some(state) = app.completion.as_mut() {
                 state.move_selection(-1);
@@ -229,33 +240,174 @@ fn apply_completion(app: &mut App, action: CompletionAction) {
     }
 }
 
-fn open_completion(app: &mut App) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenSource {
+    /// User pressed Ctrl+Space — always opens (snooze ignored, status
+    /// notice on empty results).
+    Manual,
+    /// Auto-triggered after a keystroke. Skips snoozed positions and
+    /// stays silent on empty results.
+    Auto,
+}
+
+/// Wrapper around `classify` + `compute` that handles cache reads,
+/// resolve context, lazy loads, and the Loading placeholder. Used by
+/// both `open_completion` and `refresh_completion` so we don't have
+/// two slightly-different versions of the same logic.
+struct Computed {
+    items: Vec<crate::autocomplete::CompletionItem>,
+    partial: String,
+    anchor_char_offset: usize,
+    needs_loads: Vec<crate::autocomplete::TableBinding>,
+}
+
+fn compute_completion(app: &App) -> Option<Computed> {
     if app.focus != Focus::Editor {
-        return;
+        return None;
     }
-    let (prefix, cursor_char_offset) =
-        crate::state::editor::statement_prefix_to_cursor(&app.editor.state);
+    let cursor = crate::state::editor::current_statement_with_cursor(&app.editor.state);
     let dialect = app
         .active_dialect
         .unwrap_or(crate::datasource::DriverKind::Sqlite);
-    let result = crate::autocomplete::classify(&prefix, dialect);
-    let items = match app.schema_cache.read() {
-        Ok(cache) => crate::autocomplete::compute(&result.context, &cache, &result.partial),
-        Err(_) => Vec::new(),
+    let cache = app.schema_cache.read().ok()?;
+    let resolve = crate::autocomplete::ResolveContext {
+        default_catalog: cache.default_catalog.as_deref(),
+        default_schema: cache.default_schema.as_deref(),
     };
-    if items.is_empty() {
-        app.status = QueryStatus::Notice {
-            msg: "no completions here".into(),
-        };
+    let result = crate::autocomplete::classify(
+        &cursor.statement,
+        cursor.cursor_byte_in_stmt,
+        dialect,
+        resolve,
+    );
+    let needs_loads = bindings_needing_columns(&cache, &result);
+    let mut items = crate::autocomplete::compute(
+        &result.context,
+        &cache,
+        &result.partial,
+        &result.bindings,
+        dialect,
+    );
+    drop(cache);
+
+    // If column completion has nothing to show *yet* but loads are
+    // pending, surface a placeholder so the user knows we're working
+    // on it. Phase 2 only — Phase 3+ may distinguish "loading" from
+    // "no matches" more nicely.
+    if items.is_empty()
+        && !needs_loads.is_empty()
+        && matches!(
+            result.context,
+            crate::autocomplete::CompletionContext::Column { .. }
+                | crate::autocomplete::CompletionContext::Mixed
+        )
+    {
+        items.push(loading_placeholder(&needs_loads[0]));
+    }
+
+    let partial_chars = result.partial.chars().count();
+    let anchor_char_offset = cursor.cursor_char_in_buffer.saturating_sub(partial_chars);
+    Some(Computed {
+        items,
+        partial: result.partial,
+        anchor_char_offset,
+        needs_loads,
+    })
+}
+
+fn loading_placeholder(
+    b: &crate::autocomplete::TableBinding,
+) -> crate::autocomplete::CompletionItem {
+    crate::autocomplete::CompletionItem {
+        label: format!("loading {} columns…", b.table),
+        kind: crate::autocomplete::CompletionKind::Loading,
+        detail: None,
+        insert: String::new(),
+        trail: crate::autocomplete::InsertTrail::None,
+    }
+}
+
+/// Tables referenced by `result.bindings` (or by the qualified column
+/// context) whose columns aren't in the cache yet. Caller fires
+/// `LoadCompletionColumns` for each so the worker fills them in.
+fn bindings_needing_columns(
+    cache: &crate::autocomplete::SchemaCache,
+    result: &crate::autocomplete::ClassifyResult,
+) -> Vec<crate::autocomplete::TableBinding> {
+    use crate::autocomplete::CompletionContext;
+    let candidate_bindings: Vec<&crate::autocomplete::TableBinding> = match &result.context {
+        CompletionContext::Column { qualifier: Some(b) } => vec![b],
+        CompletionContext::Column { qualifier: None } | CompletionContext::Mixed => {
+            result.bindings.iter().collect()
+        }
+        _ => return Vec::new(),
+    };
+    candidate_bindings
+        .into_iter()
+        // CTE bindings have no real (catalog, schema, table) — there's
+        // nothing the worker could load for them.
+        .filter(|b| !b.is_cte())
+        .filter(|b| {
+            !cache
+                .columns
+                .contains_key(&(b.catalog.clone(), b.schema.clone(), b.table.clone()))
+        })
+        .filter(|b| !b.catalog.is_empty() && !b.schema.is_empty() && !b.table.is_empty())
+        .cloned()
+        .collect()
+}
+
+fn fire_column_loads(app: &App, bindings: &[crate::autocomplete::TableBinding]) {
+    for b in bindings {
+        let _ = app.cmd_tx.send(WorkerCommand::LoadCompletionColumns {
+            catalog: b.catalog.clone(),
+            schema: b.schema.clone(),
+            table: b.table.clone(),
+        });
+    }
+}
+
+fn open_completion(app: &mut App, source: OpenSource) {
+    let Some(c) = compute_completion(app) else {
+        if source == OpenSource::Manual {
+            app.status = QueryStatus::Notice {
+                msg: "no completions here".into(),
+            };
+        }
+        return;
+    };
+
+    // Auto-trigger respects the snooze: Esc dismisses for the current
+    // partial-start. Manual Ctrl+Space ignores it (user explicitly
+    // asked to reopen).
+    if source == OpenSource::Auto && app.completion_snoozed_at == Some(c.anchor_char_offset) {
         return;
     }
-    let partial_chars = result.partial.chars().count();
-    let anchor_char_offset = cursor_char_offset.saturating_sub(partial_chars);
+
+    fire_column_loads(app, &c.needs_loads);
+
+    if c.items.is_empty() {
+        if source == OpenSource::Manual {
+            app.status = QueryStatus::Notice {
+                msg: "no completions here".into(),
+            };
+        }
+        return;
+    }
+
+    app.completion_snoozed_at = None;
     app.completion = Some(crate::state::completion::CompletionState::new(
-        items,
-        anchor_char_offset,
-        result.partial,
+        c.items,
+        c.anchor_char_offset,
+        c.partial,
     ));
+}
+
+fn close_completion(app: &mut App, manual: bool) {
+    if manual && let Some(state) = &app.completion {
+        app.completion_snoozed_at = Some(state.anchor_offset);
+    }
+    app.completion = None;
 }
 
 fn accept_completion(app: &mut App) {
@@ -265,10 +417,36 @@ fn accept_completion(app: &mut App) {
     let Some(item) = state.items.get(state.selected) else {
         return;
     };
+    // Loading placeholders are decorative — a user pressing Enter on
+    // one shouldn't mangle the buffer. Drop accept and reopen so the
+    // popover refreshes once the load lands.
+    if item.kind == crate::autocomplete::CompletionKind::Loading {
+        app.completion = Some(state);
+        return;
+    }
+    let dialect = app
+        .active_dialect
+        .unwrap_or(crate::datasource::DriverKind::Sqlite);
+    // Keywords / functions / loading items go in as displayed (the
+    // engine already shaped `insert` correctly); identifier kinds get
+    // dialect-quoted if the name needs it.
+    use crate::autocomplete::CompletionKind;
+    let to_insert = match item.kind {
+        CompletionKind::Keyword | CompletionKind::Function | CompletionKind::Loading => {
+            item.insert.clone()
+        }
+        CompletionKind::Table
+        | CompletionKind::View
+        | CompletionKind::Column
+        | CompletionKind::Cte => {
+            crate::autocomplete::insert::quote_if_needed(&item.insert, dialect)
+        }
+    };
     crate::autocomplete::insert::apply_completion(
         &mut app.editor.state,
         state.anchor_offset,
-        &item.insert,
+        &to_insert,
+        item.trail,
     );
     schedule_session_save(app);
 }
@@ -280,35 +458,57 @@ fn refresh_completion(app: &mut App) {
     if app.completion.is_none() {
         return;
     }
-    let (prefix, cursor_char_offset) =
-        crate::state::editor::statement_prefix_to_cursor(&app.editor.state);
-    let dialect = app
-        .active_dialect
-        .unwrap_or(crate::datasource::DriverKind::Sqlite);
-    let result = crate::autocomplete::classify(&prefix, dialect);
-    let new_partial_chars = result.partial.chars().count();
-    let new_anchor_char_offset = cursor_char_offset.saturating_sub(new_partial_chars);
+    let Some(c) = compute_completion(app) else {
+        app.completion = None;
+        return;
+    };
     let anchor_changed = app
         .completion
         .as_ref()
-        .map(|s| s.anchor_offset != new_anchor_char_offset)
+        .map(|s| s.anchor_offset != c.anchor_char_offset)
         .unwrap_or(true);
     if anchor_changed {
         app.completion = None;
+        // Different word — drop any prior snooze.
+        app.completion_snoozed_at = None;
         return;
     }
-    let items = match app.schema_cache.read() {
-        Ok(cache) => crate::autocomplete::compute(&result.context, &cache, &result.partial),
-        Err(_) => Vec::new(),
-    };
-    if items.is_empty() {
+    fire_column_loads(app, &c.needs_loads);
+    if c.items.is_empty() {
         app.completion = None;
         return;
     }
     if let Some(state) = app.completion.as_mut() {
-        state.partial = result.partial;
-        state.replace_items(items);
+        state.partial = c.partial;
+        state.replace_items(c.items);
     }
+}
+
+/// Auto-trigger heuristic: open the popover after a keystroke when the
+/// user just typed `.` or has 2+ identifier chars in the current
+/// partial. Insert mode + editor focus only; respects the snooze flag.
+fn maybe_auto_trigger(app: &mut App) {
+    if app.completion.is_some() {
+        return;
+    }
+    if app.focus != Focus::Editor {
+        return;
+    }
+    if app.editor.editor_mode() != edtui::EditorMode::Insert {
+        return;
+    }
+    let cursor = crate::state::editor::current_statement_with_cursor(&app.editor.state);
+    let prefix = &cursor.statement[..cursor.cursor_byte_in_stmt];
+    let just_after_dot = prefix.ends_with('.');
+    let partial_len = prefix
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .count();
+    if !just_after_dot && partial_len < 2 {
+        return;
+    }
+    open_completion(app, OpenSource::Auto);
 }
 
 fn reload_schema_cache(app: &mut App) {
@@ -325,9 +525,16 @@ fn reload_schema_cache(app: &mut App) {
 }
 
 fn apply_help_scroll(app: &mut App, delta: i32) {
-    if let Mode::Help { scroll } = &mut app.mode {
+    if let Mode::Help { scroll, .. } = &mut app.mode {
         let next = (*scroll as i32).saturating_add(delta).max(0);
         *scroll = u16::try_from(next).unwrap_or(u16::MAX);
+    }
+}
+
+fn apply_help_scroll_h(app: &mut App, delta: i32) {
+    if let Mode::Help { h_scroll, .. } = &mut app.mode {
+        let next = (*h_scroll as i32).saturating_add(delta).max(0);
+        *h_scroll = u16::try_from(next).unwrap_or(u16::MAX);
     }
 }
 
@@ -810,9 +1017,11 @@ fn on_cache_stage(app: &mut App, stage: crate::worker::CacheStage) {
             msg: "schema cache reloaded".into(),
         };
     }
-    // The cache was already updated by the worker; if the popover is
-    // open the new data may now be relevant. Phase 2 will recompute
-    // here; Phase 1 leaves it to the next manual trigger.
+    // Columns just landed — if the popover is currently waiting on
+    // them (likely showing a "loading…" placeholder), recompute.
+    if matches!(stage, CacheStage::Columns { .. }) && app.completion.is_some() {
+        refresh_completion(app);
+    }
 }
 
 fn on_cache_failed(app: &mut App, stage: crate::worker::CacheStage, error: String) {
@@ -919,6 +1128,16 @@ fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResu
         return;
     }
     let in_flight = app.in_flight_query.take().expect("checked above");
+
+    // DDL detection: if the just-executed SQL reshaped the schema,
+    // re-prime the autocomplete cache so the next popover sees the
+    // new state. Best-effort — failures are surfaced through the
+    // normal cache-stage failure path.
+    if crate::autocomplete::ddl::affects_schema_cache(&in_flight.sql)
+        && let Some(name) = app.active_connection.clone()
+    {
+        let _ = app.cmd_tx.send(WorkerCommand::Reload { connection: name });
+    }
 
     let took = result.elapsed;
     let total_rows = result.rows.len();

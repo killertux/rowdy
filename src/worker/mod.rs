@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
-use crate::autocomplete::{CachedTable, SchemaCache};
+use crate::autocomplete::{CachedColumn, CachedTable, SchemaCache};
 use crate::datasource::{
     CatalogInfo, ColumnInfo, Datasource, DatasourceError, IndexInfo, QueryResult, SchemaInfo,
     TableInfo,
@@ -41,6 +41,15 @@ pub enum WorkerCommand {
     /// `:reload`. Cheap: same path as the connect prime.
     Reload {
         connection: String,
+    },
+    /// Lazy column load. Fired when the engine references a table
+    /// whose columns aren't in the cache yet — typically the first
+    /// time a user types `<table>.` or qualifies into a not-yet-seen
+    /// table.
+    LoadCompletionColumns {
+        catalog: String,
+        schema: String,
+        table: String,
     },
     Close,
 }
@@ -106,14 +115,25 @@ pub enum WorkerEvent {
 }
 
 /// Phase markers for cache prime / lazy loads. `Tables` carries the
-/// (catalog, schema) so the UI can scope its re-render. Phase 2 will
-/// add a `Columns` variant when lazy column loading lands.
+/// (catalog, schema) so the UI can scope its re-render; `Columns`
+/// carries the table identity so the popover can decide whether the
+/// fresh data matches its current qualifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheStage {
     DefaultSchema,
     Catalogs,
-    Schemas { catalog: String },
-    Tables { catalog: String, schema: String },
+    Schemas {
+        catalog: String,
+    },
+    Tables {
+        catalog: String,
+        schema: String,
+    },
+    Columns {
+        catalog: String,
+        schema: String,
+        table: String,
+    },
     Reloaded,
 }
 
@@ -173,6 +193,16 @@ pub async fn run(
             WorkerCommand::Reload { connection } => match &datasource {
                 Some(ds) => spawn_prime_cache(ds, &events, cache.clone(), connection, true),
                 None => logger.warn("worker", "reload ignored: no active connection"),
+            },
+            WorkerCommand::LoadCompletionColumns {
+                catalog,
+                schema,
+                table,
+            } => match &datasource {
+                Some(ds) => {
+                    spawn_load_columns(ds, &events, cache.clone(), catalog, schema, table);
+                }
+                None => logger.warn("worker", "column load ignored: no active connection"),
             },
         }
     }
@@ -255,6 +285,78 @@ async fn handle_execute(datasource: &dyn Datasource, req: RequestId, sql: String
     match datasource.execute(&sql).await {
         Ok(result) => WorkerEvent::QueryDone { req, result },
         Err(error) => WorkerEvent::QueryFailed { req, error },
+    }
+}
+
+fn spawn_load_columns(
+    datasource: &Arc<dyn Datasource>,
+    events: &UnboundedSender<WorkerEvent>,
+    cache: Arc<RwLock<SchemaCache>>,
+    catalog: String,
+    schema: String,
+    table: String,
+) {
+    let datasource = datasource.clone();
+    let events = events.clone();
+    tokio::spawn(async move {
+        load_columns(datasource.as_ref(), &events, &cache, catalog, schema, table).await;
+    });
+}
+
+async fn load_columns(
+    datasource: &dyn Datasource,
+    events: &UnboundedSender<WorkerEvent>,
+    cache: &RwLock<SchemaCache>,
+    catalog: String,
+    schema: String,
+    table: String,
+) {
+    // If another caller already populated this entry while we were
+    // queued, skip the round-trip. The check is racy (a second
+    // identical load could still get through), but the worst case is a
+    // duplicated read — acceptable for an autocomplete prime.
+    if let Ok(guard) = cache.read()
+        && guard
+            .columns
+            .contains_key(&(catalog.clone(), schema.clone(), table.clone()))
+    {
+        return;
+    }
+    match datasource
+        .introspect_columns(&catalog, &schema, &table)
+        .await
+    {
+        Ok(cols) => {
+            let cached: Vec<CachedColumn> = cols
+                .into_iter()
+                .map(|c| CachedColumn {
+                    name: c.name,
+                    type_name: c.type_name,
+                })
+                .collect();
+            if let Ok(mut guard) = cache.write() {
+                guard
+                    .columns
+                    .insert((catalog.clone(), schema.clone(), table.clone()), cached);
+            }
+            let _ = events.send(WorkerEvent::CompletionCacheStage {
+                stage: CacheStage::Columns {
+                    catalog,
+                    schema,
+                    table,
+                },
+            });
+        }
+        Err(error) => {
+            let _ = events.send(WorkerEvent::CompletionCacheFailed {
+                stage: CacheStage::Columns {
+                    catalog,
+                    schema,
+                    table,
+                },
+                error,
+            });
+        }
     }
 }
 

@@ -1627,6 +1627,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleo-matcher"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf33f538733d1a5a3494b836ba913207f14d9d4a1d3cd67030c5061bdd2cac85"
+dependencies = [
+ "memchr",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2380,7 +2390,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rowdy"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2393,6 +2403,7 @@ dependencies = [
  "crossterm",
  "edtui",
  "futures",
+ "nucleo-matcher",
  "rand 0.10.1",
  "ratatui",
  "ratatui-textarea",

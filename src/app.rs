@@ -77,6 +77,10 @@ pub struct App {
     /// "intercept popover keys before edtui" mode (see
     /// `event::translate_normal_key`).
     pub completion: Option<CompletionState>,
+    /// When the user dismissed the popover with Esc at a given partial
+    /// start (char offset in flattened buffer), don't auto-reopen at
+    /// the same position. Cleared when the partial start moves.
+    pub completion_snoozed_at: Option<usize>,
 }
 
 impl App {
@@ -114,6 +118,7 @@ impl App {
             pending_save_at: None,
             schema_cache,
             completion: None,
+            completion_snoozed_at: None,
         }
     }
 }

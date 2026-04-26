@@ -184,6 +184,22 @@ fn command_input_area(bottom_area: Rect) -> Rect {
 }
 
 fn render_modal(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {
+    // The help popover is the only modal that mutates state during
+    // render (clamping scroll against the actual content size), so it
+    // gets the `&mut App`. Everything else takes an immutable reborrow.
+    if matches!(&app.mode, Mode::Help { .. }) {
+        frame.render_widget(BottomBar::new(app), bottom_area);
+        let App { mode, theme, .. } = &mut *app;
+        if let Mode::Help { scroll, h_scroll } = mode {
+            let popover = HelpPopover {
+                scroll,
+                h_scroll,
+                theme,
+            };
+            frame.render_widget(popover, full);
+        }
+        return;
+    }
     let app: &App = app;
     frame.render_widget(BottomBar::new(app), bottom_area);
     match &app.mode {
@@ -208,13 +224,6 @@ fn render_modal(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect)
                 theme: &app.theme,
             };
             frame.render_widget(list, full);
-        }
-        Mode::Help { scroll } => {
-            let popover = HelpPopover {
-                scroll: *scroll,
-                theme: &app.theme,
-            };
-            frame.render_widget(popover, full);
         }
         _ => {}
     }

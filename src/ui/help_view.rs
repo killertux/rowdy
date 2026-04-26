@@ -12,8 +12,14 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::ui::theme::Theme;
 
+/// Widget takes `&mut u16` for both scroll values so it can clamp the
+/// state during render — the next keystroke then sees a value that
+/// reflects the actual content size, instead of accumulating past the
+/// limit and forcing the user to press the opposite key the same number
+/// of times to "undo" the overshoot.
 pub struct HelpPopover<'a> {
-    pub scroll: u16,
+    pub scroll: &'a mut u16,
+    pub h_scroll: &'a mut u16,
     pub theme: &'a Theme,
 }
 
@@ -45,23 +51,48 @@ impl Widget for HelpPopover<'_> {
         let body_area = chunks[0];
         let footer_area = chunks[1];
 
-        let lines = build_lines(self.theme, key_column_width());
+        let key_w = key_column_width();
+        let lines = build_lines(self.theme, key_w);
         let total = lines.len() as u16;
-        let viewport = body_area.height;
-        let max_scroll = total.saturating_sub(viewport);
-        let scroll = self.scroll.min(max_scroll);
+        let max_line_width = max_line_chars(&lines) as u16;
+        let viewport_h = body_area.height;
+        let viewport_w = body_area.width;
+        let max_scroll = total.saturating_sub(viewport_h);
+        let max_h_scroll = max_line_width.saturating_sub(viewport_w);
+        // Clamp through the &mut so the next keystroke starts from the
+        // already-bounded value — no "press k twenty times to undo
+        // overshoot" surprise.
+        if *self.scroll > max_scroll {
+            *self.scroll = max_scroll;
+        }
+        if *self.h_scroll > max_h_scroll {
+            *self.h_scroll = max_h_scroll;
+        }
 
         Paragraph::new(lines)
             .style(Style::default().fg(self.theme.fg).bg(self.theme.bg))
-            .scroll((scroll, 0))
+            .scroll((*self.scroll, *self.h_scroll))
             .render(body_area, buf);
 
         let footer = Line::from(Span::styled(
-            "j/k scroll · Ctrl+d/u half-page · g/G top/bottom · Esc/q close",
+            "j/k scroll · h/l side-scroll · Ctrl+d/u half-page · g/G · 0/$ · Esc/q close",
             Style::default().fg(self.theme.fg_dim).bg(self.theme.bg),
         ));
         Paragraph::new(footer).render(footer_area, buf);
     }
+}
+
+fn max_line_chars(lines: &[Line<'_>]) -> usize {
+    lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Centered popover. Fixed cap on width so the two-column layout doesn't
@@ -195,7 +226,7 @@ const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 keys: "Ctrl+Space",
-                desc: "Open SQL autocomplete popover",
+                desc: "Open SQL autocomplete (auto-triggers on . or 2+ ident chars)",
             },
         ],
     },
@@ -216,7 +247,7 @@ const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 keys: "Esc",
-                desc: "Close (stays in Insert mode)",
+                desc: "Close + snooze auto-trigger for this word",
             },
         ],
     },
@@ -349,12 +380,20 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 desc: "Scroll one line",
             },
             HelpEntry {
+                keys: "h / l",
+                desc: "Scroll left / right (for long entries)",
+            },
+            HelpEntry {
                 keys: "Ctrl+d / Ctrl+u",
                 desc: "Half-page down / up",
             },
             HelpEntry {
                 keys: "g / G",
                 desc: "Jump to top / bottom",
+            },
+            HelpEntry {
+                keys: "0 / $",
+                desc: "Jump to far left / far right",
             },
             HelpEntry {
                 keys: "q, Esc",

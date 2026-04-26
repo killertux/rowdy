@@ -45,11 +45,15 @@ pub enum Mode {
     Connecting {
         name: String,
     },
-    /// Centered popover listing every keybinding and command. Opened with
-    /// `:help` / `:?`. `scroll` is the topmost line shown inside the
-    /// scrollable content region.
+    /// Centered popover listing every keybinding and command. Opened
+    /// with `:help` / `:?`. `scroll` is the topmost line shown;
+    /// `h_scroll` is the leftmost column shown (for help entries that
+    /// don't fit the popover width). Both are clamped at render time
+    /// against the actual content size, so the next keystroke sees a
+    /// sane value rather than an accumulated "past-the-end" count.
     Help {
         scroll: u16,
+        h_scroll: u16,
     },
 }
 

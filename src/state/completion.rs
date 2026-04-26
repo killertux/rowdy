@@ -87,7 +87,7 @@ impl CompletionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::autocomplete::CompletionKind;
+    use crate::autocomplete::{CompletionKind, InsertTrail};
 
     fn make_state(n: usize) -> CompletionState {
         let items: Vec<CompletionItem> = (0..n)
@@ -96,6 +96,7 @@ mod tests {
                 kind: CompletionKind::Keyword,
                 detail: None,
                 insert: format!("item_{i}"),
+                trail: InsertTrail::None,
             })
             .collect();
         CompletionState::new(items, 0, String::new())
