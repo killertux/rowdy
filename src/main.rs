@@ -10,6 +10,7 @@ mod event;
 mod export;
 mod log;
 mod session;
+mod sql_infer;
 mod state;
 mod subcommands;
 mod terminal;

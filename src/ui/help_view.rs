@@ -261,6 +261,10 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 desc: "Copy as CSV / TSV / JSON",
             },
             HelpEntry {
+                keys: "s",
+                desc: "Copy as SQL INSERTs (table inferred from query)",
+            },
+            HelpEntry {
                 keys: "Esc",
                 desc: "Cancel back to Visual",
             },
@@ -371,6 +375,10 @@ const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 keys: ":export csv|tsv|json [path]",
                 desc: "Export latest result or Visual selection (clipboard, or to path)",
+            },
+            HelpEntry {
+                keys: ":export sql [table] [path]",
+                desc: "Export as INSERT statements (table inferred for simple SELECTs)",
             },
             HelpEntry {
                 keys: ":format, :fmt",

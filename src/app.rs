@@ -4,6 +4,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::ConfigStore;
 use crate::connections::ConnectionStore;
+use crate::datasource::DriverKind;
 use crate::log::Logger;
 use crate::state::editor::EditorPanel;
 use crate::state::focus::{Focus, Mode, PendingChord};
@@ -16,6 +17,12 @@ use crate::worker::{RequestCounter, RequestId, WorkerCommand};
 pub const DEFAULT_SCHEMA_WIDTH: u16 = 32;
 pub const MIN_SCHEMA_WIDTH: u16 = 12;
 pub const MAX_SCHEMA_WIDTH: u16 = 80;
+
+#[derive(Debug, Clone)]
+pub struct InFlightQuery {
+    pub req: RequestId,
+    pub sql: String,
+}
 
 pub struct App {
     pub editor: EditorPanel,
@@ -32,7 +39,10 @@ pub struct App {
     pub exit_code: i32,
     pub cmd_tx: UnboundedSender<WorkerCommand>,
     pub requests: RequestCounter,
-    pub in_flight_query: Option<RequestId>,
+    /// The currently in-flight query, if any. The SQL travels alongside so
+    /// `on_query_done` can attach it to the resulting `ResultBlock` (used by
+    /// `:export sql` for source-table inference).
+    pub in_flight_query: Option<InFlightQuery>,
     pub config: ConfigStore,
     pub log: Logger,
     /// `Some` once the store is unlocked (or known plaintext). Until then
@@ -41,6 +51,10 @@ pub struct App {
     /// Name of the currently active connection (set on `Connected`). `None`
     /// while the worker has no datasource.
     pub active_connection: Option<String>,
+    /// Driver kind of the active connection — snapshotted onto each
+    /// `ResultBlock` so dialect-aware exports keep working after a
+    /// `:conn use` switch to a different driver.
+    pub active_dialect: Option<DriverKind>,
     /// Base `.rowdy/` directory — used to resolve session files and any
     /// other on-disk state.
     pub data_dir: PathBuf,
@@ -81,6 +95,7 @@ impl App {
             log,
             connection_store: None,
             active_connection: None,
+            active_dialect: None,
             data_dir,
             editor_dirty: false,
             pending_save_at: None,

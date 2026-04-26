@@ -5,13 +5,14 @@ use std::fmt::Write as _;
 
 use serde_json::{Map, Number, Value};
 
-use crate::datasource::{Cell, Column};
+use crate::datasource::{Cell, Column, DriverKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     Csv,
     Tsv,
     Json,
+    Sql,
 }
 
 impl ExportFormat {
@@ -20,6 +21,7 @@ impl ExportFormat {
             "csv" => Some(Self::Csv),
             "tsv" => Some(Self::Tsv),
             "json" => Some(Self::Json),
+            "sql" => Some(Self::Sql),
             _ => None,
         }
     }
@@ -29,17 +31,164 @@ impl ExportFormat {
             Self::Csv => "CSV",
             Self::Tsv => "TSV",
             Self::Json => "JSON",
+            Self::Sql => "SQL",
         }
     }
 }
 
+/// How many rows to fit into a single `INSERT INTO ... VALUES (...), (...)`.
+/// MySQL's default `max_allowed_packet` is 16 MiB, Postgres has no fixed
+/// cap — 100 keeps statements short and easy to skim while keeping the
+/// number of trips reasonable.
+const SQL_INSERT_CHUNK: usize = 100;
+
 /// Format a (columns, rows) rectangle in the chosen serialization. The
 /// caller is responsible for picking the slice — this fn just renders.
+///
+/// `ExportFormat::Sql` is **not** handled here because INSERT emission
+/// needs a target table name and a driver kind (for dialect-specific
+/// literal escaping). Use [`format_insert`] for that path.
 pub fn format(format: ExportFormat, columns: &[&Column], rows: &[Vec<&Cell>]) -> String {
     match format {
         ExportFormat::Csv => to_csv(columns, rows),
         ExportFormat::Tsv => to_tsv(columns, rows),
         ExportFormat::Json => to_json(columns, rows),
+        ExportFormat::Sql => unreachable!("SQL export goes through format_insert"),
+    }
+}
+
+/// Build a series of `INSERT INTO <table> (cols) VALUES (...)` statements
+/// for the given rectangle, escaping literals per `dialect`. Rows are
+/// chunked at `SQL_INSERT_CHUNK` per statement so a huge result doesn't
+/// produce one statement that blows past wire-protocol limits.
+pub fn format_insert(
+    dialect: DriverKind,
+    table: &str,
+    columns: &[&Column],
+    rows: &[Vec<&Cell>],
+) -> String {
+    let mut out = String::new();
+    if rows.is_empty() {
+        return out;
+    }
+    let table_q = quote_ident(dialect, table);
+    let cols_q: Vec<String> = columns
+        .iter()
+        .map(|c| quote_ident(dialect, &c.name))
+        .collect();
+    let cols_joined = cols_q.join(", ");
+
+    for chunk in rows.chunks(SQL_INSERT_CHUNK) {
+        let _ = writeln!(out, "INSERT INTO {table_q} ({cols_joined}) VALUES");
+        let last = chunk.len() - 1;
+        for (i, row) in chunk.iter().enumerate() {
+            out.push_str("  (");
+            let mut first = true;
+            for cell in row {
+                if !first {
+                    out.push_str(", ");
+                }
+                first = false;
+                out.push_str(&format_literal(dialect, cell));
+            }
+            out.push(')');
+            if i == last {
+                out.push(';');
+            } else {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn quote_ident(dialect: DriverKind, name: &str) -> String {
+    let (open, close) = match dialect {
+        DriverKind::Sqlite | DriverKind::Postgres => ('"', '"'),
+        DriverKind::Mysql => ('`', '`'),
+    };
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push(open);
+    for ch in name.chars() {
+        if ch == close {
+            // Standard doubling rule for the close quote (works for all
+            // three dialects: `""`, ` `` `).
+            out.push(ch);
+        }
+        out.push(ch);
+    }
+    out.push(close);
+    out
+}
+
+fn format_literal(dialect: DriverKind, cell: &Cell) -> String {
+    match cell {
+        Cell::Null => "NULL".to_string(),
+        Cell::Bool(b) => match dialect {
+            // SQLite has no native bool — round-tripping as 1/0 matches
+            // what every SQLite client does.
+            DriverKind::Sqlite => if *b { "1" } else { "0" }.to_string(),
+            DriverKind::Postgres | DriverKind::Mysql => {
+                if *b { "TRUE" } else { "FALSE" }.to_string()
+            }
+        },
+        Cell::Int(v) => v.to_string(),
+        Cell::UInt(v) => v.to_string(),
+        Cell::Float(v) => {
+            if v.is_finite() {
+                format!("{v}")
+            } else {
+                // NaN / ±Inf can't appear in a portable SQL literal; fall
+                // back to NULL so the INSERT at least loads.
+                "NULL".to_string()
+            }
+        }
+        Cell::Decimal(v) => v.clone(),
+        Cell::Text(s) => quote_string(s),
+        Cell::Bytes(b) => format_bytes(dialect, b),
+        Cell::Timestamp(t) => match dialect {
+            DriverKind::Postgres => {
+                format!(
+                    "TIMESTAMP {}",
+                    quote_string(&t.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
+                )
+            }
+            _ => quote_string(&t.format("%Y-%m-%d %H:%M:%S%.f").to_string()),
+        },
+        Cell::Date(d) => quote_string(&d.to_string()),
+        Cell::Time(t) => quote_string(&t.to_string()),
+        Cell::Uuid(u) => match dialect {
+            DriverKind::Postgres => format!("{}::uuid", quote_string(&u.to_string())),
+            _ => quote_string(&u.to_string()),
+        },
+        Cell::Other { repr, .. } => quote_string(repr),
+    }
+}
+
+fn quote_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push('\'');
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+    out
+}
+
+fn format_bytes(dialect: DriverKind, bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(hex, "{:02x}", b);
+    }
+    match dialect {
+        // SQLite + MySQL accept the standard SQL-92 X'...' literal.
+        DriverKind::Sqlite | DriverKind::Mysql => format!("X'{hex}'"),
+        // Postgres uses \x... bytea hex-string syntax with an explicit cast.
+        DriverKind::Postgres => format!("'\\x{hex}'::bytea"),
     }
 }
 
@@ -307,6 +456,113 @@ mod tests {
         assert_eq!(ExportFormat::parse("csv"), Some(ExportFormat::Csv));
         assert_eq!(ExportFormat::parse("TSV"), Some(ExportFormat::Tsv));
         assert_eq!(ExportFormat::parse("Json"), Some(ExportFormat::Json));
+        assert_eq!(ExportFormat::parse("sql"), Some(ExportFormat::Sql));
         assert_eq!(ExportFormat::parse("xml"), None);
+    }
+
+    #[test]
+    fn insert_quotes_strings_and_escapes_apostrophes() {
+        let cols = [col("name")];
+        let row = [Cell::Text("O'Brien".into())];
+        let sql = format_insert(
+            DriverKind::Sqlite,
+            "users",
+            &columns_borrowed(&cols),
+            &[row_borrowed(&row)],
+        );
+        assert!(
+            sql.contains("'O''Brien'"),
+            "expected doubled apostrophe in {sql:?}"
+        );
+        assert!(sql.starts_with("INSERT INTO \"users\" (\"name\") VALUES"));
+        assert!(sql.trim_end().ends_with(';'));
+    }
+
+    #[test]
+    fn insert_uses_backticks_for_mysql_idents() {
+        let cols = [col("name")];
+        let row = [Cell::Text("x".into())];
+        let sql = format_insert(
+            DriverKind::Mysql,
+            "users",
+            &columns_borrowed(&cols),
+            &[row_borrowed(&row)],
+        );
+        assert!(sql.contains("`users`"));
+        assert!(sql.contains("`name`"));
+    }
+
+    #[test]
+    fn insert_renders_bool_per_dialect() {
+        let cols = [col("active")];
+        let row = [Cell::Bool(true)];
+        let sqlite = format_insert(
+            DriverKind::Sqlite,
+            "t",
+            &columns_borrowed(&cols),
+            &[row_borrowed(&row)],
+        );
+        let pg = format_insert(
+            DriverKind::Postgres,
+            "t",
+            &columns_borrowed(&cols),
+            &[row_borrowed(&row)],
+        );
+        assert!(sqlite.contains("(1)"), "{sqlite}");
+        assert!(pg.contains("(TRUE)"), "{pg}");
+    }
+
+    #[test]
+    fn insert_renders_bytes_per_dialect() {
+        let cols = [col("blob")];
+        let row = [Cell::Bytes(vec![0xde, 0xad])];
+        let sqlite = format_insert(
+            DriverKind::Sqlite,
+            "t",
+            &columns_borrowed(&cols),
+            &[row_borrowed(&row)],
+        );
+        let pg = format_insert(
+            DriverKind::Postgres,
+            "t",
+            &columns_borrowed(&cols),
+            &[row_borrowed(&row)],
+        );
+        assert!(sqlite.contains("X'dead'"), "{sqlite}");
+        assert!(pg.contains("'\\xdead'::bytea"), "{pg}");
+    }
+
+    #[test]
+    fn insert_handles_null_and_decimal() {
+        let cols = [col("a"), col("d")];
+        let row = [Cell::Null, Cell::Decimal("3.1415".into())];
+        let sql = format_insert(
+            DriverKind::Postgres,
+            "t",
+            &columns_borrowed(&cols),
+            &[row_borrowed(&row)],
+        );
+        assert!(sql.contains("(NULL, 3.1415)"), "{sql}");
+    }
+
+    #[test]
+    fn insert_chunks_long_results() {
+        let cols = [col("x")];
+        let rows: Vec<Vec<Cell>> = (0..150).map(|i| vec![Cell::Int(i)]).collect();
+        let row_refs: Vec<Vec<&Cell>> = rows.iter().map(|r| r.iter().collect()).collect();
+        let sql = format_insert(DriverKind::Sqlite, "t", &columns_borrowed(&cols), &row_refs);
+        // Two chunks → two `INSERT INTO`.
+        assert_eq!(sql.matches("INSERT INTO").count(), 2);
+        // First chunk's last row ends with `;` (statement terminator); rows in
+        // the middle end with `,`.
+        let first_chunk_end = sql.match_indices(';').next().unwrap().0;
+        assert!(sql[..first_chunk_end].contains("(99)"));
+    }
+
+    #[test]
+    fn insert_returns_empty_for_no_rows() {
+        let cols = [col("x")];
+        let sql = format_insert(DriverKind::Sqlite, "t", &columns_borrowed(&cols), &[]);
+        assert!(sql.is_empty());
     }
 }

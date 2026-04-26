@@ -293,6 +293,9 @@ fn translate_expanded_key(_app: &App, key: KeyEvent, view: &ResultViewMode) -> O
             KeyCode::Char('j') | KeyCode::Char('J') => {
                 Some(Action::ResultYankFormat(ExportFormat::Json))
             }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                Some(Action::ResultYankFormat(ExportFormat::Sql))
+            }
             KeyCode::Esc => Some(Action::ResultCancelYankFormat),
             _ => None,
         };
