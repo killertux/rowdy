@@ -142,6 +142,27 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
 > `information_schema`, `pg_toast`, `pg_temp_*`; MySQL `information_schema`,
 > `mysql`, `performance_schema`, `sys`. You can still query them by name.
 
+## Install
+
+The install script grabs the latest GitHub Release artifact for your
+OS/arch and drops the binary in `~/.local/bin`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/killertux/rowdy/main/install.sh | sh
+```
+
+Supported targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`aarch64-apple-darwin` (Apple Silicon). macOS Intel and Windows aren't
+covered — build from source instead.
+
+Override via env:
+
+- `ROWDY_INSTALL_DIR=/usr/local/bin` — different install location
+- `ROWDY_VERSION=v0.1.0` — pin a specific release (default: latest)
+
+If the install dir isn't already on your `$PATH`, the script prints the
+line to add to your shell rc.
+
 ## Running it
 
 ```sh
@@ -276,6 +297,7 @@ Triggered when the editor is in vim Normal or Visual mode.
 | `<Space> e` | Expand the latest result to full view                           |
 | `<Space> c` | Cancel the in-flight query                                      |
 | `<Space> t` | Toggle Dark / Light theme                                       |
+| `=`         | Format SQL (Visual: selection; Normal: whole buffer)            |
 
 The editor itself is a full vim implementation — `i`, `Esc`, `hjkl`, `w`,
 `b`, `dd`, `yy`, `p`, `u`, `Ctrl+R`, visual mode, search, etc. See
@@ -392,6 +414,7 @@ After pressing `:`.
 | `:theme dark` \| `light`     | Switch theme                                                    |
 | `:theme toggle` \| `:theme`  | Flip between Dark and Light                                     |
 | `:export csv` \| `tsv` \| `json` `[path]` | Copy the latest result (or Visual selection) to the clipboard, or write to `path` if given |
+| `:format`, `:fmt`            | Format the SQL buffer (or active Visual selection) via `sqlformat`. Undo via edtui's `u` won't restore the pre-format text — yank first if you need a backup |
 | `:conn`, `:conn list`        | Open the connection list                                        |
 | `:conn add <name>`           | Open the form to create `<name>`                                |
 | `:conn edit <name>`          | Open the form pre-filled with `<name>`'s URL (overwrite on save) |
@@ -496,8 +519,6 @@ Next likely steps, roughly ordered:
   already lives in `SchemaPanel`; surfacing table and column names as
   prefix-match completions in the editor is mostly a wiring exercise on
   top of edtui.
-- **SQL formatting** — a `:format` / `=` chord that runs the buffer (or
-  selection) through `sqlformat` or similar.
 - **A real SQL lexer** for statement splitting (the current `;` splitter is
   intentionally naive — see the TODO at `state/editor.rs`).
 - **Multiple sessions per connection.** Each connection has a single

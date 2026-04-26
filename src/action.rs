@@ -59,6 +59,9 @@ pub enum Action {
     OpenHelp,
     CloseHelp,
     HelpScroll(i32),
+    /// Run the editor buffer (or active selection) through the SQL
+    /// formatter and replace the source in-place.
+    FormatEditor,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +175,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::OpenHelp => app.mode = Mode::Help { scroll: 0 },
         Action::CloseHelp => app.mode = Mode::Normal,
         Action::HelpScroll(delta) => apply_help_scroll(app, delta),
+        Action::FormatEditor => format_editor(app),
     }
 }
 
@@ -232,6 +236,7 @@ fn run_command_line(app: &mut App, line: &str) {
         "collapse" | "c" => app.mode = Mode::Normal,
         "theme" => set_theme(app, &args),
         "export" => run_export_command(app, &args),
+        "format" | "fmt" => format_editor(app),
         "conn" | "conns" => run_conn_command(app, &args),
         _ => {
             app.status = QueryStatus::Failed {
@@ -1272,6 +1277,45 @@ fn finish_export(
             }
         },
     }
+}
+
+/// Format the editor buffer or active selection via `sqlformat`, then
+/// rewrite the source in-place. Mirrors `:export`'s "selection wins over
+/// buffer" rule. Sets a status notice on success so the user sees the
+/// command landed even when the visible diff is just whitespace.
+fn format_editor(app: &mut App) {
+    let selection = crate::state::editor::selection_text(&app.editor.state);
+    if let Some(sel) = selection {
+        let formatted = format_sql(&sel);
+        if crate::state::editor::replace_selection_text(&mut app.editor.state, &formatted) {
+            app.status = QueryStatus::Notice {
+                msg: "formatted selection".into(),
+            };
+            schedule_session_save(app);
+            return;
+        }
+    }
+    let buffer = app.editor.text();
+    if buffer.trim().is_empty() {
+        app.status = QueryStatus::Failed {
+            error: "buffer is empty".into(),
+        };
+        return;
+    }
+    let formatted = format_sql(&buffer);
+    crate::state::editor::replace_buffer_text(&mut app.editor.state, &formatted);
+    app.status = QueryStatus::Notice {
+        msg: "formatted buffer".into(),
+    };
+    schedule_session_save(app);
+}
+
+fn format_sql(sql: &str) -> String {
+    sqlformat::format(
+        sql,
+        &sqlformat::QueryParams::None,
+        &sqlformat::FormatOptions::default(),
+    )
 }
 
 /// Expand a leading `~` / `~/` to `$HOME`. Anything else (including the
