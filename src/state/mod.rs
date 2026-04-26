@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod command;
+pub mod completion;
 pub mod conn_form;
 pub mod conn_list;
 pub mod editor;

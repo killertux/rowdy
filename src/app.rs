@@ -1,11 +1,14 @@
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::autocomplete::SchemaCache;
 use crate::config::ConfigStore;
 use crate::connections::ConnectionStore;
 use crate::datasource::DriverKind;
 use crate::log::Logger;
+use crate::state::completion::CompletionState;
 use crate::state::editor::EditorPanel;
 use crate::state::focus::{Focus, Mode, PendingChord};
 use crate::state::results::ResultBlock;
@@ -65,6 +68,15 @@ pub struct App {
     /// this 800ms into the future; the run loop watches it via
     /// `tokio::time::sleep_until`.
     pub pending_save_at: Option<tokio::time::Instant>,
+    /// Shared autocomplete schema cache. The worker writes here on
+    /// connect / `:reload` / lazy column loads; the engine reads here on
+    /// every popover open. `Arc<RwLock<…>>` so the worker and the main
+    /// loop can both hold handles without cloning the contents.
+    pub schema_cache: Arc<RwLock<SchemaCache>>,
+    /// Active autocomplete popover, if any. `Some` flips the keymap into
+    /// "intercept popover keys before edtui" mode (see
+    /// `event::translate_normal_key`).
+    pub completion: Option<CompletionState>,
 }
 
 impl App {
@@ -73,6 +85,7 @@ impl App {
         config: ConfigStore,
         log: Logger,
         data_dir: PathBuf,
+        schema_cache: Arc<RwLock<SchemaCache>>,
     ) -> Self {
         let initial = config.state();
         let schema = SchemaPanel::new(initial.schema_width);
@@ -99,6 +112,8 @@ impl App {
             data_dir,
             editor_dirty: false,
             pending_save_at: None,
+            schema_cache,
+            completion: None,
         }
     }
 }

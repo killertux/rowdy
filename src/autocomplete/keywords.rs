@@ -1,0 +1,91 @@
+//! Curated SQL-keyword list for the popover.
+//!
+//! `sqlparser::keywords::ALL_KEYWORDS` is comprehensive (≈2000 entries
+//! across every dialect the crate supports), and most of those would just
+//! be noise — `ABSENT`, `ACCEPTANYDATE`, etc. We surface a working subset
+//! here. The list is hand-maintained on purpose: a longer list always
+//! works (it's just an autocomplete suggestion), but a tighter one keeps
+//! the popover useful.
+//!
+//! Each entry is referenced through `sqlparser::keywords::*` constants so
+//! a typo / upstream rename is a compile error rather than a runtime
+//! miss.
+
+use sqlparser::keywords;
+
+pub const KEYWORDS: &[&str] = &[
+    keywords::ALL,
+    keywords::ALTER,
+    keywords::AND,
+    keywords::AS,
+    keywords::ASC,
+    keywords::BEGIN,
+    keywords::BETWEEN,
+    keywords::BY,
+    keywords::CASE,
+    keywords::CAST,
+    keywords::COLUMN,
+    keywords::COMMIT,
+    keywords::CREATE,
+    keywords::CROSS,
+    keywords::DATABASE,
+    keywords::DEFAULT,
+    keywords::DELETE,
+    keywords::DESC,
+    keywords::DISTINCT,
+    keywords::DROP,
+    keywords::ELSE,
+    keywords::END,
+    keywords::EXCEPT,
+    keywords::EXISTS,
+    keywords::EXPLAIN,
+    keywords::FALSE,
+    keywords::FETCH,
+    keywords::FOR,
+    keywords::FOREIGN,
+    keywords::FROM,
+    keywords::FULL,
+    keywords::GROUP,
+    keywords::HAVING,
+    keywords::IF,
+    keywords::ILIKE,
+    keywords::IN,
+    keywords::INDEX,
+    keywords::INNER,
+    keywords::INSERT,
+    keywords::INTERSECT,
+    keywords::INTO,
+    keywords::IS,
+    keywords::JOIN,
+    keywords::KEY,
+    keywords::LEFT,
+    keywords::LIKE,
+    keywords::LIMIT,
+    keywords::NOT,
+    keywords::NULL,
+    keywords::OFFSET,
+    keywords::ON,
+    keywords::OR,
+    keywords::ORDER,
+    keywords::OUTER,
+    keywords::PRIMARY,
+    keywords::REFERENCES,
+    keywords::RETURNING,
+    keywords::RIGHT,
+    keywords::ROLLBACK,
+    keywords::SCHEMA,
+    keywords::SELECT,
+    keywords::SET,
+    keywords::TABLE,
+    keywords::THEN,
+    keywords::TRUE,
+    keywords::UNION,
+    keywords::UNIQUE,
+    keywords::UPDATE,
+    keywords::USING,
+    keywords::VALUES,
+    keywords::VIEW,
+    keywords::WHEN,
+    keywords::WHERE,
+    keywords::WITH,
+];

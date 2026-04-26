@@ -32,6 +32,27 @@ impl EditorPanel {
     }
 }
 
+/// Slice of the buffer from the start of the current statement up to
+/// the cursor, plus the cursor's char offset in the flattened buffer.
+/// Used by the autocomplete engine — it needs to look at "what came
+/// before" the cursor to classify context.
+///
+/// The statement boundary is the same naive `;` split as
+/// `statement_under_cursor`, with the same caveat (mis-splits across
+/// strings/comments). Phase 2 will swap this for a tokenizer-aware
+/// boundary.
+pub fn statement_prefix_to_cursor(state: &EditorState) -> (String, usize) {
+    let chars: Vec<char> = state.lines.flatten(&Some('\n'));
+    let cursor_char_offset = cursor_to_offset(state).min(chars.len());
+    let stmt_start = chars[..cursor_char_offset]
+        .iter()
+        .rposition(|c| *c == ';')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let prefix: String = chars[stmt_start..cursor_char_offset].iter().collect();
+    (prefix, cursor_char_offset)
+}
+
 impl Default for EditorPanel {
     fn default() -> Self {
         Self::new()

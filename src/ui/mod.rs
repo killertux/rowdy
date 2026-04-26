@@ -1,4 +1,5 @@
 pub mod auth_view;
+pub mod autocomplete_popover;
 pub mod bottom_bar;
 pub mod conn_form_view;
 pub mod conn_list_view;
@@ -17,6 +18,7 @@ use crate::app::App;
 use crate::state::focus::Mode;
 use crate::state::results::{ResultBlock, SelectionRect, fit_columns};
 use auth_view::AuthPrompt;
+use autocomplete_popover::CompletionPopover;
 use bottom_bar::{BottomBar, COMMAND_PREFIX};
 use conn_form_view::ConnForm;
 use conn_list_view::ConnList;
@@ -54,6 +56,22 @@ fn render_workspace(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: R
 
     render_immutable_panes(app, frame, schema_area, bottom_area, inline_area);
     frame.render_widget(EditorPane { app }, editor_area);
+
+    // After the editor renders, edtui has populated `cursor_screen_position()`;
+    // anchor the popover from there so it tracks the cursor exactly.
+    if let Some(state) = app.completion.as_ref()
+        && let Some(pos) = app.editor.state.cursor_screen_position()
+    {
+        frame.render_widget(
+            CompletionPopover {
+                state,
+                theme: &app.theme,
+                editor_area,
+                cursor_screen_pos: pos,
+            },
+            editor_area,
+        );
+    }
 }
 
 fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Rect) {

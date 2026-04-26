@@ -31,6 +31,10 @@ exploring schemas, and inspecting results — all without leaving the terminal.
   current cell to the clipboard, `v` enters Visual mode for a
   rectangular selection, and `:export csv|tsv|json` (or `y` from Visual)
   copies the result — full or selected — in the chosen format.
+- **SQL autocomplete** (Phase 1): `Ctrl+Space` opens a popover with
+  keyword and table suggestions, syntax-aware via sqlparser's
+  tokenizer. Schema cache is primed at connect time (catalogs +
+  default-schema tables) and refreshed via `:reload`.
 - **Three SQL drivers** sharing the same `Datasource` trait:
   - **SQLite** — in-memory or file-based, schema via `sqlite_master` and
     `pragma_*` virtual tables.
@@ -298,6 +302,7 @@ Triggered when the editor is in vim Normal or Visual mode.
 | `<Space> c` | Cancel the in-flight query                                      |
 | `<Space> t` | Toggle Dark / Light theme                                       |
 | `=`         | Format SQL (Visual: selection; Normal: whole buffer)            |
+| `Ctrl+Space`| Open SQL autocomplete popover (works in any editor mode)        |
 
 The editor itself is a full vim implementation — `i`, `Esc`, `hjkl`, `w`,
 `b`, `dd`, `yy`, `p`, `u`, `Ctrl+R`, visual mode, search, etc. See
@@ -407,6 +412,34 @@ Format details:
     `ON DUPLICATE KEY` clauses; selecting a column subset that
     excludes `NOT NULL` columns won't round-trip cleanly.
 
+### Autocomplete
+
+Press `Ctrl+Space` in the editor to open the popover. Phase 1 ships
+keyword and table-name completion only — column completion lands in
+Phase 2. Selection and acceptance:
+
+| Keys                  | Action                                          |
+|-----------------------|-------------------------------------------------|
+| `Up`, `Ctrl+P`        | Previous candidate                              |
+| `Down`, `Ctrl+N`      | Next candidate                                  |
+| `Enter`, `Tab`        | Accept the highlighted candidate                |
+| `Esc`                 | Close the popover (without dropping out of Insert) |
+
+While the popover is open you can keep typing — each keystroke
+re-filters the candidate list. If you type past the original token, or
+move the cursor outside it, the popover closes.
+
+**Context awareness.** sqlparser's tokenizer classifies the cursor
+position; the popover surfaces tables after `FROM` / `JOIN` / `INTO` /
+`UPDATE` / `TABLE`, and keywords everywhere else. Phase 2 adds column
+completion (with FROM-clause alias resolution) and auto-trigger.
+
+**Schema cache.** Catalogs, schemas of the default catalog, and tables
+of the default schema are eagerly loaded on connect. Other schemas /
+columns / qualified contexts are out of scope for Phase 1 and will pick
+up in Phase 2's lazy loader. Re-prime manually with `:reload` after a
+DDL change made outside rowdy.
+
 ### Command prompt
 
 After pressing `:`.
@@ -435,6 +468,7 @@ After pressing `:`.
 | `:export csv` \| `tsv` \| `json` `[path]` | Copy the latest result (or Visual selection) to the clipboard, or write to `path` if given |
 | `:export sql [table] [path]` | Emit `INSERT` statements. Table is inferred from the query for simple `SELECT * FROM t` / `SELECT cols FROM t` shapes; pass `<table>` explicitly for joins, aggregates, aliases, etc. `:export sql > path` writes to disk with inferred table |
 | `:format`, `:fmt`            | Format the SQL buffer (or active Visual selection) via `sqlformat`. Undo via edtui's `u` won't restore the pre-format text — yank first if you need a backup |
+| `:reload`                    | Drop and re-prime the autocomplete schema cache against the active connection (use after DDL outside the app) |
 | `:conn`, `:conn list`        | Open the connection list                                        |
 | `:conn add <name>`           | Open the form to create `<name>`                                |
 | `:conn edit <name>`          | Open the form pre-filled with `<name>`'s URL (overwrite on save) |
@@ -535,10 +569,11 @@ Next likely steps, roughly ordered:
 
 ### Authoring
 
-- **Schema-aware autocomplete** in the editor. The introspected tree
-  already lives in `SchemaPanel`; surfacing table and column names as
-  prefix-match completions in the editor is mostly a wiring exercise on
-  top of edtui.
+- **Autocomplete Phase 2+.** Phase 1 is shipped (Ctrl+Space, keyword +
+  table completion). Next up: column completion with FROM-clause alias
+  resolution, schema-qualified contexts, lazy column loading, and an
+  auto-trigger so the popover opens as you type. Phase 3 layers fuzzy
+  matching (`nucleo-matcher`) and quoting/escaping on insert.
 - **A real SQL lexer** for statement splitting (the current `;` splitter is
   intentionally naive — see the TODO at `state/editor.rs`).
 - **Multiple sessions per connection.** Each connection has a single

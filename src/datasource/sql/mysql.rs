@@ -10,7 +10,7 @@ use sqlx::{Column as _, Row, TypeInfo};
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
-    CatalogInfo, ColumnInfo, IndexInfo, SchemaInfo, TableInfo, TableKind,
+    CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
 use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
@@ -61,6 +61,27 @@ impl MysqlDatasource {
 
 #[async_trait]
 impl Datasource for MysqlDatasource {
+    async fn default_schema(&self) -> DatasourceResult<DefaultSchema> {
+        // MySQL exposes a single static catalog (`def`); the schema (= "current
+        // database") comes from the connection URL via `DATABASE()`. If the
+        // user connected without selecting a database, we return an empty
+        // string so the caller can decide what to do (skip prime, etc.).
+        let row = sqlx::query(
+            "SELECT \
+                COALESCE(\
+                    (SELECT catalog_name FROM information_schema.schemata LIMIT 1),\
+                    'def'\
+                ) AS catalog, \
+                COALESCE(DATABASE(), '') AS schema",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(introspect_err)?;
+        let catalog = try_string(&row, "catalog").unwrap_or_else(|| "def".to_string());
+        let schema = try_string(&row, "schema").unwrap_or_default();
+        Ok(DefaultSchema { catalog, schema })
+    }
+
     async fn introspect_catalogs(&self) -> DatasourceResult<Vec<CatalogInfo>> {
         // MySQL exposes a single static catalog (`def`); we read it from
         // information_schema rather than hard-coding it.

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
-    CatalogInfo, ColumnInfo, IndexInfo, SchemaInfo, TableInfo, TableKind,
+    CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
 use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
@@ -50,6 +50,24 @@ impl PostgresDatasource {
 
 #[async_trait]
 impl Datasource for PostgresDatasource {
+    async fn default_schema(&self) -> DatasourceResult<DefaultSchema> {
+        // `current_schemas(false)` returns the search_path with implicit
+        // entries (pg_catalog) excluded; the first element is "where new
+        // unqualified objects land" — what users mean by "default schema".
+        // `public` is the fallback if the search_path is empty (rare but
+        // possible after `SET search_path = ''`).
+        let row = sqlx::query(
+            "SELECT current_database() AS catalog, \
+                    COALESCE((current_schemas(false))[1], 'public') AS schema",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(introspect_err)?;
+        let catalog: String = row.try_get("catalog").map_err(introspect_err)?;
+        let schema: String = row.try_get("schema").map_err(introspect_err)?;
+        Ok(DefaultSchema { catalog, schema })
+    }
+
     async fn introspect_catalogs(&self) -> DatasourceResult<Vec<CatalogInfo>> {
         // A Postgres connection is bound to a single database; expose it as the
         // sole catalog so the tree mirrors the rest of the drivers.

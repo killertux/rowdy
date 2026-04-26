@@ -1,5 +1,6 @@
 mod action;
 mod app;
+mod autocomplete;
 mod cli;
 mod clipboard;
 mod config;
@@ -26,10 +27,12 @@ use ratatui::backend::CrosstermBackend;
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::action::{Action, apply, dispatch_connect};
 use crate::app::App;
+use crate::autocomplete::SchemaCache;
 use crate::cli::{Args, Command};
 use crate::config::ConfigStore;
 use crate::connections::ConnectionStore;
@@ -99,10 +102,22 @@ async fn run_app() -> Result<i32> {
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();
-    let worker_handle = tokio::spawn(worker::run(logger.clone(), cmd_rx, evt_tx));
+    let schema_cache = Arc::new(RwLock::new(SchemaCache::new()));
+    let worker_handle = tokio::spawn(worker::run(
+        logger.clone(),
+        cmd_rx,
+        evt_tx,
+        schema_cache.clone(),
+    ));
 
     let mut tui = Tui::init()?;
-    let mut app = App::new(cmd_tx, config, logger.clone(), data_dir.clone());
+    let mut app = App::new(
+        cmd_tx,
+        config,
+        logger.clone(),
+        data_dir.clone(),
+        schema_cache,
+    );
     apply_decision(&mut app, decision);
 
     let result = run(&mut tui.terminal, &mut app, evt_rx).await;

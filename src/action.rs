@@ -70,6 +70,24 @@ pub enum Action {
     /// Run the editor buffer (or active selection) through the SQL
     /// formatter and replace the source in-place.
     FormatEditor,
+    /// Autocomplete popover lifecycle and navigation. See
+    /// `CompletionAction` for the sub-variants.
+    Completion(CompletionAction),
+    /// User-facing `:reload`. Drops the autocomplete schema cache and
+    /// re-primes from the active connection.
+    ReloadSchemaCache,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum CompletionAction {
+    /// Open the popover (manual `Ctrl+Space`).
+    Open,
+    /// Close without inserting.
+    Close,
+    Up,
+    Down,
+    /// Insert the highlighted item and close the popover.
+    Accept,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +173,9 @@ pub fn apply(app: &mut App, action: Action) {
         Action::SetPendingChord(c) => app.pending = c,
         Action::EditorEvent(ev) => {
             app.editor.events.on_event(ev, &mut app.editor.state);
+            if app.completion.is_some() {
+                refresh_completion(app);
+            }
             schedule_session_save(app);
         }
         Action::OpenCommand => app.mode = Mode::Command(CommandBuffer::default()),
@@ -185,7 +206,122 @@ pub fn apply(app: &mut App, action: Action) {
         Action::CloseHelp => app.mode = Mode::Normal,
         Action::HelpScroll(delta) => apply_help_scroll(app, delta),
         Action::FormatEditor => format_editor(app),
+        Action::Completion(c) => apply_completion(app, c),
+        Action::ReloadSchemaCache => reload_schema_cache(app),
     }
+}
+
+fn apply_completion(app: &mut App, action: CompletionAction) {
+    match action {
+        CompletionAction::Open => open_completion(app),
+        CompletionAction::Close => app.completion = None,
+        CompletionAction::Up => {
+            if let Some(state) = app.completion.as_mut() {
+                state.move_selection(-1);
+            }
+        }
+        CompletionAction::Down => {
+            if let Some(state) = app.completion.as_mut() {
+                state.move_selection(1);
+            }
+        }
+        CompletionAction::Accept => accept_completion(app),
+    }
+}
+
+fn open_completion(app: &mut App) {
+    if app.focus != Focus::Editor {
+        return;
+    }
+    let (prefix, cursor_char_offset) =
+        crate::state::editor::statement_prefix_to_cursor(&app.editor.state);
+    let dialect = app
+        .active_dialect
+        .unwrap_or(crate::datasource::DriverKind::Sqlite);
+    let result = crate::autocomplete::classify(&prefix, dialect);
+    let items = match app.schema_cache.read() {
+        Ok(cache) => crate::autocomplete::compute(&result.context, &cache, &result.partial),
+        Err(_) => Vec::new(),
+    };
+    if items.is_empty() {
+        app.status = QueryStatus::Notice {
+            msg: "no completions here".into(),
+        };
+        return;
+    }
+    let partial_chars = result.partial.chars().count();
+    let anchor_char_offset = cursor_char_offset.saturating_sub(partial_chars);
+    app.completion = Some(crate::state::completion::CompletionState::new(
+        items,
+        anchor_char_offset,
+        result.partial,
+    ));
+}
+
+fn accept_completion(app: &mut App) {
+    let Some(state) = app.completion.take() else {
+        return;
+    };
+    let Some(item) = state.items.get(state.selected) else {
+        return;
+    };
+    crate::autocomplete::insert::apply_completion(
+        &mut app.editor.state,
+        state.anchor_offset,
+        &item.insert,
+    );
+    schedule_session_save(app);
+}
+
+/// Recompute the popover after each edit. Closes it if the cursor
+/// drifted out of the original token, or if the new partial yields no
+/// candidates. Otherwise updates `partial` + `items` + clamps `selected`.
+fn refresh_completion(app: &mut App) {
+    if app.completion.is_none() {
+        return;
+    }
+    let (prefix, cursor_char_offset) =
+        crate::state::editor::statement_prefix_to_cursor(&app.editor.state);
+    let dialect = app
+        .active_dialect
+        .unwrap_or(crate::datasource::DriverKind::Sqlite);
+    let result = crate::autocomplete::classify(&prefix, dialect);
+    let new_partial_chars = result.partial.chars().count();
+    let new_anchor_char_offset = cursor_char_offset.saturating_sub(new_partial_chars);
+    let anchor_changed = app
+        .completion
+        .as_ref()
+        .map(|s| s.anchor_offset != new_anchor_char_offset)
+        .unwrap_or(true);
+    if anchor_changed {
+        app.completion = None;
+        return;
+    }
+    let items = match app.schema_cache.read() {
+        Ok(cache) => crate::autocomplete::compute(&result.context, &cache, &result.partial),
+        Err(_) => Vec::new(),
+    };
+    if items.is_empty() {
+        app.completion = None;
+        return;
+    }
+    if let Some(state) = app.completion.as_mut() {
+        state.partial = result.partial;
+        state.replace_items(items);
+    }
+}
+
+fn reload_schema_cache(app: &mut App) {
+    let Some(name) = app.active_connection.clone() else {
+        app.status = QueryStatus::Failed {
+            error: "no active connection".into(),
+        };
+        return;
+    };
+    let _ = app.cmd_tx.send(WorkerCommand::Reload { connection: name });
+    app.status = QueryStatus::Notice {
+        msg: "reloading schema cache…".into(),
+    };
 }
 
 fn apply_help_scroll(app: &mut App, delta: i32) {
@@ -246,6 +382,7 @@ fn run_command_line(app: &mut App, line: &str) {
         "theme" => set_theme(app, &args),
         "export" => run_export_command(app, &args),
         "format" | "fmt" => format_editor(app),
+        "reload" => apply(app, Action::ReloadSchemaCache),
         "conn" | "conns" => run_conn_command(app, &args),
         _ => {
             app.status = QueryStatus::Failed {
@@ -659,7 +796,30 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
         WorkerEvent::ConnectFailed { name, error } => {
             on_connect_failed(app, name, error.to_string())
         }
+        WorkerEvent::CompletionCacheStage { stage } => on_cache_stage(app, stage),
+        WorkerEvent::CompletionCacheFailed { stage, error } => {
+            on_cache_failed(app, stage, error.to_string())
+        }
     }
+}
+
+fn on_cache_stage(app: &mut App, stage: crate::worker::CacheStage) {
+    use crate::worker::CacheStage;
+    if matches!(stage, CacheStage::Reloaded) {
+        app.status = QueryStatus::Notice {
+            msg: "schema cache reloaded".into(),
+        };
+    }
+    // The cache was already updated by the worker; if the popover is
+    // open the new data may now be relevant. Phase 2 will recompute
+    // here; Phase 1 leaves it to the next manual trigger.
+}
+
+fn on_cache_failed(app: &mut App, stage: crate::worker::CacheStage, error: String) {
+    app.log.warn(
+        "autocomplete",
+        format!("cache load failed at {stage:?}: {error}"),
+    );
 }
 
 fn on_connected(app: &mut App, name: String) {
@@ -680,6 +840,12 @@ fn on_connected(app: &mut App, name: String) {
     app.schema.begin_root_load();
     let _ = app.cmd_tx.send(WorkerCommand::Introspect {
         target: IntrospectTarget::Catalogs,
+    });
+    // Kick off the autocomplete cache prime — runs in the background;
+    // popover opens before it finishes will see whatever's already
+    // landed (keywords always work).
+    let _ = app.cmd_tx.send(WorkerCommand::PrimeCompletionCache {
+        connection: name.clone(),
     });
     app.log.info("app", format!("connected to {name}"));
 }
@@ -1039,6 +1205,12 @@ pub(crate) fn dispatch_connect(app: &mut App, name: String, url: String) {
     // this connection will pin to it; if the connect fails before any rows
     // come back, the stale value is harmless (no result block uses it).
     app.active_dialect = crate::datasource::DriverKind::from_url(&url);
+    // Drop the previous connection's autocomplete cache so a popover that
+    // opens before the new prime lands can't show stale tables.
+    if let Ok(mut cache) = app.schema_cache.write() {
+        cache.clear();
+    }
+    app.completion = None;
     app.mode = Mode::Connecting { name: name.clone() };
     app.status = QueryStatus::Idle;
     let _ = app.cmd_tx.send(WorkerCommand::Connect { name, url });

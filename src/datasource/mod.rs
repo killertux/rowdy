@@ -11,7 +11,7 @@ use crate::log::Logger;
 
 pub use cell::Cell;
 pub use error::{DatasourceError, DatasourceResult};
-pub use schema::{CatalogInfo, ColumnInfo, IndexInfo, SchemaInfo, TableInfo};
+pub use schema::{CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo};
 
 #[derive(Debug, Clone)]
 pub struct Column {
@@ -52,6 +52,11 @@ pub struct QueryResult {
 
 #[async_trait]
 pub trait Datasource: Send + Sync {
+    /// Where unqualified identifiers resolve. Called once on connect to
+    /// seed the autocomplete cache; drivers should fall back to a sane
+    /// default rather than error out so a transient permissions glitch
+    /// doesn't break the rest of the prime.
+    async fn default_schema(&self) -> DatasourceResult<DefaultSchema>;
     async fn introspect_catalogs(&self) -> DatasourceResult<Vec<CatalogInfo>>;
     async fn introspect_schemas(&self, catalog: &str) -> DatasourceResult<Vec<SchemaInfo>>;
     async fn introspect_tables(

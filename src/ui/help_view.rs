@@ -193,6 +193,31 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 keys: "=",
                 desc: "Format SQL (Visual: selection; Normal: whole buffer)",
             },
+            HelpEntry {
+                keys: "Ctrl+Space",
+                desc: "Open SQL autocomplete popover",
+            },
+        ],
+    },
+    HelpSection {
+        title: "Autocomplete popover",
+        entries: &[
+            HelpEntry {
+                keys: "Up, Ctrl+P",
+                desc: "Previous candidate",
+            },
+            HelpEntry {
+                keys: "Down, Ctrl+N",
+                desc: "Next candidate",
+            },
+            HelpEntry {
+                keys: "Tab, Enter",
+                desc: "Accept the highlighted candidate",
+            },
+            HelpEntry {
+                keys: "Esc",
+                desc: "Close (stays in Insert mode)",
+            },
         ],
     },
     HelpSection {
@@ -383,6 +408,10 @@ const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 keys: ":format, :fmt",
                 desc: "Format SQL buffer (or Visual selection) via sqlformat",
+            },
+            HelpEntry {
+                keys: ":reload",
+                desc: "Re-prime the autocomplete schema cache",
             },
             HelpEntry {
                 keys: ":conn, :conn list",
