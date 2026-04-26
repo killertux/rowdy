@@ -45,6 +45,12 @@ pub enum Mode {
     Connecting {
         name: String,
     },
+    /// Centered popover listing every keybinding and command. Opened with
+    /// `:help` / `:?`. `scroll` is the topmost line shown inside the
+    /// scrollable content region.
+    Help {
+        scroll: u16,
+    },
 }
 
 impl Mode {

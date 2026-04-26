@@ -71,7 +71,7 @@ impl Datasource for MysqlDatasource {
                 .map_err(introspect_err)?;
         Ok(rows
             .into_iter()
-            .filter_map(|r| r.try_get::<String, _>("name").ok())
+            .filter_map(|r| try_string(&r, "name"))
             .map(|name| CatalogInfo { name })
             .collect())
     }
@@ -89,7 +89,7 @@ impl Datasource for MysqlDatasource {
         .map_err(introspect_err)?;
         Ok(rows
             .into_iter()
-            .filter_map(|r| r.try_get::<String, _>("name").ok())
+            .filter_map(|r| try_string(&r, "name"))
             .map(|name| SchemaInfo { name })
             .collect())
     }
@@ -113,8 +113,8 @@ impl Datasource for MysqlDatasource {
         Ok(rows
             .into_iter()
             .filter_map(|r| {
-                let name: String = r.try_get("name").ok()?;
-                let kind_str: String = r.try_get("kind").ok()?;
+                let name = try_string(&r, "name")?;
+                let kind_str = try_string(&r, "kind").unwrap_or_default();
                 let kind = match kind_str.as_str() {
                     "VIEW" => TableKind::View,
                     _ => TableKind::Table,
@@ -147,9 +147,9 @@ impl Datasource for MysqlDatasource {
         Ok(rows
             .into_iter()
             .filter_map(|r| {
-                let name: String = r.try_get("name").ok()?;
-                let type_name: String = r.try_get("type_name").ok().unwrap_or_default();
-                let is_nullable: String = r.try_get("is_nullable").ok().unwrap_or_default();
+                let name = try_string(&r, "name")?;
+                let type_name = try_string(&r, "type_name").unwrap_or_default();
+                let is_nullable = try_string(&r, "is_nullable").unwrap_or_default();
                 let nullable = match is_nullable.as_str() {
                     "YES" => Some(true),
                     "NO" => Some(false),
@@ -188,7 +188,7 @@ impl Datasource for MysqlDatasource {
         Ok(rows
             .into_iter()
             .filter_map(|r| {
-                let name: String = r.try_get("name").ok()?;
+                let name = try_string(&r, "name")?;
                 let non_unique: i64 = r.try_get("non_unique").ok().unwrap_or(1);
                 Some(IndexInfo {
                     name,
@@ -407,4 +407,119 @@ fn introspect_err(err: sqlx::Error) -> DatasourceError {
 
 fn execute_err(err: sqlx::Error) -> DatasourceError {
     DatasourceError::Execute(err.to_string())
+}
+
+/// Read a column as `String`, falling back to `Vec<u8>` → UTF-8 if the
+/// driver reports the column as `VARBINARY`. MySQL 8 returns most
+/// `information_schema` text columns as `VARBINARY` even though the
+/// values are UTF-8 names — `try_get::<String>` rejects that on a strict
+/// type-match, so we coerce here and let the rare non-UTF-8 row drop.
+fn try_string(row: &MySqlRow, column: &str) -> Option<String> {
+    if let Ok(s) = row.try_get::<String, _>(column) {
+        return Some(s);
+    }
+    let bytes: Vec<u8> = row.try_get(column).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Integration tests against a live MySQL. Gated by the
+    //! `ROWDY_MYSQL_URL` environment variable — when unset the test
+    //! prints a skip notice and returns Ok, so `cargo test` stays green
+    //! on machines without a database. See `compose.yaml` for a one-shot
+    //! local setup.
+    use super::*;
+
+    fn url() -> Option<String> {
+        std::env::var("ROWDY_MYSQL_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
+
+    fn unique_table() -> String {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        format!("rowdy_test_{}", &id[..16])
+    }
+
+    /// Pull the database name out of a mysql URL — the connect string the
+    /// user supplied is the schema we'll find our table in.
+    fn schema_from(url: &str) -> String {
+        url.rsplit('/')
+            .next()
+            .and_then(|tail| tail.split('?').next())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn connect_query_and_introspect() {
+        let Some(url) = url() else {
+            eprintln!("ROWDY_MYSQL_URL not set; skipping mysql integration test");
+            return;
+        };
+        let schema = schema_from(&url);
+        assert!(!schema.is_empty(), "ROWDY_MYSQL_URL must end in /<dbname>");
+        let ds = MysqlDatasource::connect(&url, Logger::discard())
+            .await
+            .expect("connect");
+        let table = unique_table();
+
+        ds.execute(&format!("DROP TABLE IF EXISTS {table}"))
+            .await
+            .expect("pre-clean");
+        ds.execute(&format!(
+            "CREATE TABLE {table} (id INT PRIMARY KEY, name VARCHAR(64) NOT NULL, score DECIMAL(10,2))"
+        ))
+        .await
+        .expect("create");
+        ds.execute(&format!(
+            "INSERT INTO {table}(id, name, score) VALUES (1, 'alice', 9.5), (2, 'bob', NULL)"
+        ))
+        .await
+        .expect("insert");
+
+        let result = ds
+            .execute(&format!("SELECT id, name, score FROM {table} ORDER BY id"))
+            .await
+            .expect("select");
+        assert_eq!(result.columns.len(), 3);
+        assert_eq!(result.rows.len(), 2);
+        assert!(matches!(result.rows[0][0], Cell::Int(1)));
+        assert!(matches!(&result.rows[0][1], Cell::Text(s) if s == "alice"));
+        match &result.rows[0][2] {
+            Cell::Decimal(s) => {
+                let v: f64 = s.parse().expect("decimal parses as f64");
+                assert!((v - 9.5).abs() < 1e-9, "score = {s}");
+            }
+            other => panic!("expected Decimal, got {other:?}"),
+        }
+        assert!(result.rows[1][2].is_null());
+
+        let catalogs = ds.introspect_catalogs().await.expect("catalogs");
+        let catalog = &catalogs[0].name;
+        let schemas = ds.introspect_schemas(catalog).await.expect("schemas");
+        assert!(
+            schemas.iter().any(|s| s.name == schema),
+            "schema {schema:?} not in {schemas:?}"
+        );
+        let tables = ds
+            .introspect_tables(catalog, &schema)
+            .await
+            .expect("tables");
+        assert!(
+            tables.iter().any(|t| t.name == table),
+            "table {table:?} not found in: {tables:?}"
+        );
+        let cols = ds
+            .introspect_columns(catalog, &schema, &table)
+            .await
+            .expect("columns");
+        let names: Vec<_> = cols.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["id", "name", "score"]);
+
+        ds.execute(&format!("DROP TABLE {table}"))
+            .await
+            .expect("drop");
+    }
 }

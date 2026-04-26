@@ -30,7 +30,10 @@ impl Widget for BottomBar<'_> {
         match &self.app.mode {
             Mode::Command(_) => render_command_prefix(area, buf, &self.app.theme),
             Mode::ConfirmRun { .. } => render_confirm(area, buf, &self.app.theme),
-            Mode::Auth(_) | Mode::EditConnection(_) | Mode::ConnectionList(_) => {
+            Mode::Auth(_)
+            | Mode::EditConnection(_)
+            | Mode::ConnectionList(_)
+            | Mode::Help { .. } => {
                 // Modal screens own their own help text — keep the status
                 // bar empty so the user isn't reading two things at once.
             }

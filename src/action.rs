@@ -56,6 +56,9 @@ pub enum Action {
     Auth(AuthAction),
     ConnForm(ConnFormAction),
     ConnList(ConnListAction),
+    OpenHelp,
+    CloseHelp,
+    HelpScroll(i32),
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +169,16 @@ pub fn apply(app: &mut App, action: Action) {
         Action::Auth(a) => apply_auth(app, a),
         Action::ConnForm(a) => apply_conn_form(app, a),
         Action::ConnList(a) => apply_conn_list(app, a),
+        Action::OpenHelp => app.mode = Mode::Help { scroll: 0 },
+        Action::CloseHelp => app.mode = Mode::Normal,
+        Action::HelpScroll(delta) => apply_help_scroll(app, delta),
+    }
+}
+
+fn apply_help_scroll(app: &mut App, delta: i32) {
+    if let Mode::Help { scroll } = &mut app.mode {
+        let next = (*scroll as i32).saturating_add(delta).max(0);
+        *scroll = u16::try_from(next).unwrap_or(u16::MAX);
     }
 }
 
@@ -207,8 +220,11 @@ fn run_command_line(app: &mut App, line: &str) {
         return;
     };
     let args: Vec<&str> = parts.collect();
+    // NOTE: any new command added here MUST also be listed in the `:help`
+    // popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
     match cmd {
         "q" | "quit" => app.should_quit = true,
+        "help" | "?" => apply(app, Action::OpenHelp),
         "width" => set_schema_width(app, &args),
         "run" | "r" => run_statement_under_cursor(app),
         "cancel" => cancel_query(app),
@@ -228,6 +244,8 @@ fn run_command_line(app: &mut App, line: &str) {
 fn run_conn_command(app: &mut App, args: &[&str]) {
     let sub = args.first().copied();
     let rest: Vec<&str> = args.iter().skip(1).copied().collect();
+    // NOTE: any new `:conn` subcommand MUST also be listed in the `:help`
+    // popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
     match sub {
         None | Some("list") | Some("ls") => open_conn_list(app),
         Some("add") => open_conn_form_create(app, rest.first().copied()),

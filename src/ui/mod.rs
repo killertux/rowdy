@@ -3,6 +3,7 @@ pub mod bottom_bar;
 pub mod conn_form_view;
 pub mod conn_list_view;
 pub mod editor_view;
+pub mod help_view;
 pub mod results_view;
 pub mod schema_view;
 pub mod theme;
@@ -20,6 +21,7 @@ use bottom_bar::{BottomBar, COMMAND_PREFIX};
 use conn_form_view::ConnForm;
 use conn_list_view::ConnList;
 use editor_view::EditorPane;
+use help_view::HelpPopover;
 use results_view::{ExpandedResult, InlineResult};
 use schema_view::SchemaPane;
 
@@ -32,7 +34,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let (main, bottom_area) = split_vertical(area);
 
     match &app.mode {
-        Mode::Auth(_) | Mode::EditConnection(_) | Mode::ConnectionList(_) => {
+        Mode::Auth(_) | Mode::EditConnection(_) | Mode::ConnectionList(_) | Mode::Help { .. } => {
             render_modal(app, frame, area, bottom_area);
         }
         Mode::ResultExpanded { .. } => render_expanded(app, frame, main, bottom_area),
@@ -188,6 +190,13 @@ fn render_modal(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect)
                 theme: &app.theme,
             };
             frame.render_widget(list, full);
+        }
+        Mode::Help { scroll } => {
+            let popover = HelpPopover {
+                scroll: *scroll,
+                theme: &app.theme,
+            };
+            frame.render_widget(popover, full);
         }
         _ => {}
     }
