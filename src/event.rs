@@ -57,6 +57,24 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
         Mode::EditConnection(_) => translate_conn_form_key(key),
         Mode::ConnectionList(state) => translate_conn_list_key(key, state.is_confirming()),
         Mode::Connecting { .. } => None, // keys are inert until the worker responds
+        Mode::Help { .. } => translate_help_key(key),
+    }
+}
+
+/// Help popover keys: vim-style scrolling plus q/Esc to close. Any change
+/// here should be reflected in the "Help (this screen)" section of
+/// `HELP_SECTIONS` in `src/ui/help_view.rs`.
+fn translate_help_key(key: KeyEvent) -> Option<Action> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match (key.code, ctrl) {
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => Some(Action::CloseHelp),
+        (KeyCode::Char('j') | KeyCode::Down, false) => Some(Action::HelpScroll(1)),
+        (KeyCode::Char('k') | KeyCode::Up, false) => Some(Action::HelpScroll(-1)),
+        (KeyCode::Char('d'), true) => Some(Action::HelpScroll(8)),
+        (KeyCode::Char('u'), true) => Some(Action::HelpScroll(-8)),
+        (KeyCode::Char('g'), false) => Some(Action::HelpScroll(i32::MIN / 2)),
+        (KeyCode::Char('G'), false) => Some(Action::HelpScroll(i32::MAX / 2)),
+        _ => None,
     }
 }
 
@@ -67,6 +85,8 @@ fn consumes_ctrl_c(mode: &Mode) -> bool {
     )
 }
 
+// NOTE: any new connection-list binding MUST also be listed in the `:help`
+// popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
 fn translate_conn_list_key(key: KeyEvent, confirming: bool) -> Option<Action> {
     use ConnListAction::*;
     if confirming {
@@ -221,6 +241,8 @@ fn can_intercept_globally(app: &App) -> bool {
     }
 }
 
+// NOTE: any new global binding MUST also be listed in the `:help` popover.
+// See `HELP_SECTIONS` in `src/ui/help_view.rs`.
 fn translate_global(key: KeyEvent) -> Option<Action> {
     let ctrl_w = key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL);
     if ctrl_w {
@@ -235,6 +257,8 @@ fn translate_global(key: KeyEvent) -> Option<Action> {
     None
 }
 
+// NOTE: any new leader-chord binding MUST also be listed in the `:help`
+// popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
 fn translate_leader_chord(app: &App, key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char('r') => Some(if app.editor.editor_mode() == EditorMode::Visual {
@@ -250,6 +274,8 @@ fn translate_leader_chord(app: &App, key: KeyEvent) -> Option<Action> {
     }
 }
 
+// NOTE: any new expanded-result binding MUST also be listed in the `:help`
+// popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
 fn translate_expanded_key(_app: &App, key: KeyEvent, view: &ResultViewMode) -> Option<Action> {
     // YankFormat sub-mode: only the format keys + cancel work; navigation
     // and other shortcuts are inert until the user picks one.
@@ -314,6 +340,8 @@ fn translate_window_chord(key: KeyEvent) -> Option<Action> {
     }
 }
 
+// NOTE: any new schema-panel binding MUST also be listed in the `:help`
+// popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
 fn translate_schema_key(key: KeyEvent) -> Option<Action> {
     let action = match (key.code, key.modifiers) {
         (KeyCode::Char('j'), m) if m.is_empty() => SchemaAction::Down,

@@ -447,3 +447,91 @@ fn introspect_err(err: sqlx::Error) -> DatasourceError {
 fn execute_err(err: sqlx::Error) -> DatasourceError {
     DatasourceError::Execute(err.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Integration tests against a live Postgres. Gated by the
+    //! `ROWDY_POSTGRES_URL` environment variable — when unset the test
+    //! prints a skip notice and returns Ok, so `cargo test` stays green
+    //! on machines without a database. See `compose.yaml` for a one-shot
+    //! local setup.
+    use super::*;
+
+    fn url() -> Option<String> {
+        std::env::var("ROWDY_POSTGRES_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
+
+    fn unique_table() -> String {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        format!("rowdy_test_{}", &id[..16])
+    }
+
+    #[tokio::test]
+    async fn connect_query_and_introspect() {
+        let Some(url) = url() else {
+            eprintln!("ROWDY_POSTGRES_URL not set; skipping postgres integration test");
+            return;
+        };
+        let ds = PostgresDatasource::connect(&url, Logger::discard())
+            .await
+            .expect("connect");
+        let table = unique_table();
+
+        ds.execute(&format!("DROP TABLE IF EXISTS {table}"))
+            .await
+            .expect("pre-clean");
+        ds.execute(&format!(
+            "CREATE TABLE {table} (id INTEGER PRIMARY KEY, name TEXT NOT NULL, score NUMERIC(10,2))"
+        ))
+        .await
+        .expect("create");
+        ds.execute(&format!(
+            "INSERT INTO {table}(id, name, score) VALUES (1, 'alice', 9.5), (2, 'bob', NULL)"
+        ))
+        .await
+        .expect("insert");
+
+        let result = ds
+            .execute(&format!("SELECT id, name, score FROM {table} ORDER BY id"))
+            .await
+            .expect("select");
+        assert_eq!(result.columns.len(), 3);
+        assert_eq!(result.rows.len(), 2);
+        assert!(matches!(result.rows[0][0], Cell::Int(1)));
+        assert!(matches!(&result.rows[0][1], Cell::Text(s) if s == "alice"));
+        match &result.rows[0][2] {
+            Cell::Decimal(s) => {
+                let v: f64 = s.parse().expect("decimal parses as f64");
+                assert!((v - 9.5).abs() < 1e-9, "score = {s}");
+            }
+            other => panic!("expected Decimal, got {other:?}"),
+        }
+        assert!(result.rows[1][2].is_null());
+
+        let catalogs = ds.introspect_catalogs().await.expect("catalogs");
+        assert_eq!(catalogs.len(), 1, "postgres exposes one catalog");
+        let catalog = &catalogs[0].name;
+        let schemas = ds.introspect_schemas(catalog).await.expect("schemas");
+        assert!(schemas.iter().any(|s| s.name == "public"));
+        let tables = ds
+            .introspect_tables(catalog, "public")
+            .await
+            .expect("tables");
+        assert!(
+            tables.iter().any(|t| t.name == table),
+            "table {table:?} not found in: {tables:?}"
+        );
+        let cols = ds
+            .introspect_columns(catalog, "public", &table)
+            .await
+            .expect("columns");
+        let names: Vec<_> = cols.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["id", "name", "score"]);
+
+        ds.execute(&format!("DROP TABLE {table}"))
+            .await
+            .expect("drop");
+    }
+}

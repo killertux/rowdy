@@ -207,6 +207,25 @@ cargo run -- --connection sqlite:./sample.db
 
 Re-running the seeder is safe — it drops and re-creates the tables.
 
+### Postgres / MySQL test databases
+
+The Postgres and MySQL drivers have integration tests gated on
+`ROWDY_POSTGRES_URL` and `ROWDY_MYSQL_URL` — when either is unset the
+test prints a skip notice and returns Ok, so `cargo test` is green on a
+machine without those databases. To exercise them locally:
+
+```sh
+docker compose up -d
+ROWDY_POSTGRES_URL=postgres://rowdy:rowdy@localhost:55432/rowdy_test \
+ROWDY_MYSQL_URL=mysql://rowdy:rowdy@localhost:53306/rowdy_test \
+cargo test
+```
+
+The non-default ports (`55432` / `53306`) are deliberate so they don't
+collide with a system Postgres / MySQL on the standard ports. CI starts
+the same images via GitHub Actions `services` and uses the standard
+ports there.
+
 ## Keybindings
 
 rowdy uses **vim-style bindings everywhere**. Three layers determine what a
@@ -364,6 +383,7 @@ After pressing `:`.
 | Command                      | Effect                                                          |
 |------------------------------|-----------------------------------------------------------------|
 | `:q`, `:quit`                | Quit                                                            |
+| `:help`, `:?`                | Open the help popover (bindings + commands)                     |
 | `:run`, `:r`                 | Run the statement under the cursor (no confirmation)            |
 | `:cancel`                    | Cancel the in-flight query                                      |
 | `:expand`, `:e`              | Expand the latest result                                        |
@@ -441,6 +461,7 @@ src/
     auth_view.rs          centered password prompt
     conn_form_view.rs     centered name+url form
     conn_list_view.rs     centered connection picker
+    help_view.rs          `:help` popover (bindings + commands cheat sheet)
     bottom_bar.rs         status / command / confirm-run prompt
     theme.rs              Dark + Light palettes
 examples/
@@ -502,23 +523,9 @@ Next likely steps, roughly ordered:
   connect-and-disconnect so URL typos surface before the user saves and
   switches.
 
-### Discovery
-
-- **`:help`** / `?` — an in-TUI cheat sheet of bindings and commands.
-  Currently new users have to read the README.
-
 ### Export
 
 - **SQL export** (`:export sql`) — emit `INSERT` statements for the
   selected rows, dialect-aware so they round-trip back into the same
   driver. CSV / TSV / JSON exports are already wired; this would slot in
   alongside them.
-
-### Project hygiene
-
-- **CI** — a `.github/workflows/` job that runs `cargo test` and
-  `cargo clippy` on every push.
-- **Live-DB integration tests** — a `docker-compose.yml` with Postgres
-  and MySQL services and an integration test suite. Today the
-  Postgres/MySQL drivers are exercised only via type-checking; the
-  recent NUMERIC/DECIMAL change has zero coverage on those drivers.
