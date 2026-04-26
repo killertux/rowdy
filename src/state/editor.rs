@@ -96,6 +96,45 @@ pub fn selection_text(state: &EditorState) -> Option<String> {
     }
 }
 
+/// Replace the buffer with `text` and place the cursor at (0, 0).
+/// Caveat: edtui's undo stack is captured by its own actions only; we mutate
+/// `lines` directly, so a single `u` won't restore the pre-format buffer.
+pub fn replace_buffer_text(state: &mut EditorState, text: &str) {
+    state.lines = Lines::from(text);
+    state.selection = None;
+    state.cursor = Index2::new(0, 0);
+}
+
+/// Replace the current selection with `replacement` and drop back to Normal
+/// mode. Cursor lands at the start of the replacement so a follow-up `=`
+/// (or any motion) starts somewhere predictable. No-ops if there's no
+/// active selection.
+pub fn replace_selection_text(state: &mut EditorState, replacement: &str) -> bool {
+    let Some(sel) = state.selection.as_ref() else {
+        return false;
+    };
+    let chars: Vec<char> = state.lines.flatten(&Some('\n'));
+    let start_idx = sel.start();
+    let end_idx = sel.end();
+    let start_off = index_to_offset(&chars, start_idx);
+    // edtui selections are inclusive on both ends; +1 makes the suffix slice
+    // exclusive.
+    let end_off = index_to_offset(&chars, end_idx)
+        .saturating_add(1)
+        .min(chars.len());
+
+    let mut next = String::with_capacity(start_off + replacement.len() + (chars.len() - end_off));
+    next.extend(chars[..start_off].iter());
+    next.push_str(replacement);
+    next.extend(chars[end_off..].iter());
+
+    state.lines = Lines::from(next.as_str());
+    state.selection = None;
+    state.mode = EditorMode::Normal;
+    state.cursor = clamp_index(&state.lines, start_idx);
+    true
+}
+
 fn cursor_to_offset(state: &EditorState) -> usize {
     let mut offset = 0;
     for row in 0..state.cursor.row {
@@ -143,4 +182,77 @@ fn offset_to_index(chars: &[char], offset: usize) -> Index2 {
         }
     }
     Index2::new(row, col)
+}
+
+fn index_to_offset(chars: &[char], idx: Index2) -> usize {
+    let mut row = 0;
+    let mut col = 0;
+    for (i, c) in chars.iter().enumerate() {
+        if row == idx.row && col == idx.col {
+            return i;
+        }
+        if *c == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    chars.len()
+}
+
+/// Clamp `idx` to a valid position in `lines`. Used after a buffer rewrite
+/// to keep the cursor inside the new content.
+fn clamp_index(lines: &Lines, idx: Index2) -> Index2 {
+    let row = idx.row.min(lines.len().saturating_sub(1));
+    let col_max = lines.len_col(row).unwrap_or(0);
+    Index2::new(row, idx.col.min(col_max))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flatten(state: &EditorState) -> String {
+        state.lines.flatten(&Some('\n')).into_iter().collect()
+    }
+
+    #[test]
+    fn replace_buffer_text_resets_cursor_and_drops_selection() {
+        let mut state = EditorState::new(Lines::from("old\nbuffer"));
+        state.cursor = Index2::new(1, 3);
+
+        replace_buffer_text(&mut state, "fresh\ntext");
+
+        assert_eq!(flatten(&state), "fresh\ntext");
+        assert_eq!(state.cursor, Index2::new(0, 0));
+        assert!(state.selection.is_none());
+    }
+
+    #[test]
+    fn replace_selection_text_no_op_without_selection() {
+        let mut state = EditorState::new(Lines::from("untouched"));
+        let did = replace_selection_text(&mut state, "ignored");
+        assert!(!did);
+        assert_eq!(flatten(&state), "untouched");
+    }
+
+    #[test]
+    fn index_to_offset_rountrips_with_offset_to_index() {
+        let chars: Vec<char> = "ab\ncde\nfg".chars().collect();
+        for offset in 0..=chars.len() {
+            let idx = offset_to_index(&chars, offset);
+            assert_eq!(index_to_offset(&chars, idx), offset, "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn clamp_index_keeps_position_inside_buffer() {
+        let lines = Lines::from("ab\ncde");
+        assert_eq!(clamp_index(&lines, Index2::new(0, 1)), Index2::new(0, 1));
+        // Row past the end pulls back to the last row.
+        assert_eq!(clamp_index(&lines, Index2::new(99, 0)), Index2::new(1, 0));
+        // Column past the end pulls back to the row's length.
+        assert_eq!(clamp_index(&lines, Index2::new(1, 99)), Index2::new(1, 3));
+    }
 }

@@ -189,6 +189,10 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 keys: "<Space> t",
                 desc: "Toggle Dark / Light theme",
             },
+            HelpEntry {
+                keys: "=",
+                desc: "Format SQL (Visual: selection; Normal: whole buffer)",
+            },
         ],
     },
     HelpSection {
@@ -367,6 +371,10 @@ const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 keys: ":export csv|tsv|json [path]",
                 desc: "Export latest result or Visual selection (clipboard, or to path)",
+            },
+            HelpEntry {
+                keys: ":format, :fmt",
+                desc: "Format SQL buffer (or Visual selection) via sqlformat",
             },
             HelpEntry {
                 keys: ":conn, :conn list",

@@ -254,6 +254,9 @@ fn translate_global(key: KeyEvent) -> Option<Action> {
     if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
         return Some(Action::SetPendingChord(PendingChord::Leader));
     }
+    if key.code == KeyCode::Char('=') && key.modifiers.is_empty() {
+        return Some(Action::FormatEditor);
+    }
     None
 }
 
