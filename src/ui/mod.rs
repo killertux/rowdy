@@ -95,7 +95,8 @@ fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Re
     let inner_width = main.width.saturating_sub(2);
     let inner_height = main.height.saturating_sub(2);
     let visible_cols = fit_columns(inner_width).min(block.columns.len().max(1));
-    let visible_rows = (inner_height.saturating_sub(1) as usize).max(1);
+    // -2 reserves the header row and the bottom cell-value badge.
+    let visible_rows = (inner_height.saturating_sub(2) as usize).max(1);
 
     let new_col_offset = clamp_offset(prev_col_offset, cur.col, visible_cols, block.columns.len());
     let new_row_offset = clamp_offset(prev_row_offset, cur.row, visible_rows, block.rows().len());
