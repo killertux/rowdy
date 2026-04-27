@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use serde_json::{Map, Number, Value};
 
 use crate::datasource::{Cell, Column, DriverKind};
+use crate::sql_quote;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -71,10 +72,10 @@ pub fn format_insert(
     if rows.is_empty() {
         return out;
     }
-    let table_q = quote_ident(dialect, table);
+    let table_q = sql_quote::always(table, dialect);
     let cols_q: Vec<String> = columns
         .iter()
-        .map(|c| quote_ident(dialect, &c.name))
+        .map(|c| sql_quote::always(&c.name, dialect))
         .collect();
     let cols_joined = cols_q.join(", ");
 
@@ -100,25 +101,6 @@ pub fn format_insert(
             out.push('\n');
         }
     }
-    out
-}
-
-fn quote_ident(dialect: DriverKind, name: &str) -> String {
-    let (open, close) = match dialect {
-        DriverKind::Sqlite | DriverKind::Postgres => ('"', '"'),
-        DriverKind::Mysql => ('`', '`'),
-    };
-    let mut out = String::with_capacity(name.len() + 2);
-    out.push(open);
-    for ch in name.chars() {
-        if ch == close {
-            // Standard doubling rule for the close quote (works for all
-            // three dialects: `""`, ` `` `).
-            out.push(ch);
-        }
-        out.push(ch);
-    }
-    out.push(close);
     out
 }
 

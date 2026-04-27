@@ -12,6 +12,7 @@ mod export;
 mod log;
 mod session;
 mod sql_infer;
+mod sql_quote;
 mod state;
 mod subcommands;
 mod terminal;

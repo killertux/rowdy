@@ -1,70 +1,20 @@
 //! Apply an accepted completion to the editor buffer.
 //!
-//! Phase 3 wraps the raw identifier in dialect-appropriate quotes when
-//! it can't safely sit unquoted (mixed case, non-identifier chars, or
-//! a reserved keyword). Phase 4 adds the `OpenParens` trail variant
-//! used by arg-taking SQL functions (insert lands `name()` with the
-//! cursor between the parens).
+//! The `OpenParens` trail variant lands `name()` with the cursor
+//! between the parens for arg-taking SQL functions; identifier
+//! quoting is delegated to [`crate::sql_quote::smart`].
 
 use edtui::{EditorState, Index2, Lines};
 
 use crate::autocomplete::InsertTrail;
 use crate::datasource::DriverKind;
+use crate::sql_quote;
 
 /// Wrap `ident` in dialect-appropriate quotes if it can't safely sit
-/// unquoted. The rule covers three cases:
-///
-/// 1. Mixed-case (any uppercase char) — Postgres folds unquoted
-///    identifiers to lowercase, so `Users` would silently become
-///    `users` and miss the table.
-/// 2. Non-`[A-Za-z0-9_]` chars or leading digit — the parser would
-///    reject the bare form.
-/// 3. Reserved keyword — the parser would treat the bare form as a
-///    keyword instead of an identifier. We check against the curated
-///    autocomplete keyword list rather than `ALL_KEYWORDS_INDEX` so
-///    we don't gratuitously quote rarely-used SQL words like `ABORT`.
+/// unquoted. Thin re-export of [`sql_quote::smart`] kept so call sites
+/// in this module read naturally.
 pub fn quote_if_needed(ident: &str, dialect: DriverKind) -> String {
-    if !needs_quoting(ident) {
-        return ident.to_string();
-    }
-    let (open, close) = dialect_quotes(dialect);
-    let escaped = ident.replace(close, &format!("{close}{close}"));
-    format!("{open}{escaped}{close}")
-}
-
-fn needs_quoting(ident: &str) -> bool {
-    if ident.is_empty() {
-        return true;
-    }
-    let first = ident.chars().next().unwrap();
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return true;
-    }
-    let mut has_upper = false;
-    for c in ident.chars() {
-        if !c.is_ascii_alphanumeric() && c != '_' {
-            return true;
-        }
-        if c.is_ascii_uppercase() {
-            has_upper = true;
-        }
-    }
-    if has_upper {
-        return true;
-    }
-    is_reserved_keyword(ident)
-}
-
-fn is_reserved_keyword(ident: &str) -> bool {
-    let upper = ident.to_ascii_uppercase();
-    crate::autocomplete::keywords::KEYWORDS.contains(&upper.as_str())
-}
-
-fn dialect_quotes(dialect: DriverKind) -> (&'static str, &'static str) {
-    match dialect {
-        DriverKind::Mysql => ("`", "`"),
-        DriverKind::Sqlite | DriverKind::Postgres => ("\"", "\""),
-    }
+    sql_quote::smart(ident, dialect)
 }
 
 /// Replace the range `[partial_start, cursor)` with `insert` plus the
@@ -180,57 +130,4 @@ mod tests {
         assert_eq!(cursor, Index2::new(0, 13));
     }
 
-    #[test]
-    fn quote_lowercase_simple_ident_is_passthrough() {
-        assert_eq!(quote_if_needed("users", DriverKind::Postgres), "users");
-        assert_eq!(quote_if_needed("user_id", DriverKind::Sqlite), "user_id");
-        assert_eq!(quote_if_needed("a1", DriverKind::Mysql), "a1");
-    }
-
-    #[test]
-    fn quote_mixed_case_postgres_uses_double_quotes() {
-        assert_eq!(quote_if_needed("Users", DriverKind::Postgres), "\"Users\"");
-        assert_eq!(
-            quote_if_needed("MyTable", DriverKind::Sqlite),
-            "\"MyTable\""
-        );
-    }
-
-    #[test]
-    fn quote_mysql_uses_backticks() {
-        assert_eq!(quote_if_needed("Users", DriverKind::Mysql), "`Users`");
-    }
-
-    #[test]
-    fn quote_special_chars() {
-        assert_eq!(
-            quote_if_needed("user name", DriverKind::Postgres),
-            "\"user name\""
-        );
-        assert_eq!(
-            quote_if_needed("with-dash", DriverKind::Sqlite),
-            "\"with-dash\""
-        );
-        // Leading digit needs quoting.
-        assert_eq!(quote_if_needed("1st", DriverKind::Postgres), "\"1st\"");
-    }
-
-    #[test]
-    fn quote_reserved_keyword() {
-        // "SELECT" the column name would otherwise be parsed as the
-        // keyword.
-        assert_eq!(
-            quote_if_needed("select", DriverKind::Postgres),
-            "\"select\""
-        );
-        assert_eq!(quote_if_needed("FROM", DriverKind::Mysql), "`FROM`");
-    }
-
-    #[test]
-    fn quote_escapes_inner_quote() {
-        // Pathological identifier with the surrounding quote inside —
-        // doubled per SQL standard.
-        assert_eq!(quote_if_needed("a\"b", DriverKind::Postgres), "\"a\"\"b\"");
-        assert_eq!(quote_if_needed("a`b", DriverKind::Mysql), "`a``b`");
-    }
 }
