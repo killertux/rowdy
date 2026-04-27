@@ -144,7 +144,18 @@ fn format_literal(dialect: DriverKind, cell: &Cell) -> String {
             DriverKind::Postgres => format!("{}::uuid", quote_string(&u.to_string())),
             _ => quote_string(&u.to_string()),
         },
-        Cell::Other { repr, .. } => quote_string(repr),
+        // `repr` is empty when a driver fell all the way through its
+        // decoder chain — we genuinely don't know the value, so NULL
+        // is the only safe SQL emission. A populated `repr` (e.g. the
+        // array literal synthesized by Postgres `format_array`) keeps
+        // its previous best-effort string round-trip.
+        Cell::Other { repr, .. } => {
+            if repr.is_empty() {
+                "NULL".to_string()
+            } else {
+                quote_string(repr)
+            }
+        }
     }
 }
 
@@ -546,5 +557,43 @@ mod tests {
         let cols = [col("x")];
         let sql = format_insert(DriverKind::Sqlite, "t", &columns_borrowed(&cols), &[]);
         assert!(sql.is_empty());
+    }
+
+    #[test]
+    fn insert_other_with_empty_repr_emits_null() {
+        // Driver fell through every decoder — emitting `''` would
+        // silently corrupt round-trip. NULL is the safe default.
+        let cols = [col("v")];
+        let row = [Cell::Other {
+            type_name: "FlowExecutionStatus".into(),
+            repr: String::new(),
+        }];
+        let sql = format_insert(
+            DriverKind::Postgres,
+            "t",
+            &columns_borrowed(&cols),
+            &[row_borrowed(&row)],
+        );
+        assert!(sql.contains("(NULL)"), "{sql}");
+        assert!(!sql.contains("('')"), "{sql}");
+    }
+
+    #[test]
+    fn insert_other_with_populated_repr_quotes_string() {
+        // Postgres `format_array` synthesises `Cell::Other` with a
+        // populated repr; we keep the previous string round-trip even
+        // though it's not perfect SQL.
+        let cols = [col("v")];
+        let row = [Cell::Other {
+            type_name: "INT4[]".into(),
+            repr: "[1, 2, 3]".into(),
+        }];
+        let sql = format_insert(
+            DriverKind::Postgres,
+            "t",
+            &columns_borrowed(&cols),
+            &[row_borrowed(&row)],
+        );
+        assert!(sql.contains("'[1, 2, 3]'"), "{sql}");
     }
 }
