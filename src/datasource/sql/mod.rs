@@ -2,6 +2,24 @@ pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 
+/// Lift the per-arm boilerplate in each driver's `decode_typed` switch
+/// into a single line. Expands to:
+///
+/// ```ignore
+/// decode_or_null::<$T>(row, idx).map(|opt| opt.map($build).unwrap_or(Cell::Null))
+/// ```
+///
+/// `$build` is anything callable through `Option::map` — usually a
+/// `Cell::*` constructor or a closure. The macro defers `decode_or_null`
+/// resolution to the call site so each driver's own row/`Decode` bounds
+/// pick up automatically.
+macro_rules! decode_to {
+    ($row:expr, $idx:expr, $T:ty => $build:expr) => {
+        decode_or_null::<$T>($row, $idx).map(|opt| opt.map($build).unwrap_or(Cell::Null))
+    };
+}
+pub(crate) use decode_to;
+
 /// Collapse whitespace runs into single spaces and trim — used to flatten SQL
 /// statements onto a single log line.
 pub(crate) fn one_line_sql(sql: &str) -> String {

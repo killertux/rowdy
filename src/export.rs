@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use serde_json::{Map, Number, Value};
 
 use crate::datasource::{Cell, Column, DriverKind};
+use crate::sql_quote;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -71,10 +72,10 @@ pub fn format_insert(
     if rows.is_empty() {
         return out;
     }
-    let table_q = quote_ident(dialect, table);
+    let table_q = sql_quote::always(table, dialect);
     let cols_q: Vec<String> = columns
         .iter()
-        .map(|c| quote_ident(dialect, &c.name))
+        .map(|c| sql_quote::always(&c.name, dialect))
         .collect();
     let cols_joined = cols_q.join(", ");
 
@@ -100,25 +101,6 @@ pub fn format_insert(
             out.push('\n');
         }
     }
-    out
-}
-
-fn quote_ident(dialect: DriverKind, name: &str) -> String {
-    let (open, close) = match dialect {
-        DriverKind::Sqlite | DriverKind::Postgres => ('"', '"'),
-        DriverKind::Mysql => ('`', '`'),
-    };
-    let mut out = String::with_capacity(name.len() + 2);
-    out.push(open);
-    for ch in name.chars() {
-        if ch == close {
-            // Standard doubling rule for the close quote (works for all
-            // three dialects: `""`, ` `` `).
-            out.push(ch);
-        }
-        out.push(ch);
-    }
-    out.push(close);
     out
 }
 
@@ -162,7 +144,18 @@ fn format_literal(dialect: DriverKind, cell: &Cell) -> String {
             DriverKind::Postgres => format!("{}::uuid", quote_string(&u.to_string())),
             _ => quote_string(&u.to_string()),
         },
-        Cell::Other { repr, .. } => quote_string(repr),
+        // `repr` is empty when a driver fell all the way through its
+        // decoder chain — we genuinely don't know the value, so NULL
+        // is the only safe SQL emission. A populated `repr` (e.g. the
+        // array literal synthesized by Postgres `format_array`) keeps
+        // its previous best-effort string round-trip.
+        Cell::Other { repr, .. } => {
+            if repr.is_empty() {
+                "NULL".to_string()
+            } else {
+                quote_string(repr)
+            }
+        }
     }
 }
 
@@ -564,5 +557,43 @@ mod tests {
         let cols = [col("x")];
         let sql = format_insert(DriverKind::Sqlite, "t", &columns_borrowed(&cols), &[]);
         assert!(sql.is_empty());
+    }
+
+    #[test]
+    fn insert_other_with_empty_repr_emits_null() {
+        // Driver fell through every decoder — emitting `''` would
+        // silently corrupt round-trip. NULL is the safe default.
+        let cols = [col("v")];
+        let row = [Cell::Other {
+            type_name: "FlowExecutionStatus".into(),
+            repr: String::new(),
+        }];
+        let sql = format_insert(
+            DriverKind::Postgres,
+            "t",
+            &columns_borrowed(&cols),
+            &[row_borrowed(&row)],
+        );
+        assert!(sql.contains("(NULL)"), "{sql}");
+        assert!(!sql.contains("('')"), "{sql}");
+    }
+
+    #[test]
+    fn insert_other_with_populated_repr_quotes_string() {
+        // Postgres `format_array` synthesises `Cell::Other` with a
+        // populated repr; we keep the previous string round-trip even
+        // though it's not perfect SQL.
+        let cols = [col("v")];
+        let row = [Cell::Other {
+            type_name: "INT4[]".into(),
+            repr: "[1, 2, 3]".into(),
+        }];
+        let sql = format_insert(
+            DriverKind::Postgres,
+            "t",
+            &columns_borrowed(&cols),
+            &[row_borrowed(&row)],
+        );
+        assert!(sql.contains("'[1, 2, 3]'"), "{sql}");
     }
 }

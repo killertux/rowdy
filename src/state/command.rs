@@ -2,7 +2,7 @@ use ratatui::style::Style;
 use ratatui_textarea::TextArea;
 
 /// Wrapper around a `TextArea` so the rest of the app keeps pattern-matching
-/// on `Mode::Command(CommandBuffer)` while the editor primitives live in
+/// on `Overlay::Command(CommandBuffer)` while the editor primitives live in
 /// `ratatui_textarea`.
 #[derive(Debug)]
 pub struct CommandBuffer {

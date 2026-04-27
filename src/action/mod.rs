@@ -4,23 +4,30 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::Event as CtEvent;
 use ratatui_textarea::{Input, TextArea};
 
+mod auth;
+mod completion;
+mod conn_form;
+mod conn_list;
+
 use crate::app::{App, MAX_SCHEMA_WIDTH, MIN_SCHEMA_WIDTH};
 use crate::clipboard;
-use crate::connections::{self, ConnectionStore};
+use crate::command::{self, ConnSubcommand, ParsedTarget, ThemeChoice};
 use crate::datasource::{Cell, Column, QueryResult};
 use crate::export::{self, ExportFormat};
 use crate::session;
-use crate::state::auth::AuthKind;
 use crate::state::command::CommandBuffer;
 use crate::state::conn_form::{ConnFormPostSave, ConnFormState};
 use crate::state::conn_list::ConnListState;
-use crate::state::focus::{Focus, Mode, PendingChord};
+use crate::state::focus::{Focus, PendingChord};
+use crate::state::overlay::Overlay;
 use crate::state::results::{ResultBlock, ResultCursor, ResultId, ResultViewMode, SelectionRect};
 use crate::state::schema::{ExpandOutcome, SchemaPanel};
+use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
 use crate::ui::theme::{Theme, ThemeKind};
 use crate::worker::{IntrospectTarget, WorkerCommand, WorkerEvent};
 
+#[derive(Debug)]
 pub enum Action {
     Quit,
     FocusPanel(Focus),
@@ -66,10 +73,9 @@ pub enum Action {
     ConnList(ConnListAction),
     OpenHelp,
     CloseHelp,
-    /// Scroll the help popover vertically by `delta` lines.
-    HelpScroll(i32),
-    /// Scroll the help popover horizontally by `delta` columns.
-    HelpScrollH(i32),
+    /// Move the help popover viewport along `axis` by `delta` (a relative
+    /// step) or to a named anchor (top/bottom).
+    HelpScroll(HelpAxis, HelpScrollDelta),
     /// Run the editor buffer (or active selection) through the SQL
     /// formatter and replace the source in-place.
     FormatEditor,
@@ -79,6 +85,22 @@ pub enum Action {
     /// User-facing `:reload`. Drops the autocomplete schema cache and
     /// re-primes from the active connection.
     ReloadSchemaCache,
+}
+
+/// Which axis of the help popover viewport to move.
+#[derive(Debug, Clone, Copy)]
+pub enum HelpAxis {
+    Vertical,
+    Horizontal,
+}
+
+/// What kind of help-popover move to perform: a relative step or a jump
+/// to a named anchor.
+#[derive(Debug, Clone, Copy)]
+pub enum HelpScrollDelta {
+    By(i32),
+    Top,
+    Bottom,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -99,6 +121,7 @@ pub enum ExportTarget {
     File(PathBuf),
 }
 
+#[derive(Debug)]
 pub enum AuthAction {
     Input(Input),
     /// `None` reads the system clipboard; `Some(text)` is supplied directly
@@ -110,6 +133,7 @@ pub enum AuthAction {
     Cancel,
 }
 
+#[derive(Debug)]
 pub enum ConnFormAction {
     Input(Input),
     /// `None` reads the system clipboard; `Some(text)` is supplied directly
@@ -122,6 +146,7 @@ pub enum ConnFormAction {
     Cancel,
 }
 
+#[derive(Debug)]
 pub enum ConnListAction {
     Down,
     Up,
@@ -136,6 +161,7 @@ pub enum ConnListAction {
     Close,
 }
 
+#[derive(Debug)]
 pub enum CommandAction {
     Input(Input),
     /// `None` reads the system clipboard. `Some(text)` carries text supplied
@@ -147,6 +173,7 @@ pub enum CommandAction {
     Cancel,
 }
 
+#[derive(Debug)]
 pub enum SchemaAction {
     Down,
     Up,
@@ -157,6 +184,7 @@ pub enum SchemaAction {
     Bottom,
 }
 
+#[derive(Debug)]
 pub enum ResultNavAction {
     Left,
     Right,
@@ -177,13 +205,13 @@ pub fn apply(app: &mut App, action: Action) {
         Action::EditorEvent(ev) => {
             app.editor.events.on_event(ev, &mut app.editor.state);
             if app.completion.is_some() {
-                refresh_completion(app);
+                completion::refresh(app);
             } else {
-                maybe_auto_trigger(app);
+                completion::maybe_auto_trigger(app);
             }
             schedule_session_save(app);
         }
-        Action::OpenCommand => app.mode = Mode::Command(CommandBuffer::default()),
+        Action::OpenCommand => app.overlay = Some(Overlay::Command(CommandBuffer::default())),
         Action::Command(cmd) => apply_command(app, cmd),
         Action::Schema(s) => apply_schema(app, s),
         Action::PrepareConfirmRun => prepare_confirm_run(app),
@@ -193,7 +221,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::RunSelection => run_selection(app),
         Action::CancelQuery => cancel_query(app),
         Action::ExpandLatestResult => expand_latest(app),
-        Action::CollapseResult => app.mode = Mode::Normal,
+        Action::CollapseResult => app.screen = Screen::Normal,
         Action::ResultNav(nav) => apply_result_nav(app, nav),
         Action::ResultEnterVisual => result_enter_visual(app),
         Action::ResultExitVisual => result_exit_visual(app),
@@ -204,311 +232,21 @@ pub fn apply(app: &mut App, action: Action) {
         Action::ExportSql { table, target } => export_sql_command(app, table, target),
         Action::ToggleTheme => toggle_theme(app),
         Action::Worker(ev) => apply_worker_event(app, ev),
-        Action::Auth(a) => apply_auth(app, a),
-        Action::ConnForm(a) => apply_conn_form(app, a),
-        Action::ConnList(a) => apply_conn_list(app, a),
+        Action::Auth(a) => auth::apply(app, a),
+        Action::ConnForm(a) => conn_form::apply(app, a),
+        Action::ConnList(a) => conn_list::apply(app, a),
         Action::OpenHelp => {
-            app.mode = Mode::Help {
+            app.overlay = Some(Overlay::Help {
                 scroll: 0,
                 h_scroll: 0,
-            }
+            })
         }
-        Action::CloseHelp => app.mode = Mode::Normal,
-        Action::HelpScroll(delta) => apply_help_scroll(app, delta),
-        Action::HelpScrollH(delta) => apply_help_scroll_h(app, delta),
+        Action::CloseHelp => app.overlay = None,
+        Action::HelpScroll(axis, delta) => apply_help_scroll(app, axis, delta),
         Action::FormatEditor => format_editor(app),
-        Action::Completion(c) => apply_completion(app, c),
+        Action::Completion(c) => completion::apply(app, c),
         Action::ReloadSchemaCache => reload_schema_cache(app),
     }
-}
-
-fn apply_completion(app: &mut App, action: CompletionAction) {
-    match action {
-        CompletionAction::Open => open_completion(app, OpenSource::Manual),
-        CompletionAction::Close => close_completion(app, true),
-        CompletionAction::Up => {
-            if let Some(state) = app.completion.as_mut() {
-                state.move_selection(-1);
-            }
-        }
-        CompletionAction::Down => {
-            if let Some(state) = app.completion.as_mut() {
-                state.move_selection(1);
-            }
-        }
-        CompletionAction::Accept => accept_completion(app),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenSource {
-    /// User pressed Ctrl+Space — always opens (snooze ignored, status
-    /// notice on empty results).
-    Manual,
-    /// Auto-triggered after a keystroke. Skips snoozed positions and
-    /// stays silent on empty results.
-    Auto,
-}
-
-/// Wrapper around `classify` + `compute` that handles cache reads,
-/// resolve context, lazy loads, and the Loading placeholder. Used by
-/// both `open_completion` and `refresh_completion` so we don't have
-/// two slightly-different versions of the same logic.
-struct Computed {
-    items: Vec<crate::autocomplete::CompletionItem>,
-    partial: String,
-    anchor_char_offset: usize,
-    needs_loads: Vec<crate::autocomplete::TableBinding>,
-}
-
-fn compute_completion(app: &App) -> Option<Computed> {
-    if app.focus != Focus::Editor {
-        return None;
-    }
-    let cursor = crate::state::editor::current_statement_with_cursor(&app.editor.state);
-    let dialect = app
-        .active_dialect
-        .unwrap_or(crate::datasource::DriverKind::Sqlite);
-    let cache = app.schema_cache.read().ok()?;
-    let resolve = crate::autocomplete::ResolveContext {
-        default_catalog: cache.default_catalog.as_deref(),
-        default_schema: cache.default_schema.as_deref(),
-    };
-    let result = crate::autocomplete::classify(
-        &cursor.statement,
-        cursor.cursor_byte_in_stmt,
-        dialect,
-        resolve,
-    );
-    let needs_loads = bindings_needing_columns(&cache, &result);
-    let mut items = crate::autocomplete::compute(
-        &result.context,
-        &cache,
-        &result.partial,
-        &result.bindings,
-        dialect,
-    );
-    drop(cache);
-
-    // If column completion has nothing to show *yet* but loads are
-    // pending, surface a placeholder so the user knows we're working
-    // on it. Phase 2 only — Phase 3+ may distinguish "loading" from
-    // "no matches" more nicely.
-    if items.is_empty()
-        && !needs_loads.is_empty()
-        && matches!(
-            result.context,
-            crate::autocomplete::CompletionContext::Column { .. }
-                | crate::autocomplete::CompletionContext::Mixed
-        )
-    {
-        items.push(loading_placeholder(&needs_loads[0]));
-    }
-
-    let partial_chars = result.partial.chars().count();
-    let anchor_char_offset = cursor.cursor_char_in_buffer.saturating_sub(partial_chars);
-    Some(Computed {
-        items,
-        partial: result.partial,
-        anchor_char_offset,
-        needs_loads,
-    })
-}
-
-fn loading_placeholder(
-    b: &crate::autocomplete::TableBinding,
-) -> crate::autocomplete::CompletionItem {
-    crate::autocomplete::CompletionItem {
-        label: format!("loading {} columns…", b.table),
-        kind: crate::autocomplete::CompletionKind::Loading,
-        detail: None,
-        insert: String::new(),
-        trail: crate::autocomplete::InsertTrail::None,
-    }
-}
-
-/// Tables referenced by `result.bindings` (or by the qualified column
-/// context) whose columns aren't in the cache yet. Caller fires
-/// `LoadCompletionColumns` for each so the worker fills them in.
-fn bindings_needing_columns(
-    cache: &crate::autocomplete::SchemaCache,
-    result: &crate::autocomplete::ClassifyResult,
-) -> Vec<crate::autocomplete::TableBinding> {
-    use crate::autocomplete::CompletionContext;
-    let candidate_bindings: Vec<&crate::autocomplete::TableBinding> = match &result.context {
-        CompletionContext::Column { qualifier: Some(b) } => vec![b],
-        CompletionContext::Column { qualifier: None } | CompletionContext::Mixed => {
-            result.bindings.iter().collect()
-        }
-        _ => return Vec::new(),
-    };
-    candidate_bindings
-        .into_iter()
-        // CTE bindings have no real (catalog, schema, table) — there's
-        // nothing the worker could load for them.
-        .filter(|b| !b.is_cte())
-        .filter(|b| {
-            !cache
-                .columns
-                .contains_key(&(b.catalog.clone(), b.schema.clone(), b.table.clone()))
-        })
-        .filter(|b| !b.catalog.is_empty() && !b.schema.is_empty() && !b.table.is_empty())
-        .cloned()
-        .collect()
-}
-
-fn fire_column_loads(app: &App, bindings: &[crate::autocomplete::TableBinding]) {
-    for b in bindings {
-        let _ = app.cmd_tx.send(WorkerCommand::LoadCompletionColumns {
-            catalog: b.catalog.clone(),
-            schema: b.schema.clone(),
-            table: b.table.clone(),
-        });
-    }
-}
-
-fn open_completion(app: &mut App, source: OpenSource) {
-    let Some(c) = compute_completion(app) else {
-        if source == OpenSource::Manual {
-            app.status = QueryStatus::Notice {
-                msg: "no completions here".into(),
-            };
-        }
-        return;
-    };
-
-    // Auto-trigger respects the snooze: Esc dismisses for the current
-    // partial-start. Manual Ctrl+Space ignores it (user explicitly
-    // asked to reopen).
-    if source == OpenSource::Auto && app.completion_snoozed_at == Some(c.anchor_char_offset) {
-        return;
-    }
-
-    fire_column_loads(app, &c.needs_loads);
-
-    if c.items.is_empty() {
-        if source == OpenSource::Manual {
-            app.status = QueryStatus::Notice {
-                msg: "no completions here".into(),
-            };
-        }
-        return;
-    }
-
-    app.completion_snoozed_at = None;
-    app.completion = Some(crate::state::completion::CompletionState::new(
-        c.items,
-        c.anchor_char_offset,
-        c.partial,
-    ));
-}
-
-fn close_completion(app: &mut App, manual: bool) {
-    if manual && let Some(state) = &app.completion {
-        app.completion_snoozed_at = Some(state.anchor_offset);
-    }
-    app.completion = None;
-}
-
-fn accept_completion(app: &mut App) {
-    let Some(state) = app.completion.take() else {
-        return;
-    };
-    let Some(item) = state.items.get(state.selected) else {
-        return;
-    };
-    // Loading placeholders are decorative — a user pressing Enter on
-    // one shouldn't mangle the buffer. Drop accept and reopen so the
-    // popover refreshes once the load lands.
-    if item.kind == crate::autocomplete::CompletionKind::Loading {
-        app.completion = Some(state);
-        return;
-    }
-    let dialect = app
-        .active_dialect
-        .unwrap_or(crate::datasource::DriverKind::Sqlite);
-    // Keywords / functions / loading items go in as displayed (the
-    // engine already shaped `insert` correctly); identifier kinds get
-    // dialect-quoted if the name needs it.
-    use crate::autocomplete::CompletionKind;
-    let to_insert = match item.kind {
-        CompletionKind::Keyword | CompletionKind::Function | CompletionKind::Loading => {
-            item.insert.clone()
-        }
-        CompletionKind::Table
-        | CompletionKind::View
-        | CompletionKind::Column
-        | CompletionKind::Cte => {
-            crate::autocomplete::insert::quote_if_needed(&item.insert, dialect)
-        }
-    };
-    crate::autocomplete::insert::apply_completion(
-        &mut app.editor.state,
-        state.anchor_offset,
-        &to_insert,
-        item.trail,
-    );
-    schedule_session_save(app);
-}
-
-/// Recompute the popover after each edit. Closes it if the cursor
-/// drifted out of the original token, or if the new partial yields no
-/// candidates. Otherwise updates `partial` + `items` + clamps `selected`.
-fn refresh_completion(app: &mut App) {
-    if app.completion.is_none() {
-        return;
-    }
-    let Some(c) = compute_completion(app) else {
-        app.completion = None;
-        return;
-    };
-    let anchor_changed = app
-        .completion
-        .as_ref()
-        .map(|s| s.anchor_offset != c.anchor_char_offset)
-        .unwrap_or(true);
-    if anchor_changed {
-        app.completion = None;
-        // Different word — drop any prior snooze.
-        app.completion_snoozed_at = None;
-        return;
-    }
-    fire_column_loads(app, &c.needs_loads);
-    if c.items.is_empty() {
-        app.completion = None;
-        return;
-    }
-    if let Some(state) = app.completion.as_mut() {
-        state.partial = c.partial;
-        state.replace_items(c.items);
-    }
-}
-
-/// Auto-trigger heuristic: open the popover after a keystroke when the
-/// user just typed `.` or has 2+ identifier chars in the current
-/// partial. Insert mode + editor focus only; respects the snooze flag.
-fn maybe_auto_trigger(app: &mut App) {
-    if app.completion.is_some() {
-        return;
-    }
-    if app.focus != Focus::Editor {
-        return;
-    }
-    if app.editor.editor_mode() != edtui::EditorMode::Insert {
-        return;
-    }
-    let cursor = crate::state::editor::current_statement_with_cursor(&app.editor.state);
-    let prefix = &cursor.statement[..cursor.cursor_byte_in_stmt];
-    let just_after_dot = prefix.ends_with('.');
-    let partial_len = prefix
-        .chars()
-        .rev()
-        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
-        .count();
-    if !just_after_dot && partial_len < 2 {
-        return;
-    }
-    open_completion(app, OpenSource::Auto);
 }
 
 fn reload_schema_cache(app: &mut App) {
@@ -524,17 +262,24 @@ fn reload_schema_cache(app: &mut App) {
     };
 }
 
-fn apply_help_scroll(app: &mut App, delta: i32) {
-    if let Mode::Help { scroll, .. } = &mut app.mode {
-        let next = (*scroll as i32).saturating_add(delta).max(0);
-        *scroll = u16::try_from(next).unwrap_or(u16::MAX);
-    }
-}
-
-fn apply_help_scroll_h(app: &mut App, delta: i32) {
-    if let Mode::Help { h_scroll, .. } = &mut app.mode {
-        let next = (*h_scroll as i32).saturating_add(delta).max(0);
-        *h_scroll = u16::try_from(next).unwrap_or(u16::MAX);
+fn apply_help_scroll(app: &mut App, axis: HelpAxis, delta: HelpScrollDelta) {
+    let Some(Overlay::Help { scroll, h_scroll }) = &mut app.overlay else {
+        return;
+    };
+    let target: &mut u16 = match axis {
+        HelpAxis::Vertical => scroll,
+        HelpAxis::Horizontal => h_scroll,
+    };
+    match delta {
+        HelpScrollDelta::By(n) => {
+            let next = (*target as i32).saturating_add(n).max(0);
+            *target = u16::try_from(next).unwrap_or(u16::MAX);
+        }
+        // Render-time clamping pulls these back to the actual content
+        // bounds, so `u16::MAX` is the cheapest way to say "as far as
+        // it'll go" without re-deriving the content size here.
+        HelpScrollDelta::Top => *target = 0,
+        HelpScrollDelta::Bottom => *target = u16::MAX,
     }
 }
 
@@ -546,7 +291,7 @@ fn resize_schema(app: &mut App, delta: i16) {
 }
 
 fn apply_command(app: &mut App, action: CommandAction) {
-    let Mode::Command(buf) = &mut app.mode else {
+    let Some(Overlay::Command(buf)) = &mut app.overlay else {
         return;
     };
     match action {
@@ -556,65 +301,74 @@ fn apply_command(app: &mut App, action: CommandAction) {
         CommandAction::Paste(text) => paste_into(&mut buf.input, &app.log, text),
         CommandAction::Copy => copy_from(&mut buf.input, &app.log),
         CommandAction::Cut => cut_from(&mut buf.input, &app.log),
-        CommandAction::Cancel => app.mode = Mode::Normal,
+        CommandAction::Cancel => app.overlay = None,
         CommandAction::Submit => submit_command(app),
     }
 }
 
 fn submit_command(app: &mut App) {
-    let Mode::Command(buf) = &app.mode else {
+    let Some(Overlay::Command(buf)) = &app.overlay else {
         return;
     };
     let raw = buf.text().trim().to_string();
-    app.mode = Mode::Normal;
-    run_command_line(app, &raw);
-}
-
-fn run_command_line(app: &mut App, line: &str) {
-    let mut parts = line.split_whitespace();
-    let Some(cmd) = parts.next() else {
-        return;
-    };
-    let args: Vec<&str> = parts.collect();
-    // NOTE: any new command added here MUST also be listed in the `:help`
-    // popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
-    match cmd {
-        "q" | "quit" => app.should_quit = true,
-        "help" | "?" => apply(app, Action::OpenHelp),
-        "width" => set_schema_width(app, &args),
-        "run" | "r" => run_statement_under_cursor(app),
-        "cancel" => cancel_query(app),
-        "expand" | "e" => expand_latest(app),
-        "collapse" | "c" => app.mode = Mode::Normal,
-        "theme" => set_theme(app, &args),
-        "export" => run_export_command(app, &args),
-        "format" | "fmt" => format_editor(app),
-        "reload" => apply(app, Action::ReloadSchemaCache),
-        "conn" | "conns" => run_conn_command(app, &args),
-        _ => {
-            app.status = QueryStatus::Failed {
-                error: format!("unknown command: {cmd}"),
-            };
-        }
+    app.overlay = None;
+    // NOTE: any command parsed in `crate::command` MUST also be listed in
+    // the `:help` popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
+    match command::parse(&raw) {
+        Ok(None) => {}
+        Ok(Some(cmd)) => dispatch_command(app, cmd),
+        Err(error) => app.status = QueryStatus::Failed { error },
     }
 }
 
-fn run_conn_command(app: &mut App, args: &[&str]) {
-    let sub = args.first().copied();
-    let rest: Vec<&str> = args.iter().skip(1).copied().collect();
-    // NOTE: any new `:conn` subcommand MUST also be listed in the `:help`
-    // popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
+fn dispatch_command(app: &mut App, cmd: command::Command) {
+    use command::Command as C;
+    match cmd {
+        C::Quit => app.should_quit = true,
+        C::Help => apply(app, Action::OpenHelp),
+        C::SetSchemaWidth(w) => set_schema_width(app, w),
+        C::Run => apply(app, Action::RunStatementUnderCursor),
+        C::Cancel => apply(app, Action::CancelQuery),
+        C::Expand => apply(app, Action::ExpandLatestResult),
+        C::Collapse => apply(app, Action::CollapseResult),
+        C::Theme(ThemeChoice::Toggle) => apply(app, Action::ToggleTheme),
+        C::Theme(ThemeChoice::Set(kind)) => apply_theme(app, kind),
+        C::Export { fmt, target } => apply(
+            app,
+            Action::Export {
+                fmt,
+                target: resolve_target(target),
+            },
+        ),
+        C::ExportSql { table, target } => apply(
+            app,
+            Action::ExportSql {
+                table,
+                target: resolve_target(target),
+            },
+        ),
+        C::Format => apply(app, Action::FormatEditor),
+        C::Reload => apply(app, Action::ReloadSchemaCache),
+        C::Conn(sub) => dispatch_conn(app, sub),
+    }
+}
+
+fn dispatch_conn(app: &mut App, sub: ConnSubcommand) {
     match sub {
-        None | Some("list") | Some("ls") => open_conn_list(app),
-        Some("add") => open_conn_form_create(app, rest.first().copied()),
-        Some("edit") => open_conn_form_edit_command(app, rest.first().copied()),
-        Some("delete") | Some("rm") => delete_connection_command(app, rest.first().copied()),
-        Some("use") => use_connection_command(app, rest.first().copied()),
-        Some(other) => {
-            app.status = QueryStatus::Failed {
-                error: format!("unknown :conn subcommand: {other} (use list/add/edit/delete/use)"),
-            };
+        ConnSubcommand::List => open_conn_list(app),
+        ConnSubcommand::Add(name) => open_conn_form_create(app, name.as_deref()),
+        ConnSubcommand::Edit(name) => {
+            open_conn_form_edit(app, &name, ConnFormPostSave::ReturnToList)
         }
+        ConnSubcommand::Delete(name) => perform_delete(app, &name),
+        ConnSubcommand::Use(name) => use_connection(app, &name),
+    }
+}
+
+fn resolve_target(t: ParsedTarget) -> ExportTarget {
+    match t {
+        ParsedTarget::Clipboard => ExportTarget::Clipboard,
+        ParsedTarget::File(path) => ExportTarget::File(expand_tilde(&path)),
     }
 }
 
@@ -623,7 +377,7 @@ fn open_conn_list(app: &mut App) {
     if entries.is_empty() {
         // Nothing to list — bounce straight to the create form so the user
         // doesn't get an empty modal and have to type `:conn add` next.
-        app.mode = Mode::EditConnection(
+        app.screen = Screen::EditConnection(
             ConnFormState::new_create().with_post_save(ConnFormPostSave::ReturnToList),
         );
         return;
@@ -634,7 +388,7 @@ fn open_conn_list(app: &mut App) {
     {
         state.selected = idx;
     }
-    app.mode = Mode::ConnectionList(state);
+    app.screen = Screen::ConnectionList(state);
 }
 
 fn open_conn_form_create(app: &mut App, name: Option<&str>) {
@@ -642,20 +396,10 @@ fn open_conn_form_create(app: &mut App, name: Option<&str>) {
     if let Some(n) = name {
         form = form.with_prefilled_name(n);
     }
-    app.mode = Mode::EditConnection(form);
+    app.screen = Screen::EditConnection(form);
 }
 
-fn open_conn_form_edit_command(app: &mut App, name: Option<&str>) {
-    let Some(name) = name else {
-        app.status = QueryStatus::Failed {
-            error: "usage: :conn edit <name>".into(),
-        };
-        return;
-    };
-    open_conn_form_edit(app, name, ConnFormPostSave::ReturnToList);
-}
-
-fn open_conn_form_edit(app: &mut App, name: &str, post_save: ConnFormPostSave) {
+pub(super) fn open_conn_form_edit(app: &mut App, name: &str, post_save: ConnFormPostSave) {
     let entry = match app.config.connection(name).cloned() {
         Some(e) => e,
         None => {
@@ -683,22 +427,12 @@ fn open_conn_form_edit(app: &mut App, name: &str, post_save: ConnFormPostSave) {
             return;
         }
     };
-    app.mode = Mode::EditConnection(
+    app.screen = Screen::EditConnection(
         ConnFormState::editing(name.to_string(), url).with_post_save(post_save),
     );
 }
 
-fn delete_connection_command(app: &mut App, name: Option<&str>) {
-    let Some(name) = name else {
-        app.status = QueryStatus::Failed {
-            error: "usage: :conn delete <name>".into(),
-        };
-        return;
-    };
-    perform_delete(app, name);
-}
-
-fn perform_delete(app: &mut App, name: &str) {
+pub(super) fn perform_delete(app: &mut App, name: &str) {
     if Some(name) == app.active_connection.as_deref() {
         app.status = QueryStatus::Failed {
             error: format!("{name:?} is the active connection — :conn use another first"),
@@ -723,17 +457,7 @@ fn perform_delete(app: &mut App, name: &str) {
     }
 }
 
-fn use_connection_command(app: &mut App, name: Option<&str>) {
-    let Some(name) = name else {
-        app.status = QueryStatus::Failed {
-            error: "usage: :conn use <name>".into(),
-        };
-        return;
-    };
-    use_connection(app, name);
-}
-
-fn use_connection(app: &mut App, name: &str) {
+pub(super) fn use_connection(app: &mut App, name: &str) {
     if Some(name) == app.active_connection.as_deref() {
         app.status = QueryStatus::Failed {
             error: format!("{name:?} is already active"),
@@ -770,29 +494,9 @@ fn use_connection(app: &mut App, name: &str) {
     dispatch_connect(app, name.to_string(), url);
 }
 
-fn set_schema_width(app: &mut App, args: &[&str]) {
-    let Some(value) = args.first().and_then(|v| v.parse::<u16>().ok()) else {
-        app.status = QueryStatus::Failed {
-            error: "usage: :width <cols>".into(),
-        };
-        return;
-    };
+fn set_schema_width(app: &mut App, value: u16) {
     app.schema.width = value.clamp(MIN_SCHEMA_WIDTH, MAX_SCHEMA_WIDTH);
     persist_schema_width(app);
-}
-
-fn set_theme(app: &mut App, args: &[&str]) {
-    match args.first().copied() {
-        None | Some("toggle") => toggle_theme(app),
-        Some(name) => match ThemeKind::parse(name) {
-            Some(k) => apply_theme(app, k),
-            None => {
-                app.status = QueryStatus::Failed {
-                    error: format!("unknown theme: {name} (use dark|light|toggle)"),
-                };
-            }
-        },
-    }
 }
 
 fn toggle_theme(app: &mut App) {
@@ -855,13 +559,13 @@ fn prepare_confirm_run(app: &mut App) {
         app.theme.selection_fg,
     );
     crate::state::editor::highlight_range(&mut app.editor.state, &range, style);
-    app.mode = Mode::ConfirmRun {
+    app.overlay = Some(Overlay::ConfirmRun {
         statement: range.text,
-    };
+    });
 }
 
 fn confirm_run_submit(app: &mut App) {
-    let Mode::ConfirmRun { statement } = std::mem::replace(&mut app.mode, Mode::Normal) else {
+    let Some(Overlay::ConfirmRun { statement }) = app.overlay.take() else {
         return;
     };
     crate::state::editor::clear_confirm_highlight(&mut app.editor.state);
@@ -869,10 +573,10 @@ fn confirm_run_submit(app: &mut App) {
 }
 
 fn confirm_run_cancel(app: &mut App) {
-    if !matches!(app.mode, Mode::ConfirmRun { .. }) {
+    if !matches!(app.overlay, Some(Overlay::ConfirmRun { .. })) {
         return;
     }
-    app.mode = Mode::Normal;
+    app.overlay = None;
     crate::state::editor::clear_confirm_highlight(&mut app.editor.state);
 }
 
@@ -943,7 +647,7 @@ fn expand_latest(app: &mut App) {
         };
         return;
     };
-    app.mode = Mode::ResultExpanded {
+    app.screen = Screen::ResultExpanded {
         id: block.id,
         cursor: ResultCursor::default(),
         col_offset: 0,
@@ -953,9 +657,9 @@ fn expand_latest(app: &mut App) {
 }
 
 fn apply_result_nav(app: &mut App, nav: ResultNavAction) {
-    let Mode::ResultExpanded {
+    let Screen::ResultExpanded {
         id, cursor, view, ..
-    } = &mut app.mode
+    } = &mut app.screen
     else {
         return;
     };
@@ -1020,7 +724,7 @@ fn on_cache_stage(app: &mut App, stage: crate::worker::CacheStage) {
     // Columns just landed — if the popover is currently waiting on
     // them (likely showing a "loading…" placeholder), recompute.
     if matches!(stage, CacheStage::Columns { .. }) && app.completion.is_some() {
-        refresh_completion(app);
+        completion::refresh(app);
     }
 }
 
@@ -1034,12 +738,14 @@ fn on_cache_failed(app: &mut App, stage: crate::worker::CacheStage, error: Strin
 fn on_connected(app: &mut App, name: String) {
     // Only react if we're still expecting this connection. A late event from
     // an aborted swap would otherwise clobber the active connection.
-    let expected = matches!(&app.mode, Mode::Connecting { name: pending } if pending == &name);
+    let expected =
+        matches!(&app.overlay, Some(Overlay::Connecting { name: pending }) if pending == &name);
     if !expected {
         return;
     }
     app.active_connection = Some(name.clone());
-    app.mode = Mode::Normal;
+    app.overlay = None;
+    app.screen = Screen::Normal;
     app.status = QueryStatus::Idle;
     // Fresh tree — drop any nodes left over from the previous connection
     // and re-fire the catalog load.
@@ -1060,17 +766,21 @@ fn on_connected(app: &mut App, name: String) {
 }
 
 fn on_connect_failed(app: &mut App, name: String, error: String) {
-    let was_pending = matches!(&app.mode, Mode::Connecting { name: pending } if pending == &name);
+    let was_pending =
+        matches!(&app.overlay, Some(Overlay::Connecting { name: pending }) if pending == &name);
     if !was_pending {
         return;
     }
     app.log
         .warn("app", format!("connect failed for {name}: {error}"));
+    // Either way, the in-flight connect is over — the spinner clears.
+    app.overlay = None;
 
     // Live switch (`:conn use`) — the previous datasource is still alive in
-    // the worker, so just surface the error and stay in Normal.
+    // the worker, so just surface the error and leave the underlying screen
+    // alone (typically Normal).
     if app.active_connection.is_some() {
-        app.mode = Mode::Normal;
+        app.screen = Screen::Normal;
         app.status = QueryStatus::Failed {
             error: format!("connect to {name} failed: {error}"),
         };
@@ -1089,10 +799,10 @@ fn on_connect_failed(app: &mut App, name: String, error: String) {
         Some(url) => {
             let mut form = ConnFormState::editing(name.clone(), url);
             form.error = Some(format!("connect failed: {error}"));
-            app.mode = Mode::EditConnection(form);
+            app.screen = Screen::EditConnection(form);
         }
         None => {
-            app.mode = Mode::Normal;
+            app.screen = Screen::Normal;
             app.status = QueryStatus::Failed {
                 error: format!("connect to {name} failed: {error}"),
             };
@@ -1185,236 +895,13 @@ fn on_query_failed(app: &mut App, req: crate::worker::RequestId, error: String) 
 // Auth flow
 // ---------------------------------------------------------------------------
 
-fn apply_auth(app: &mut App, action: AuthAction) {
-    let Mode::Auth(state) = &mut app.mode else {
-        return;
-    };
-    match action {
-        AuthAction::Input(input) => {
-            let _ = state.input.input(input);
-        }
-        AuthAction::Paste(text) => paste_into(&mut state.input, &app.log, text),
-        // Copying a masked password buffer would defeat the masking;
-        // ignore copy/cut here.
-        AuthAction::Copy | AuthAction::Cut => {}
-        AuthAction::Cancel => app.should_quit = true,
-        AuthAction::Submit => auth_submit(app),
-    }
-}
-
-fn auth_submit(app: &mut App) {
-    let Mode::Auth(state) = &mut app.mode else {
-        return;
-    };
-    state.error = None;
-    let attempt = state.input.lines().first().cloned().unwrap_or_default();
-    let kind = state.kind.clone();
-
-    match kind {
-        AuthKind::FirstSetup => {
-            let store = if attempt.is_empty() {
-                app.log.info("auth", "plaintext store chosen");
-                ConnectionStore::plaintext()
-            } else {
-                match connections::initialise_crypto(&attempt) {
-                    Ok((block, key)) => {
-                        if let Err(err) = app.config.set_crypto(block) {
-                            set_auth_error(app, format!("save crypto block failed: {err}"));
-                            return;
-                        }
-                        app.log.info("auth", "encrypted store initialised");
-                        ConnectionStore::encrypted(key)
-                    }
-                    Err(err) => {
-                        set_auth_error(app, format!("crypto setup failed: {err}"));
-                        return;
-                    }
-                }
-            };
-            app.connection_store = Some(store);
-            transition_post_auth(app);
-        }
-        AuthKind::Unlock { block } => match connections::unlock(&attempt, &block) {
-            Ok(key) => {
-                app.connection_store = Some(ConnectionStore::encrypted(key));
-                app.log.info("auth", "store unlocked");
-                transition_post_auth(app);
-            }
-            Err(_) => {
-                if let Mode::Auth(state) = &mut app.mode {
-                    state.attempts = state.attempts.saturating_add(1);
-                    state.clear_input();
-                    let remaining = state.attempts_remaining();
-                    if remaining == 0 {
-                        app.log.error("auth", "too many failed attempts; exiting");
-                        app.exit_code = 1;
-                        app.should_quit = true;
-                    } else {
-                        state.error = Some(format!(
-                            "wrong password ({} {} left)",
-                            remaining,
-                            if remaining == 1 {
-                                "attempt"
-                            } else {
-                                "attempts"
-                            }
-                        ));
-                    }
-                }
-            }
-        },
-    }
-}
-
-fn set_auth_error(app: &mut App, msg: String) {
-    if let Mode::Auth(state) = &mut app.mode {
-        state.error = Some(msg);
-    }
-}
-
-/// Decides what to render after the auth Mode resolves. Either jumps
-/// straight into a connection form (no saved connections) or opens the
-/// connection picker so the user can choose one.
-fn transition_post_auth(app: &mut App) {
-    let entries = app.config.connection_names();
-    if entries.is_empty() {
-        app.mode = Mode::EditConnection(ConnFormState::new_create());
-        return;
-    }
-    app.mode = Mode::ConnectionList(ConnListState::new(entries));
-}
-
 // ---------------------------------------------------------------------------
 // Connection-form flow
 // ---------------------------------------------------------------------------
 
-fn apply_conn_form(app: &mut App, action: ConnFormAction) {
-    let Mode::EditConnection(state) = &mut app.mode else {
-        return;
-    };
-    match action {
-        ConnFormAction::Input(input) => {
-            let _ = state.current_input_mut().input(input);
-        }
-        ConnFormAction::Paste(text) => paste_into(state.current_input_mut(), &app.log, text),
-        ConnFormAction::Copy => copy_from(state.current_input_mut(), &app.log),
-        ConnFormAction::Cut => cut_from(state.current_input_mut(), &app.log),
-        ConnFormAction::ToggleFocus => state.toggle_focus(),
-        ConnFormAction::Cancel => app.should_quit = true,
-        ConnFormAction::Submit => conn_form_submit(app),
-    }
-}
-
-fn conn_form_submit(app: &mut App) {
-    let Mode::EditConnection(state) = &mut app.mode else {
-        return;
-    };
-    state.error = None;
-    let name = state.name_value();
-    let url = state.url_value();
-    let post_save = state.post_save;
-
-    if name.is_empty() {
-        state.error = Some("name is required".into());
-        return;
-    }
-    if url.is_empty() {
-        state.error = Some("url is required".into());
-        return;
-    }
-
-    let store = match app.connection_store.as_ref() {
-        Some(s) => s,
-        None => {
-            state.error = Some("internal: no connection store available".into());
-            return;
-        }
-    };
-
-    let entry = match store.make_entry(name.clone(), &url) {
-        Ok(e) => e,
-        Err(err) => {
-            state.error = Some(format!("encrypt failed: {err}"));
-            return;
-        }
-    };
-    if let Err(err) = app.config.upsert_connection(entry) {
-        state.error = Some(format!("save failed: {err}"));
-        return;
-    }
-
-    app.log.info("conn", format!("saved connection {name}"));
-    match post_save {
-        ConnFormPostSave::AutoConnect => dispatch_connect(app, name, url),
-        ConnFormPostSave::ReturnToList => {
-            let entries = app.config.connection_names();
-            let mut list = ConnListState::new(entries);
-            if let Some(idx) = list.entries.iter().position(|n| n == &name) {
-                list.selected = idx;
-            }
-            app.mode = Mode::ConnectionList(list);
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Connection list
 // ---------------------------------------------------------------------------
-
-fn apply_conn_list(app: &mut App, action: ConnListAction) {
-    let Mode::ConnectionList(state) = &mut app.mode else {
-        return;
-    };
-    // While confirming a delete, only y/Enter and n/Esc do anything (handled
-    // via ConfirmDelete / CancelDelete).
-    if state.is_confirming() {
-        match action {
-            ConnListAction::ConfirmDelete => {
-                if let Some(name) = state.take_pending_delete() {
-                    perform_delete(app, &name);
-                    refresh_conn_list(app);
-                }
-            }
-            ConnListAction::CancelDelete => state.cancel_delete(),
-            _ => {}
-        }
-        return;
-    }
-    match action {
-        ConnListAction::Down => state.move_selection(1),
-        ConnListAction::Up => state.move_selection(-1),
-        ConnListAction::Top => state.jump_top(),
-        ConnListAction::Bottom => state.jump_bottom(),
-        ConnListAction::AddNew => {
-            app.mode = Mode::EditConnection(
-                ConnFormState::new_create().with_post_save(ConnFormPostSave::ReturnToList),
-            );
-        }
-        ConnListAction::EditSelected => {
-            if let Some(name) = state.selected_name().map(str::to_string) {
-                open_conn_form_edit(app, &name, ConnFormPostSave::ReturnToList);
-            }
-        }
-        ConnListAction::UseSelected => {
-            if let Some(name) = state.selected_name().map(str::to_string) {
-                use_connection(app, &name);
-            }
-        }
-        ConnListAction::BeginDelete => state.begin_delete(),
-        ConnListAction::Close => app.mode = Mode::Normal,
-        // Handled in the confirming branch above.
-        ConnListAction::ConfirmDelete | ConnListAction::CancelDelete => {}
-    }
-}
-
-fn refresh_conn_list(app: &mut App) {
-    if let Mode::ConnectionList(state) = &mut app.mode {
-        state.refresh(app.config.connection_names());
-        if state.entries.is_empty() {
-            app.mode = Mode::Normal;
-        }
-    }
-}
 
 pub(crate) fn dispatch_connect(app: &mut App, name: String, url: String) {
     // If we're swapping connections, persist the current session before the
@@ -1430,7 +917,7 @@ pub(crate) fn dispatch_connect(app: &mut App, name: String, url: String) {
         cache.clear();
     }
     app.completion = None;
-    app.mode = Mode::Connecting { name: name.clone() };
+    app.overlay = Some(Overlay::Connecting { name: name.clone() });
     app.status = QueryStatus::Idle;
     let _ = app.cmd_tx.send(WorkerCommand::Connect { name, url });
 }
@@ -1439,7 +926,11 @@ pub(crate) fn dispatch_connect(app: &mut App, name: String, url: String) {
 // Clipboard helpers (shared across every TextArea-backed input)
 // ---------------------------------------------------------------------------
 
-fn paste_into(input: &mut TextArea<'static>, log: &crate::log::Logger, supplied: Option<String>) {
+pub(super) fn paste_into(
+    input: &mut TextArea<'static>,
+    log: &crate::log::Logger,
+    supplied: Option<String>,
+) {
     let text = match supplied {
         Some(t) => t,
         None => match clipboard::read(log) {
@@ -1450,7 +941,7 @@ fn paste_into(input: &mut TextArea<'static>, log: &crate::log::Logger, supplied:
     let _ = input.insert_str(text);
 }
 
-fn copy_from(input: &mut TextArea<'static>, log: &crate::log::Logger) {
+pub(super) fn copy_from(input: &mut TextArea<'static>, log: &crate::log::Logger) {
     // No-op when nothing is selected — TextArea's `copy()` would just no-op
     // anyway, but we don't want to clobber the system clipboard with
     // whatever's left in the yank buffer.
@@ -1462,7 +953,7 @@ fn copy_from(input: &mut TextArea<'static>, log: &crate::log::Logger) {
     clipboard::write(log, &text);
 }
 
-fn cut_from(input: &mut TextArea<'static>, log: &crate::log::Logger) {
+pub(super) fn cut_from(input: &mut TextArea<'static>, log: &crate::log::Logger) {
     if input.selection_range().is_none() {
         return;
     }
@@ -1477,7 +968,7 @@ fn cut_from(input: &mut TextArea<'static>, log: &crate::log::Logger) {
 // ---------------------------------------------------------------------------
 
 fn result_enter_visual(app: &mut App) {
-    let Mode::ResultExpanded { cursor, view, .. } = &mut app.mode else {
+    let Screen::ResultExpanded { cursor, view, .. } = &mut app.screen else {
         return;
     };
     if matches!(view, ResultViewMode::Normal) {
@@ -1486,16 +977,16 @@ fn result_enter_visual(app: &mut App) {
 }
 
 fn result_exit_visual(app: &mut App) {
-    let Mode::ResultExpanded { view, .. } = &mut app.mode else {
+    let Screen::ResultExpanded { view, .. } = &mut app.screen else {
         return;
     };
     *view = ResultViewMode::Normal;
 }
 
 fn result_yank(app: &mut App) {
-    let Mode::ResultExpanded {
+    let Screen::ResultExpanded {
         id, cursor, view, ..
-    } = &mut app.mode
+    } = &mut app.screen
     else {
         return;
     };
@@ -1528,9 +1019,9 @@ fn result_yank(app: &mut App) {
 
 fn result_yank_format(app: &mut App, fmt: ExportFormat) {
     let (id, cursor, anchor) = {
-        let Mode::ResultExpanded {
+        let Screen::ResultExpanded {
             id, cursor, view, ..
-        } = &app.mode
+        } = &app.screen
         else {
             return;
         };
@@ -1546,7 +1037,7 @@ fn result_yank_format(app: &mut App, fmt: ExportFormat) {
             Err(e) => {
                 // Stay in Visual on error — the user might want to copy the
                 // selection in another format, or expand it.
-                if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+                if let Screen::ResultExpanded { view, .. } = &mut app.screen {
                     *view = ResultViewMode::Visual { anchor };
                 }
                 app.status = QueryStatus::Failed { error: e };
@@ -1558,7 +1049,7 @@ fn result_yank_format(app: &mut App, fmt: ExportFormat) {
             None => {
                 // Block disappeared between expand and yank — drop back to
                 // Normal and surface the error.
-                if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+                if let Screen::ResultExpanded { view, .. } = &mut app.screen {
                     *view = ResultViewMode::Normal;
                 }
                 app.status = QueryStatus::Failed {
@@ -1569,7 +1060,7 @@ fn result_yank_format(app: &mut App, fmt: ExportFormat) {
         },
     };
     clipboard::write(&app.log, &payload);
-    if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+    if let Screen::ResultExpanded { view, .. } = &mut app.screen {
         *view = ResultViewMode::Normal;
     }
     app.status = QueryStatus::Notice {
@@ -1584,74 +1075,12 @@ fn result_yank_format(app: &mut App, fmt: ExportFormat) {
 }
 
 fn result_cancel_yank_format(app: &mut App) {
-    let Mode::ResultExpanded { view, .. } = &mut app.mode else {
+    let Screen::ResultExpanded { view, .. } = &mut app.screen else {
         return;
     };
     if let ResultViewMode::YankFormat { anchor } = *view {
         *view = ResultViewMode::Visual { anchor };
     }
-}
-
-fn run_export_command(app: &mut App, args: &[&str]) {
-    let Some(fmt_str) = args.first() else {
-        app.status = QueryStatus::Failed {
-            error: "usage: :export <csv|tsv|json|sql> [args...]".into(),
-        };
-        return;
-    };
-    let Some(fmt) = ExportFormat::parse(fmt_str) else {
-        app.status = QueryStatus::Failed {
-            error: format!("unknown export format: {fmt_str} (use csv|tsv|json|sql)"),
-        };
-        return;
-    };
-    // SQL export takes an optional `[table]` between the format and the
-    // path, so it has its own arg parser. The rest share the simple
-    // "everything after the format is a path (with optional `>` prefix)"
-    // shape.
-    if matches!(fmt, ExportFormat::Sql) {
-        run_export_sql_command(app, &args[1..]);
-        return;
-    }
-    let rest = &args[1..];
-    let target = match rest.first().copied() {
-        None => ExportTarget::Clipboard,
-        Some(">") if rest.len() == 1 => {
-            app.status = QueryStatus::Failed {
-                error: "missing path after `>`".into(),
-            };
-            return;
-        }
-        Some(">") => ExportTarget::File(expand_tilde(&rest[1..].join(" "))),
-        Some(_) => ExportTarget::File(expand_tilde(&rest.join(" "))),
-    };
-    apply(app, Action::Export { fmt, target });
-}
-
-/// Parse the args after `:export sql`. Shape:
-///   `:export sql`               → infer table, clipboard
-///   `:export sql <table>`        → table given, clipboard
-///   `:export sql <table> <path>` → table given, file
-///   `:export sql <table> > <path>` → table given, file (shell-style)
-///   `:export sql > <path>`       → infer table, file
-fn run_export_sql_command(app: &mut App, args: &[&str]) {
-    let (table, rest): (Option<String>, &[&str]) = match args.first().copied() {
-        None => (None, args),
-        Some(">") => (None, args),
-        Some(name) => (Some(name.to_string()), &args[1..]),
-    };
-    let target = match rest.first().copied() {
-        None => ExportTarget::Clipboard,
-        Some(">") if rest.len() == 1 => {
-            app.status = QueryStatus::Failed {
-                error: "missing path after `>`".into(),
-            };
-            return;
-        }
-        Some(">") => ExportTarget::File(expand_tilde(&rest[1..].join(" "))),
-        Some(_) => ExportTarget::File(expand_tilde(&rest.join(" "))),
-    };
-    apply(app, Action::ExportSql { table, target });
 }
 
 /// `:export sql` handler. Mirrors `export_command` (selection wins over
@@ -1663,9 +1092,9 @@ fn export_sql_command(app: &mut App, table: Option<String>, target: ExportTarget
     // selection branch passes the column-index slice down to inference
     // so a Visual subset can succeed even when the full projection
     // wouldn't.
-    if let Mode::ResultExpanded {
+    if let Screen::ResultExpanded {
         id, cursor, view, ..
-    } = &app.mode
+    } = &app.screen
         && let Some(anchor) = view.anchor()
     {
         let id = *id;
@@ -1709,7 +1138,7 @@ fn export_sql_command(app: &mut App, table: Option<String>, target: ExportTarget
             rect.cols(),
             payload,
         );
-        if drop_visual && let Mode::ResultExpanded { view, .. } = &mut app.mode {
+        if drop_visual && let Screen::ResultExpanded { view, .. } = &mut app.screen {
             *view = ResultViewMode::Normal;
         }
         return;
@@ -1766,9 +1195,9 @@ fn export_command(app: &mut App, fmt: ExportFormat, target: ExportTarget) {
     // Two routes:
     // - Inside an expanded result with an active selection → export the rect.
     // - Otherwise → export the latest result block in full.
-    if let Mode::ResultExpanded {
+    if let Screen::ResultExpanded {
         id, cursor, view, ..
-    } = &app.mode
+    } = &app.screen
         && let Some(anchor) = view.anchor()
     {
         let id = *id;
@@ -1782,7 +1211,7 @@ fn export_command(app: &mut App, fmt: ExportFormat, target: ExportTarget) {
         };
         let drop_visual = matches!(target, ExportTarget::Clipboard);
         finish_export(app, fmt, target, rect.rows(), rect.cols(), payload);
-        if drop_visual && let Mode::ResultExpanded { view, .. } = &mut app.mode {
+        if drop_visual && let Screen::ResultExpanded { view, .. } = &mut app.screen {
             *view = ResultViewMode::Normal;
         }
         return;
@@ -1974,7 +1403,7 @@ const SESSION_DEBOUNCE: Duration = Duration::from_millis(800);
 /// Push the next debounced save 800ms into the future. Skips when there's
 /// no active connection — the editor isn't user-reachable in those modes,
 /// but the early return keeps us honest if that ever changes.
-fn schedule_session_save(app: &mut App) {
+pub(super) fn schedule_session_save(app: &mut App) {
     if app.active_connection.is_none() {
         return;
     }

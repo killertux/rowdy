@@ -3,6 +3,7 @@ mod app;
 mod autocomplete;
 mod cli;
 mod clipboard;
+mod command;
 mod config;
 mod connections;
 mod crypto;
@@ -12,6 +13,7 @@ mod export;
 mod log;
 mod session;
 mod sql_infer;
+mod sql_quote;
 mod state;
 mod subcommands;
 mod terminal;
@@ -41,7 +43,8 @@ use crate::log::Logger;
 use crate::state::auth::{AuthKind, AuthState};
 use crate::state::conn_form::ConnFormState;
 use crate::state::conn_list::ConnListState;
-use crate::state::focus::{Mode, PendingChord};
+use crate::state::focus::PendingChord;
+use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
 use crate::terminal::Tui;
 use crate::worker::{WorkerCommand, WorkerEvent};
@@ -210,11 +213,11 @@ fn decide_startup(config: &mut ConfigStore, args: &Args, logger: &Logger) -> Res
 fn apply_decision(app: &mut App, decision: Decision) {
     match decision {
         Decision::Auth(state) => {
-            app.mode = Mode::Auth(state);
+            app.screen = Screen::Auth(state);
         }
         Decision::CreateFirst { store } => {
             app.connection_store = Some(store);
-            app.mode = Mode::EditConnection(ConnFormState::new_create());
+            app.screen = Screen::EditConnection(ConnFormState::new_create());
         }
         Decision::AutoConnect { store, name, url } => {
             app.connection_store = Some(store);
@@ -222,7 +225,7 @@ fn apply_decision(app: &mut App, decision: Decision) {
         }
         Decision::PickConnection { store, names } => {
             app.connection_store = Some(store);
-            app.mode = Mode::ConnectionList(ConnListState::new(names));
+            app.screen = Screen::ConnectionList(ConnListState::new(names));
         }
     }
 }

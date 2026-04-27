@@ -3,22 +3,31 @@ use ratatui::crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKin
 use ratatui_textarea::Input;
 
 use crate::action::{
-    Action, AuthAction, CommandAction, CompletionAction, ConnFormAction, ConnListAction,
-    ResultNavAction, SchemaAction,
+    Action, AuthAction, CommandAction, CompletionAction, ConnFormAction, ConnListAction, HelpAxis,
+    HelpScrollDelta, ResultNavAction, SchemaAction,
 };
 use crate::app::App;
 use crate::export::ExportFormat;
-use crate::state::focus::{Focus, Mode, PendingChord};
+use crate::state::focus::{Focus, PendingChord};
+use crate::state::overlay::Overlay;
 use crate::state::results::ResultViewMode;
+use crate::state::screen::Screen;
 
 pub fn translate(app: &App, event: CtEvent) -> Option<Action> {
     match event {
         CtEvent::Key(key) if key.kind == KeyEventKind::Press => translate_key(app, key, event),
         CtEvent::Key(_) => None,
         CtEvent::Paste(_) => translate_paste(app, event),
-        _ if app.focus == Focus::Editor && app.mode.is_normal() => Some(Action::EditorEvent(event)),
+        _ if app.focus == Focus::Editor && is_plain_normal(app) => Some(Action::EditorEvent(event)),
         _ => None,
     }
+}
+
+/// `true` when there's no overlay AND the screen is `Normal` — the
+/// "user is just sitting in the editor" state where raw events are
+/// safe to forward to edtui.
+fn is_plain_normal(app: &App) -> bool {
+    app.overlay.is_none() && matches!(app.screen, Screen::Normal)
 }
 
 /// Bracketed-paste flow: many terminals (and macOS by default) handle
@@ -31,11 +40,15 @@ fn translate_paste(app: &App, event: CtEvent) -> Option<Action> {
         return None;
     };
     let text = text.clone();
-    match &app.mode {
-        Mode::Command(_) => Some(Action::Command(CommandAction::Paste(Some(text)))),
-        Mode::Auth(_) => Some(Action::Auth(AuthAction::Paste(Some(text)))),
-        Mode::EditConnection(_) => Some(Action::ConnForm(ConnFormAction::Paste(Some(text)))),
-        Mode::Normal if app.focus == Focus::Editor => Some(Action::EditorEvent(event)),
+    // Overlays preempt paste routing — `:` command bar takes the
+    // bracketed-paste payload before the underlying screen sees it.
+    if let Some(Overlay::Command(_)) = &app.overlay {
+        return Some(Action::Command(CommandAction::Paste(Some(text))));
+    }
+    match &app.screen {
+        Screen::Auth(_) => Some(Action::Auth(AuthAction::Paste(Some(text)))),
+        Screen::EditConnection(_) => Some(Action::ConnForm(ConnFormAction::Paste(Some(text)))),
+        Screen::Normal if app.focus == Focus::Editor => Some(Action::EditorEvent(event)),
         _ => None,
     }
 }
@@ -43,21 +56,28 @@ fn translate_paste(app: &App, event: CtEvent) -> Option<Action> {
 fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
     // Ctrl+C is the global escape hatch — except in TextArea-input modes,
     // where it's bound to "copy" instead.
-    if !consumes_ctrl_c(&app.mode)
+    if !consumes_ctrl_c(app.overlay.as_ref(), &app.screen)
         && let Some(action) = panic_quit(key)
     {
         return Some(action);
     }
-    match &app.mode {
-        Mode::Command(_) => translate_command_key(key),
-        Mode::Normal => translate_normal_key(app, key, raw),
-        Mode::ResultExpanded { view, .. } => translate_expanded_key(app, key, view),
-        Mode::ConfirmRun { .. } => translate_confirm_key(key),
-        Mode::Auth(_) => translate_auth_key(key),
-        Mode::EditConnection(_) => translate_conn_form_key(key),
-        Mode::ConnectionList(state) => translate_conn_list_key(key, state.is_confirming()),
-        Mode::Connecting { .. } => None, // keys are inert until the worker responds
-        Mode::Help { .. } => translate_help_key(key),
+    // Overlays preempt the screen keymap — Help is open over the result
+    // grid, key goes to the help popover and not the grid.
+    if let Some(overlay) = &app.overlay {
+        return match overlay {
+            Overlay::Command(_) => translate_command_key(key),
+            Overlay::ConfirmRun { .. } => translate_confirm_key(key),
+            // Keys are inert until the worker responds.
+            Overlay::Connecting { .. } => None,
+            Overlay::Help { .. } => translate_help_key(key),
+        };
+    }
+    match &app.screen {
+        Screen::Normal => translate_normal_key(app, key, raw),
+        Screen::ResultExpanded { view, .. } => translate_expanded_key(key, view),
+        Screen::Auth(_) => translate_auth_key(key),
+        Screen::EditConnection(_) => translate_conn_form_key(key),
+        Screen::ConnectionList(state) => translate_conn_list_key(key, state.is_confirming()),
     }
 }
 
@@ -65,28 +85,30 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
 /// here should be reflected in the "Help (this screen)" section of
 /// `HELP_SECTIONS` in `src/ui/help_view.rs`.
 fn translate_help_key(key: KeyEvent) -> Option<Action> {
+    use HelpAxis::{Horizontal, Vertical};
+    use HelpScrollDelta::{Bottom, By, Top};
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match (key.code, ctrl) {
         (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => Some(Action::CloseHelp),
-        (KeyCode::Char('j') | KeyCode::Down, false) => Some(Action::HelpScroll(1)),
-        (KeyCode::Char('k') | KeyCode::Up, false) => Some(Action::HelpScroll(-1)),
-        (KeyCode::Char('h') | KeyCode::Left, false) => Some(Action::HelpScrollH(-2)),
-        (KeyCode::Char('l') | KeyCode::Right, false) => Some(Action::HelpScrollH(2)),
-        (KeyCode::Char('d'), true) => Some(Action::HelpScroll(8)),
-        (KeyCode::Char('u'), true) => Some(Action::HelpScroll(-8)),
-        (KeyCode::Char('g'), false) => Some(Action::HelpScroll(i32::MIN / 2)),
-        (KeyCode::Char('G'), false) => Some(Action::HelpScroll(i32::MAX / 2)),
-        (KeyCode::Char('0') | KeyCode::Home, _) => Some(Action::HelpScrollH(i32::MIN / 2)),
-        (KeyCode::Char('$') | KeyCode::End, _) => Some(Action::HelpScrollH(i32::MAX / 2)),
+        (KeyCode::Char('j') | KeyCode::Down, false) => Some(Action::HelpScroll(Vertical, By(1))),
+        (KeyCode::Char('k') | KeyCode::Up, false) => Some(Action::HelpScroll(Vertical, By(-1))),
+        (KeyCode::Char('h') | KeyCode::Left, false) => Some(Action::HelpScroll(Horizontal, By(-2))),
+        (KeyCode::Char('l') | KeyCode::Right, false) => Some(Action::HelpScroll(Horizontal, By(2))),
+        (KeyCode::Char('d'), true) => Some(Action::HelpScroll(Vertical, By(8))),
+        (KeyCode::Char('u'), true) => Some(Action::HelpScroll(Vertical, By(-8))),
+        (KeyCode::Char('g'), false) => Some(Action::HelpScroll(Vertical, Top)),
+        (KeyCode::Char('G'), false) => Some(Action::HelpScroll(Vertical, Bottom)),
+        (KeyCode::Char('0') | KeyCode::Home, _) => Some(Action::HelpScroll(Horizontal, Top)),
+        (KeyCode::Char('$') | KeyCode::End, _) => Some(Action::HelpScroll(Horizontal, Bottom)),
         _ => None,
     }
 }
 
-fn consumes_ctrl_c(mode: &Mode) -> bool {
-    matches!(
-        mode,
-        Mode::Command(_) | Mode::Auth(_) | Mode::EditConnection(_)
-    )
+fn consumes_ctrl_c(overlay: Option<&Overlay>, screen: &Screen) -> bool {
+    if matches!(overlay, Some(Overlay::Command(_))) {
+        return true;
+    }
+    matches!(screen, Screen::Auth(_) | Screen::EditConnection(_))
 }
 
 // NOTE: any new connection-list binding MUST also be listed in the `:help`
@@ -117,12 +139,13 @@ fn translate_conn_list_key(key: KeyEvent, confirming: bool) -> Option<Action> {
 }
 
 fn translate_auth_key(key: KeyEvent) -> Option<Action> {
-    if let Some(clip) = clipboard_action(key) {
-        return Some(Action::Auth(match clip {
-            ClipboardOp::Paste => AuthAction::Paste(None),
-            ClipboardOp::Copy => AuthAction::Copy,
-            ClipboardOp::Cut => AuthAction::Cut,
-        }));
+    if let Some(act) = clipboard_arm(
+        key,
+        AuthAction::Paste(None),
+        AuthAction::Copy,
+        AuthAction::Cut,
+    ) {
+        return Some(Action::Auth(act));
     }
     match key.code {
         KeyCode::Esc => Some(Action::Auth(AuthAction::Cancel)),
@@ -132,12 +155,13 @@ fn translate_auth_key(key: KeyEvent) -> Option<Action> {
 }
 
 fn translate_conn_form_key(key: KeyEvent) -> Option<Action> {
-    if let Some(clip) = clipboard_action(key) {
-        return Some(Action::ConnForm(match clip {
-            ClipboardOp::Paste => ConnFormAction::Paste(None),
-            ClipboardOp::Copy => ConnFormAction::Copy,
-            ClipboardOp::Cut => ConnFormAction::Cut,
-        }));
+    if let Some(act) = clipboard_arm(
+        key,
+        ConnFormAction::Paste(None),
+        ConnFormAction::Copy,
+        ConnFormAction::Cut,
+    ) {
+        return Some(Action::ConnForm(act));
     }
     match key.code {
         KeyCode::Esc => Some(Action::ConnForm(ConnFormAction::Cancel)),
@@ -152,6 +176,18 @@ enum ClipboardOp {
     Paste,
     Copy,
     Cut,
+}
+
+/// Pick the per-mode action variant matching the clipboard shortcut on
+/// `key`, if any. Each input modal has its own `Paste`/`Copy`/`Cut`
+/// variants; the caller passes them in and we project the recognised
+/// op onto the right one.
+fn clipboard_arm<A>(key: KeyEvent, paste: A, copy: A, cut: A) -> Option<A> {
+    Some(match clipboard_action(key)? {
+        ClipboardOp::Paste => paste,
+        ClipboardOp::Copy => copy,
+        ClipboardOp::Cut => cut,
+    })
 }
 
 /// Recognises the standard system-clipboard shortcuts:
@@ -197,12 +233,13 @@ fn panic_quit(key: KeyEvent) -> Option<Action> {
 }
 
 fn translate_command_key(key: KeyEvent) -> Option<Action> {
-    if let Some(clip) = clipboard_action(key) {
-        return Some(Action::Command(match clip {
-            ClipboardOp::Paste => CommandAction::Paste(None),
-            ClipboardOp::Copy => CommandAction::Copy,
-            ClipboardOp::Cut => CommandAction::Cut,
-        }));
+    if let Some(act) = clipboard_arm(
+        key,
+        CommandAction::Paste(None),
+        CommandAction::Copy,
+        CommandAction::Cut,
+    ) {
+        return Some(Action::Command(act));
     }
     match key.code {
         KeyCode::Esc => Some(Action::Command(CommandAction::Cancel)),
@@ -320,7 +357,7 @@ fn translate_leader_chord(app: &App, key: KeyEvent) -> Option<Action> {
 
 // NOTE: any new expanded-result binding MUST also be listed in the `:help`
 // popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
-fn translate_expanded_key(_app: &App, key: KeyEvent, view: &ResultViewMode) -> Option<Action> {
+fn translate_expanded_key(key: KeyEvent, view: &ResultViewMode) -> Option<Action> {
     // YankFormat sub-mode: only the format keys + cancel work; navigation
     // and other shortcuts are inert until the user picks one.
     if matches!(view, ResultViewMode::YankFormat { .. }) {
@@ -411,9 +448,520 @@ fn translate_gg_chord(app: &App, key: KeyEvent) -> Option<Action> {
     if key.code != KeyCode::Char('g') {
         return None;
     }
-    match (&app.mode, app.focus) {
-        (Mode::ResultExpanded { .. }, _) => Some(Action::ResultNav(ResultNavAction::Top)),
-        (Mode::Normal, Focus::Schema) => Some(Action::Schema(SchemaAction::Top)),
+    match (&app.screen, app.focus) {
+        (Screen::ResultExpanded { .. }, _) => Some(Action::ResultNav(ResultNavAction::Top)),
+        (Screen::Normal, Focus::Schema) => Some(Action::Schema(SchemaAction::Top)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the pure key→action translators. Functions that
+    //! reach into `App` (the entry-point dispatcher and the few
+    //! mode-driven helpers like `translate_normal_key`) are covered
+    //! by the integration tests in `action.rs`; here we focus on
+    //! everything that's a pure `KeyEvent` consumer.
+    use super::*;
+    use crate::action::{ConnListAction, SchemaAction};
+    use crate::state::results::{ResultCursor, ResultViewMode};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn key_mod(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        key_mod(code, KeyModifiers::CONTROL)
+    }
+
+    fn matches_action(actual: &Option<Action>, want: &str) -> bool {
+        actual
+            .as_ref()
+            .map(|a| format!("{a:?}").contains(want))
+            .unwrap_or(false)
+    }
+
+    // ----- panic_quit / clipboard_action / consumes_ctrl_c ---------------
+
+    #[test]
+    fn panic_quit_only_fires_for_bare_ctrl_c() {
+        assert!(matches!(
+            panic_quit(ctrl(KeyCode::Char('c'))),
+            Some(Action::Quit)
+        ));
+        // Ctrl+Shift+C is a clipboard shortcut, must not quit.
+        assert!(
+            panic_quit(key_mod(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ))
+            .is_none()
+        );
+        // Cmd+C similarly.
+        assert!(
+            panic_quit(key_mod(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SUPER
+            ))
+            .is_none()
+        );
+        // Plain `c` does nothing.
+        assert!(panic_quit(key(KeyCode::Char('c'))).is_none());
+    }
+
+    #[test]
+    fn ctrl_c_consumed_by_text_input_modes() {
+        use crate::state::auth::{AuthKind, AuthState};
+        use crate::state::command::CommandBuffer;
+        use crate::state::conn_form::ConnFormState;
+        // Command overlay over Normal screen.
+        let cmd = Overlay::Command(CommandBuffer::default());
+        assert!(consumes_ctrl_c(Some(&cmd), &Screen::Normal));
+        // Auth and EditConnection screens (no overlay).
+        assert!(consumes_ctrl_c(
+            None,
+            &Screen::Auth(AuthState::new(AuthKind::FirstSetup))
+        ));
+        assert!(consumes_ctrl_c(
+            None,
+            &Screen::EditConnection(ConnFormState::new_create())
+        ));
+        // Plain Normal screen with no overlay does NOT consume Ctrl+C
+        // (the panic-quit branch fires).
+        assert!(!consumes_ctrl_c(None, &Screen::Normal));
+        // Help overlay does not consume Ctrl+C either — only Command does.
+        let help = Overlay::Help {
+            scroll: 0,
+            h_scroll: 0,
+        };
+        assert!(!consumes_ctrl_c(Some(&help), &Screen::Normal));
+    }
+
+    #[test]
+    fn clipboard_action_recognises_all_modifier_variants() {
+        // Ctrl-only.
+        assert!(matches!(
+            clipboard_action(ctrl(KeyCode::Char('v'))),
+            Some(ClipboardOp::Paste)
+        ));
+        assert!(matches!(
+            clipboard_action(ctrl(KeyCode::Char('c'))),
+            Some(ClipboardOp::Copy)
+        ));
+        assert!(matches!(
+            clipboard_action(ctrl(KeyCode::Char('x'))),
+            Some(ClipboardOp::Cut)
+        ));
+        // Ctrl+Shift.
+        let cs = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert!(matches!(
+            clipboard_action(key_mod(KeyCode::Char('V'), cs)),
+            Some(ClipboardOp::Paste)
+        ));
+        // Cmd (Super).
+        assert!(matches!(
+            clipboard_action(key_mod(KeyCode::Char('v'), KeyModifiers::SUPER)),
+            Some(ClipboardOp::Paste)
+        ));
+        // Bare key — not a shortcut.
+        assert!(clipboard_action(key(KeyCode::Char('v'))).is_none());
+        // Random ctrl key — not a shortcut.
+        assert!(clipboard_action(ctrl(KeyCode::Char('a'))).is_none());
+    }
+
+    #[test]
+    fn is_ctrl_space_is_strict() {
+        assert!(is_ctrl_space(ctrl(KeyCode::Char(' '))));
+        assert!(!is_ctrl_space(key(KeyCode::Char(' '))));
+        // Ctrl+Shift+Space should NOT trigger — only Ctrl+Space exactly.
+        assert!(!is_ctrl_space(key_mod(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+    }
+
+    // ----- translate_help_key -------------------------------------------
+
+    #[test]
+    fn help_key_close_aliases() {
+        assert!(matches!(
+            translate_help_key(key(KeyCode::Esc)),
+            Some(Action::CloseHelp)
+        ));
+        assert!(matches!(
+            translate_help_key(key(KeyCode::Char('q'))),
+            Some(Action::CloseHelp)
+        ));
+    }
+
+    #[test]
+    fn help_key_vertical_scroll() {
+        let down = translate_help_key(key(KeyCode::Char('j')));
+        assert!(matches_action(&down, "Vertical"));
+        assert!(matches_action(&down, "By(1)"));
+        let up = translate_help_key(key(KeyCode::Char('k')));
+        assert!(matches_action(&up, "By(-1)"));
+        let half_page_down = translate_help_key(ctrl(KeyCode::Char('d')));
+        assert!(matches_action(&half_page_down, "By(8)"));
+        let top = translate_help_key(key(KeyCode::Char('g')));
+        assert!(matches_action(&top, "Top"));
+        let bottom = translate_help_key(key(KeyCode::Char('G')));
+        assert!(matches_action(&bottom, "Bottom"));
+    }
+
+    #[test]
+    fn help_key_horizontal_scroll() {
+        let left = translate_help_key(key(KeyCode::Char('h')));
+        assert!(matches_action(&left, "Horizontal"));
+        assert!(matches_action(&left, "By(-2)"));
+        let right = translate_help_key(key(KeyCode::Char('l')));
+        assert!(matches_action(&right, "By(2)"));
+        let line_start = translate_help_key(key(KeyCode::Char('0')));
+        assert!(matches_action(&line_start, "Horizontal"));
+        assert!(matches_action(&line_start, "Top"));
+        let line_end = translate_help_key(key(KeyCode::Char('$')));
+        assert!(matches_action(&line_end, "Bottom"));
+    }
+
+    #[test]
+    fn help_key_unknown_returns_none() {
+        assert!(translate_help_key(key(KeyCode::Char('z'))).is_none());
+        assert!(translate_help_key(key(KeyCode::F(1))).is_none());
+    }
+
+    // ----- translate_command_key ---------------------------------------
+
+    #[test]
+    fn command_key_clipboard_arms_route_through() {
+        assert!(matches_action(
+            &translate_command_key(ctrl(KeyCode::Char('v'))),
+            "Paste"
+        ));
+        assert!(matches_action(
+            &translate_command_key(ctrl(KeyCode::Char('c'))),
+            "Copy"
+        ));
+        assert!(matches_action(
+            &translate_command_key(ctrl(KeyCode::Char('x'))),
+            "Cut"
+        ));
+    }
+
+    #[test]
+    fn command_key_submit_and_cancel() {
+        assert!(matches_action(
+            &translate_command_key(key(KeyCode::Enter)),
+            "Submit"
+        ));
+        assert!(matches_action(
+            &translate_command_key(key(KeyCode::Esc)),
+            "Cancel"
+        ));
+    }
+
+    #[test]
+    fn command_key_input_passthrough() {
+        // Any other key falls through as an Input. Matching just by tag.
+        assert!(matches_action(
+            &translate_command_key(key(KeyCode::Char('a'))),
+            "Input"
+        ));
+    }
+
+    // ----- translate_auth_key ------------------------------------------
+
+    #[test]
+    fn auth_key_clipboard_then_modal_keys() {
+        assert!(matches_action(
+            &translate_auth_key(ctrl(KeyCode::Char('v'))),
+            "Auth(Paste"
+        ));
+        assert!(matches_action(
+            &translate_auth_key(key(KeyCode::Esc)),
+            "Cancel"
+        ));
+        assert!(matches_action(
+            &translate_auth_key(key(KeyCode::Enter)),
+            "Submit"
+        ));
+        // Random typing falls into Input(...).
+        assert!(matches_action(
+            &translate_auth_key(key(KeyCode::Char('p'))),
+            "Input"
+        ));
+    }
+
+    // ----- translate_conn_form_key -------------------------------------
+
+    #[test]
+    fn conn_form_key_routes() {
+        assert!(matches_action(
+            &translate_conn_form_key(ctrl(KeyCode::Char('v'))),
+            "ConnForm(Paste"
+        ));
+        assert!(matches_action(
+            &translate_conn_form_key(key(KeyCode::Tab)),
+            "ToggleFocus"
+        ));
+        assert!(matches_action(
+            &translate_conn_form_key(key(KeyCode::BackTab)),
+            "ToggleFocus"
+        ));
+        assert!(matches_action(
+            &translate_conn_form_key(key(KeyCode::Esc)),
+            "Cancel"
+        ));
+        assert!(matches_action(
+            &translate_conn_form_key(key(KeyCode::Enter)),
+            "Submit"
+        ));
+    }
+
+    // ----- translate_conn_list_key -------------------------------------
+
+    #[test]
+    fn conn_list_navigation() {
+        let case = |k, want| {
+            let action = translate_conn_list_key(key(k), false);
+            assert!(
+                matches!(action, Some(Action::ConnList(ref a)) if std::mem::discriminant(a) == std::mem::discriminant(&want)),
+                "{k:?} → {want:?}"
+            );
+        };
+        case(KeyCode::Char('j'), ConnListAction::Down);
+        case(KeyCode::Char('k'), ConnListAction::Up);
+        case(KeyCode::Char('g'), ConnListAction::Top);
+        case(KeyCode::Char('G'), ConnListAction::Bottom);
+        case(KeyCode::Enter, ConnListAction::UseSelected);
+        case(KeyCode::Char('a'), ConnListAction::AddNew);
+        case(KeyCode::Char('e'), ConnListAction::EditSelected);
+        case(KeyCode::Char('d'), ConnListAction::BeginDelete);
+        case(KeyCode::Esc, ConnListAction::Close);
+        case(KeyCode::Char('q'), ConnListAction::Close);
+    }
+
+    #[test]
+    fn conn_list_confirming_only_accepts_yes_no() {
+        // y / Y / Enter → ConfirmDelete.
+        for k in [KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter] {
+            assert!(matches!(
+                translate_conn_list_key(key(k), true),
+                Some(Action::ConnList(ConnListAction::ConfirmDelete))
+            ));
+        }
+        // n / N / Esc → CancelDelete.
+        for k in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
+            assert!(matches!(
+                translate_conn_list_key(key(k), true),
+                Some(Action::ConnList(ConnListAction::CancelDelete))
+            ));
+        }
+        // Other keys are inert.
+        assert!(translate_conn_list_key(key(KeyCode::Char('j')), true).is_none());
+    }
+
+    // ----- translate_confirm_key ---------------------------------------
+
+    #[test]
+    fn confirm_run_only_accepts_enter_or_esc() {
+        assert!(matches!(
+            translate_confirm_key(key(KeyCode::Enter)),
+            Some(Action::ConfirmRunSubmit)
+        ));
+        assert!(matches!(
+            translate_confirm_key(key(KeyCode::Esc)),
+            Some(Action::ConfirmRunCancel)
+        ));
+        // Any other key is intentionally inert (no accidental edits).
+        assert!(translate_confirm_key(key(KeyCode::Char('y'))).is_none());
+        assert!(translate_confirm_key(key(KeyCode::Char(' '))).is_none());
+    }
+
+    // ----- translate_window_chord / translate_global / translate_schema_key -
+
+    #[test]
+    fn window_chord_focus_and_resize() {
+        assert!(matches!(
+            translate_window_chord(key(KeyCode::Char('h'))),
+            Some(Action::FocusPanel(Focus::Editor))
+        ));
+        assert!(matches!(
+            translate_window_chord(key(KeyCode::Char('l'))),
+            Some(Action::FocusPanel(Focus::Schema))
+        ));
+        // `<` grows the schema panel, `>` shrinks it.
+        assert!(matches!(
+            translate_window_chord(key(KeyCode::Char('<'))),
+            Some(Action::ResizeSchema(2))
+        ));
+        assert!(matches!(
+            translate_window_chord(key(KeyCode::Char('>'))),
+            Some(Action::ResizeSchema(-2))
+        ));
+        assert!(translate_window_chord(key(KeyCode::Char('z'))).is_none());
+    }
+
+    #[test]
+    fn global_keys_recognised() {
+        assert!(matches!(
+            translate_global(ctrl(KeyCode::Char('w'))),
+            Some(Action::SetPendingChord(PendingChord::Window))
+        ));
+        assert!(matches!(
+            translate_global(key(KeyCode::Char(':'))),
+            Some(Action::OpenCommand)
+        ));
+        assert!(matches!(
+            translate_global(key(KeyCode::Char(' '))),
+            Some(Action::SetPendingChord(PendingChord::Leader))
+        ));
+        assert!(matches!(
+            translate_global(key(KeyCode::Char('='))),
+            Some(Action::FormatEditor)
+        ));
+        assert!(translate_global(key(KeyCode::Char('a'))).is_none());
+    }
+
+    #[test]
+    fn schema_keys() {
+        let case = |k, want| {
+            let actual = translate_schema_key(key(k));
+            assert!(
+                matches!(actual, Some(Action::Schema(ref a)) if std::mem::discriminant(a) == std::mem::discriminant(&want)),
+                "{k:?}"
+            );
+        };
+        case(KeyCode::Char('j'), SchemaAction::Down);
+        case(KeyCode::Char('k'), SchemaAction::Up);
+        case(KeyCode::Char('h'), SchemaAction::CollapseOrAscend);
+        case(KeyCode::Char('l'), SchemaAction::ExpandOrDescend);
+        case(KeyCode::Enter, SchemaAction::Toggle);
+        case(KeyCode::Char('o'), SchemaAction::Toggle);
+        case(KeyCode::Char('G'), SchemaAction::Bottom);
+        // `g` is a chord trigger, not a Schema action.
+        assert!(matches!(
+            translate_schema_key(key(KeyCode::Char('g'))),
+            Some(Action::SetPendingChord(PendingChord::GG))
+        ));
+        // `<` / `>` resize the panel.
+        assert!(matches!(
+            translate_schema_key(key(KeyCode::Char('<'))),
+            Some(Action::ResizeSchema(2))
+        ));
+        assert!(translate_schema_key(key(KeyCode::Char('z'))).is_none());
+    }
+
+    // ----- translate_completion_popover_key ----------------------------
+
+    #[test]
+    fn completion_popover_keys() {
+        let case = |key_event, want| {
+            assert!(
+                matches!(translate_completion_popover_key(key_event), Some(Action::Completion(a)) if std::mem::discriminant(&a) == std::mem::discriminant(&want))
+            );
+        };
+        case(key(KeyCode::Esc), CompletionAction::Close);
+        case(key(KeyCode::Tab), CompletionAction::Accept);
+        case(key(KeyCode::Enter), CompletionAction::Accept);
+        case(key(KeyCode::Up), CompletionAction::Up);
+        case(key(KeyCode::Down), CompletionAction::Down);
+        case(ctrl(KeyCode::Char('n')), CompletionAction::Down);
+        case(ctrl(KeyCode::Char('p')), CompletionAction::Up);
+        // Plain typing falls through (the popover keeps refining its filter).
+        assert!(translate_completion_popover_key(key(KeyCode::Char('x'))).is_none());
+    }
+
+    // ----- translate_expanded_key --------------------------------------
+
+    #[test]
+    fn expanded_key_yank_format_submode_only_takes_format_picks() {
+        let view = ResultViewMode::YankFormat {
+            anchor: ResultCursor::default(),
+        };
+        let case = |k, want: ExportFormat| {
+            assert!(matches!(
+                translate_expanded_key(key(k), &view),
+                Some(Action::ResultYankFormat(f)) if f == want
+            ));
+        };
+        case(KeyCode::Char('c'), ExportFormat::Csv);
+        case(KeyCode::Char('C'), ExportFormat::Csv);
+        case(KeyCode::Char('t'), ExportFormat::Tsv);
+        case(KeyCode::Char('j'), ExportFormat::Json);
+        case(KeyCode::Char('s'), ExportFormat::Sql);
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Esc), &view),
+            Some(Action::ResultCancelYankFormat)
+        ));
+        // Non-format, non-cancel keys are inert in YankFormat mode.
+        assert!(translate_expanded_key(key(KeyCode::Char('h')), &view).is_none());
+    }
+
+    #[test]
+    fn expanded_key_normal_navigation() {
+        let view = ResultViewMode::Normal;
+        // Esc/q in Normal closes the view (no Visual to drop back to).
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Esc), &view),
+            Some(Action::CollapseResult)
+        ));
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Char('q')), &view),
+            Some(Action::CollapseResult)
+        ));
+        // `v` enters Visual.
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Char('v')), &view),
+            Some(Action::ResultEnterVisual)
+        ));
+        // `y` yanks the current cell.
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Char('y')), &view),
+            Some(Action::ResultYank)
+        ));
+        // `g` triggers the gg chord.
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Char('g')), &view),
+            Some(Action::SetPendingChord(PendingChord::GG))
+        ));
+        // Navigation keys.
+        let nav_cases = [
+            (KeyCode::Char('h'), "Left"),
+            (KeyCode::Char('l'), "Right"),
+            (KeyCode::Char('j'), "Down"),
+            (KeyCode::Char('k'), "Up"),
+            (KeyCode::Char('0'), "LineStart"),
+            (KeyCode::Char('$'), "LineEnd"),
+            (KeyCode::Char('G'), "Bottom"),
+        ];
+        for (k, want) in nav_cases {
+            let action = translate_expanded_key(key(k), &view);
+            assert!(matches_action(&action, want), "{k:?} → {want}");
+        }
+    }
+
+    #[test]
+    fn expanded_key_visual_mode_esc_drops_to_normal() {
+        let view = ResultViewMode::Visual {
+            anchor: ResultCursor::default(),
+        };
+        // In Visual, Esc/q drops back to Normal sub-mode (not closing).
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Esc), &view),
+            Some(Action::ResultExitVisual)
+        ));
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Char('q')), &view),
+            Some(Action::ResultExitVisual)
+        ));
+        // `v` toggles Visual off.
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Char('v')), &view),
+            Some(Action::ResultExitVisual)
+        ));
     }
 }

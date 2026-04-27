@@ -13,6 +13,7 @@ use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
+use crate::datasource::sql::decode_to;
 use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
 
@@ -360,45 +361,27 @@ fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
         return decode_array(row, idx, type_name, inner);
     }
     match type_name {
-        "BOOL" => {
-            decode_or_null::<bool>(row, idx).map(|opt| opt.map(Cell::Bool).unwrap_or(Cell::Null))
+        "BOOL" => decode_to!(row, idx, bool => Cell::Bool),
+        "INT2" | "SMALLINT" => decode_to!(row, idx, i16 => |v| Cell::Int(v as i64)),
+        "INT4" | "INT" | "INTEGER" => decode_to!(row, idx, i32 => |v| Cell::Int(v as i64)),
+        "INT8" | "BIGINT" => decode_to!(row, idx, i64 => Cell::Int),
+        "FLOAT4" | "REAL" => decode_to!(row, idx, f32 => |v| Cell::Float(v as f64)),
+        "FLOAT8" | "DOUBLE PRECISION" => decode_to!(row, idx, f64 => Cell::Float),
+        "NUMERIC" => {
+            decode_to!(row, idx, sqlx::types::BigDecimal => |v| Cell::Decimal(v.to_string()))
         }
-        "INT2" | "SMALLINT" => decode_or_null::<i16>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
-        "INT4" | "INT" | "INTEGER" => decode_or_null::<i32>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
-        "INT8" | "BIGINT" => {
-            decode_or_null::<i64>(row, idx).map(|opt| opt.map(Cell::Int).unwrap_or(Cell::Null))
-        }
-        "FLOAT4" | "REAL" => decode_or_null::<f32>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Float(v as f64)).unwrap_or(Cell::Null)),
-        "FLOAT8" | "DOUBLE PRECISION" => {
-            decode_or_null::<f64>(row, idx).map(|opt| opt.map(Cell::Float).unwrap_or(Cell::Null))
-        }
-        "NUMERIC" => decode_or_null::<sqlx::types::BigDecimal>(row, idx).map(|opt| {
-            opt.map(|v| Cell::Decimal(v.to_string()))
-                .unwrap_or(Cell::Null)
-        }),
         "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" => {
-            decode_or_null::<String>(row, idx).map(|opt| opt.map(Cell::Text).unwrap_or(Cell::Null))
+            decode_to!(row, idx, String => Cell::Text)
         }
-        "BYTEA" => decode_or_null::<Vec<u8>>(row, idx)
-            .map(|opt| opt.map(Cell::Bytes).unwrap_or(Cell::Null)),
-        "TIMESTAMPTZ" => decode_or_null::<DateTime<Utc>>(row, idx)
-            .map(|opt| opt.map(Cell::Timestamp).unwrap_or(Cell::Null)),
-        "TIMESTAMP" => decode_or_null::<NaiveDateTime>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Text(v.to_string())).unwrap_or(Cell::Null)),
-        "DATE" => decode_or_null::<NaiveDate>(row, idx)
-            .map(|opt| opt.map(Cell::Date).unwrap_or(Cell::Null)),
-        "TIME" => decode_or_null::<NaiveTime>(row, idx)
-            .map(|opt| opt.map(Cell::Time).unwrap_or(Cell::Null)),
-        "UUID" => {
-            decode_or_null::<Uuid>(row, idx).map(|opt| opt.map(Cell::Uuid).unwrap_or(Cell::Null))
+        "BYTEA" => decode_to!(row, idx, Vec<u8> => Cell::Bytes),
+        "TIMESTAMPTZ" => decode_to!(row, idx, DateTime<Utc> => Cell::Timestamp),
+        "TIMESTAMP" => decode_to!(row, idx, NaiveDateTime => |v| Cell::Text(v.to_string())),
+        "DATE" => decode_to!(row, idx, NaiveDate => Cell::Date),
+        "TIME" => decode_to!(row, idx, NaiveTime => Cell::Time),
+        "UUID" => decode_to!(row, idx, Uuid => Cell::Uuid),
+        "JSON" | "JSONB" => {
+            decode_to!(row, idx, sqlx::types::Json<JsonValue> => |w| Cell::Text(w.0.to_string()))
         }
-        "JSON" | "JSONB" => decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx).map(|opt| {
-            opt.map(|w| Cell::Text(w.0.to_string()))
-                .unwrap_or(Cell::Null)
-        }),
         _ => None,
     }
 }
