@@ -139,12 +139,13 @@ fn translate_auth_key(key: KeyEvent) -> Option<Action> {
 }
 
 fn translate_conn_form_key(key: KeyEvent) -> Option<Action> {
-    if let Some(clip) = clipboard_action(key) {
-        return Some(Action::ConnForm(match clip {
-            ClipboardOp::Paste => ConnFormAction::Paste(None),
-            ClipboardOp::Copy => ConnFormAction::Copy,
-            ClipboardOp::Cut => ConnFormAction::Cut,
-        }));
+    if let Some(act) = clipboard_arm(
+        key,
+        ConnFormAction::Paste(None),
+        ConnFormAction::Copy,
+        ConnFormAction::Cut,
+    ) {
+        return Some(Action::ConnForm(act));
     }
     match key.code {
         KeyCode::Esc => Some(Action::ConnForm(ConnFormAction::Cancel)),
@@ -159,6 +160,18 @@ enum ClipboardOp {
     Paste,
     Copy,
     Cut,
+}
+
+/// Pick the per-mode action variant matching the clipboard shortcut on
+/// `key`, if any. Each input modal has its own `Paste`/`Copy`/`Cut`
+/// variants; the caller passes them in and we project the recognised
+/// op onto the right one.
+fn clipboard_arm<A>(key: KeyEvent, paste: A, copy: A, cut: A) -> Option<A> {
+    Some(match clipboard_action(key)? {
+        ClipboardOp::Paste => paste,
+        ClipboardOp::Copy => copy,
+        ClipboardOp::Cut => cut,
+    })
 }
 
 /// Recognises the standard system-clipboard shortcuts:
@@ -204,12 +217,13 @@ fn panic_quit(key: KeyEvent) -> Option<Action> {
 }
 
 fn translate_command_key(key: KeyEvent) -> Option<Action> {
-    if let Some(clip) = clipboard_action(key) {
-        return Some(Action::Command(match clip {
-            ClipboardOp::Paste => CommandAction::Paste(None),
-            ClipboardOp::Copy => CommandAction::Copy,
-            ClipboardOp::Cut => CommandAction::Cut,
-        }));
+    if let Some(act) = clipboard_arm(
+        key,
+        CommandAction::Paste(None),
+        CommandAction::Copy,
+        CommandAction::Cut,
+    ) {
+        return Some(Action::Command(act));
     }
     match key.code {
         KeyCode::Esc => Some(Action::Command(CommandAction::Cancel)),
