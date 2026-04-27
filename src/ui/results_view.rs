@@ -103,6 +103,24 @@ impl Widget for ExpandedResult<'_> {
         let inner = block_widget.inner(area);
         block_widget.render(area, buf);
 
+        // Reserve the bottom row for the cell-value badge so wide values
+        // remain readable when the column they live in is narrower than them.
+        let (table_area, badge_area) = if inner.height >= 2 {
+            (
+                Rect {
+                    height: inner.height - 1,
+                    ..inner
+                },
+                Some(Rect {
+                    y: inner.y + inner.height - 1,
+                    height: 1,
+                    ..inner
+                }),
+            )
+        } else {
+            (inner, None)
+        };
+
         let table = build_table(
             self.block,
             Some(self.cursor),
@@ -118,10 +136,55 @@ impl Widget for ExpandedResult<'_> {
             Table::new(table.rows, widths)
                 .header(table.header)
                 .style(Style::default().fg(self.theme.fg).bg(self.theme.bg)),
-            inner,
+            table_area,
             buf,
         );
+
+        if let Some(badge_area) = badge_area {
+            render_cell_badge(self.block, self.cursor, badge_area, self.theme, buf);
+        }
     }
+}
+
+fn render_cell_badge(
+    block: &ResultBlock,
+    cursor: ResultCursor,
+    area: Rect,
+    theme: &Theme,
+    buf: &mut Buffer,
+) {
+    let col_name = block
+        .columns
+        .get(cursor.col)
+        .map(|c| c.name.as_str())
+        .unwrap_or("");
+    let raw_value = block
+        .rows()
+        .get(cursor.row)
+        .and_then(|r| r.get(cursor.col))
+        .map(|c| c.display())
+        .unwrap_or_default();
+    // Flatten so a multi-line TEXT value stays on one line — it gets clipped
+    // either way, but newlines would push the badge off its own row.
+    let value: String = raw_value
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let raw = format!(" {col_name}: {value} ");
+    let width = area.width as usize;
+    let text = if raw.chars().count() > width {
+        let take = width.saturating_sub(1);
+        let mut s: String = raw.chars().take(take).collect();
+        s.push('…');
+        s
+    } else {
+        raw
+    };
+    let line = Line::from(Span::styled(
+        text,
+        Style::default().fg(theme.fg_dim).bg(theme.bg),
+    ));
+    Paragraph::new(line).render(area, buf);
 }
 
 struct BuiltTable<'a> {

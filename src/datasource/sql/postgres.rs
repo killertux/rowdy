@@ -4,7 +4,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde_json::Value as JsonValue;
-use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
+use sqlx::postgres::{PgPool, PgPoolOptions, PgRow, PgTypeKind};
 use sqlx::{Column as _, Row, TypeInfo};
 use uuid::Uuid;
 
@@ -315,13 +315,21 @@ fn row_to_cells(row: &PgRow, n: usize) -> CellRow {
 
 fn decode_cell(row: &PgRow, idx: usize) -> Cell {
     let column = &row.columns()[idx];
-    let type_name = column.type_info().name().to_string();
+    let type_info = column.type_info();
+    let type_name = type_info.name().to_string();
+    // User-defined ENUM types arrive as `PgType::Custom` with the enum's own
+    // name (e.g. `"FlowExecutionStatus"`), so they fall through `decode_typed`.
+    // Postgres ships the variant name as plain UTF-8 on the wire, but
+    // `try_get::<String>` rejects it because `String`'s `compatible()` only
+    // accepts the built-in text OIDs. `try_get_unchecked` skips that gate.
+    if matches!(type_info.kind(), PgTypeKind::Enum(_))
+        && let Ok(opt) = row.try_get_unchecked::<Option<String>, _>(idx)
+    {
+        return opt.map(Cell::Text).unwrap_or(Cell::Null);
+    }
     if let Some(cell) = decode_typed(row, idx, &type_name) {
         return cell;
     }
-    // Defensive fallback for types not enumerated above (or branches whose
-    // decoder failed). sqlx's `compatible()` check makes each attempt a
-    // no-op against incompatible columns, so this is safe.
     if let Some(cell) = decode_fallback(row, idx) {
         return cell;
     }
@@ -371,7 +379,7 @@ fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
             opt.map(|v| Cell::Decimal(v.to_string()))
                 .unwrap_or(Cell::Null)
         }),
-        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" | "ENUM" => {
+        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" => {
             decode_or_null::<String>(row, idx).map(|opt| opt.map(Cell::Text).unwrap_or(Cell::Null))
         }
         "BYTEA" => decode_or_null::<Vec<u8>>(row, idx)
@@ -551,5 +559,59 @@ mod tests {
         ds.execute(&format!("DROP TABLE {table}"))
             .await
             .expect("drop");
+    }
+
+    #[tokio::test]
+    async fn enum_values_decoded_as_text() {
+        let Some(url) = url() else {
+            eprintln!("ROWDY_POSTGRES_URL not set; skipping postgres integration test");
+            return;
+        };
+        let ds = PostgresDatasource::connect(&url, Logger::discard())
+            .await
+            .expect("connect");
+        let table = unique_table();
+        let enum_type = format!("{table}_status");
+
+        ds.execute(&format!("DROP TABLE IF EXISTS {table}"))
+            .await
+            .expect("pre-clean");
+        ds.execute(&format!("DROP TYPE IF EXISTS {enum_type}"))
+            .await
+            .expect("pre-clean enum");
+        ds.execute(&format!(
+            "CREATE TYPE {enum_type} AS ENUM ('created', 'running', 'completed', 'failed')"
+        ))
+        .await
+        .expect("create enum type");
+        ds.execute(&format!(
+            "CREATE TABLE {table} (id INTEGER PRIMARY KEY, status {enum_type} NOT NULL)"
+        ))
+        .await
+        .expect("create table with enum");
+        ds.execute(&format!(
+            "INSERT INTO {table}(id, status) VALUES (1, 'running'), (2, 'completed')"
+        ))
+        .await
+        .expect("insert enum values");
+
+        let result = ds
+            .execute(&format!("SELECT id, status FROM {table} ORDER BY id"))
+            .await
+            .expect("select enum");
+        assert_eq!(result.columns.len(), 2);
+        assert_eq!(result.rows.len(), 2);
+
+        assert!(matches!(result.rows[0][0], Cell::Int(1)));
+        assert!(matches!(&result.rows[0][1], Cell::Text(s) if s == "running"));
+        assert!(matches!(result.rows[1][0], Cell::Int(2)));
+        assert!(matches!(&result.rows[1][1], Cell::Text(s) if s == "completed"));
+
+        ds.execute(&format!("DROP TABLE {table}"))
+            .await
+            .expect("drop table");
+        ds.execute(&format!("DROP TYPE {enum_type}"))
+            .await
+            .expect("drop enum type");
     }
 }
