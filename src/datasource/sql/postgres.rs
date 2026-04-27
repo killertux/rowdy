@@ -4,7 +4,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde_json::Value as JsonValue;
-use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
+use sqlx::postgres::{PgPool, PgPoolOptions, PgRow, PgTypeKind};
 use sqlx::{Column as _, Row, TypeInfo};
 use uuid::Uuid;
 
@@ -315,13 +315,21 @@ fn row_to_cells(row: &PgRow, n: usize) -> CellRow {
 
 fn decode_cell(row: &PgRow, idx: usize) -> Cell {
     let column = &row.columns()[idx];
-    let type_name = column.type_info().name().to_string();
+    let type_info = column.type_info();
+    let type_name = type_info.name().to_string();
+    // User-defined ENUM types arrive as `PgType::Custom` with the enum's own
+    // name (e.g. `"FlowExecutionStatus"`), so they fall through `decode_typed`.
+    // Postgres ships the variant name as plain UTF-8 on the wire, but
+    // `try_get::<String>` rejects it because `String`'s `compatible()` only
+    // accepts the built-in text OIDs. `try_get_unchecked` skips that gate.
+    if matches!(type_info.kind(), PgTypeKind::Enum(_))
+        && let Ok(opt) = row.try_get_unchecked::<Option<String>, _>(idx)
+    {
+        return opt.map(Cell::Text).unwrap_or(Cell::Null);
+    }
     if let Some(cell) = decode_typed(row, idx, &type_name) {
         return cell;
     }
-    // Defensive fallback for types not enumerated above (or branches whose
-    // decoder failed). sqlx's `compatible()` check makes each attempt a
-    // no-op against incompatible columns, so this is safe.
     if let Some(cell) = decode_fallback(row, idx) {
         return cell;
     }
@@ -332,17 +340,13 @@ fn decode_cell(row: &PgRow, idx: usize) -> Cell {
 }
 
 fn decode_fallback(row: &PgRow, idx: usize) -> Option<Cell> {
-    // Try JSON first as it handles custom types via serde
     if let Some(opt) = decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx) {
         return Some(
             opt.map(|w| Cell::Text(w.0.to_string()))
                 .unwrap_or(Cell::Null),
         );
     }
-    // For custom PostgreSQL types (like ENUM variants), we need to use
-    // sqlx's unknown type decoding. The database stores these as strings,
-    // so we use `try_get` without type specification to bypass type checking.
-    if let Ok(opt) = row.try_get::<Option<String>, _>(idx) {
+    if let Some(opt) = decode_or_null::<String>(row, idx) {
         return Some(opt.map(Cell::Text).unwrap_or(Cell::Null));
     }
     if let Some(opt) = decode_or_null::<Vec<u8>>(row, idx) {
@@ -375,7 +379,7 @@ fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
             opt.map(|v| Cell::Decimal(v.to_string()))
                 .unwrap_or(Cell::Null)
         }),
-        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" | "ENUM" => {
+        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" => {
             decode_or_null::<String>(row, idx).map(|opt| opt.map(Cell::Text).unwrap_or(Cell::Null))
         }
         "BYTEA" => decode_or_null::<Vec<u8>>(row, idx)
