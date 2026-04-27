@@ -6,6 +6,7 @@ use ratatui_textarea::{Input, TextArea};
 
 use crate::app::{App, MAX_SCHEMA_WIDTH, MIN_SCHEMA_WIDTH};
 use crate::clipboard;
+use crate::command::{self, ConnSubcommand, ParsedTarget, ThemeChoice};
 use crate::connections::{self, ConnectionStore};
 use crate::datasource::{Cell, Column, QueryResult};
 use crate::export::{self, ExportFormat};
@@ -588,54 +589,63 @@ fn submit_command(app: &mut App) {
     };
     let raw = buf.text().trim().to_string();
     app.mode = Mode::Normal;
-    run_command_line(app, &raw);
-}
-
-fn run_command_line(app: &mut App, line: &str) {
-    let mut parts = line.split_whitespace();
-    let Some(cmd) = parts.next() else {
-        return;
-    };
-    let args: Vec<&str> = parts.collect();
-    // NOTE: any new command added here MUST also be listed in the `:help`
-    // popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
-    match cmd {
-        "q" | "quit" => app.should_quit = true,
-        "help" | "?" => apply(app, Action::OpenHelp),
-        "width" => set_schema_width(app, &args),
-        "run" | "r" => run_statement_under_cursor(app),
-        "cancel" => cancel_query(app),
-        "expand" | "e" => expand_latest(app),
-        "collapse" | "c" => app.mode = Mode::Normal,
-        "theme" => set_theme(app, &args),
-        "export" => run_export_command(app, &args),
-        "format" | "fmt" => format_editor(app),
-        "reload" => apply(app, Action::ReloadSchemaCache),
-        "conn" | "conns" => run_conn_command(app, &args),
-        _ => {
-            app.status = QueryStatus::Failed {
-                error: format!("unknown command: {cmd}"),
-            };
-        }
+    // NOTE: any command parsed in `crate::command` MUST also be listed in
+    // the `:help` popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
+    match command::parse(&raw) {
+        Ok(None) => {}
+        Ok(Some(cmd)) => dispatch_command(app, cmd),
+        Err(error) => app.status = QueryStatus::Failed { error },
     }
 }
 
-fn run_conn_command(app: &mut App, args: &[&str]) {
-    let sub = args.first().copied();
-    let rest: Vec<&str> = args.iter().skip(1).copied().collect();
-    // NOTE: any new `:conn` subcommand MUST also be listed in the `:help`
-    // popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
+fn dispatch_command(app: &mut App, cmd: command::Command) {
+    use command::Command as C;
+    match cmd {
+        C::Quit => app.should_quit = true,
+        C::Help => apply(app, Action::OpenHelp),
+        C::SetSchemaWidth(w) => set_schema_width(app, w),
+        C::Run => apply(app, Action::RunStatementUnderCursor),
+        C::Cancel => apply(app, Action::CancelQuery),
+        C::Expand => apply(app, Action::ExpandLatestResult),
+        C::Collapse => apply(app, Action::CollapseResult),
+        C::Theme(ThemeChoice::Toggle) => apply(app, Action::ToggleTheme),
+        C::Theme(ThemeChoice::Set(kind)) => apply_theme(app, kind),
+        C::Export { fmt, target } => apply(
+            app,
+            Action::Export {
+                fmt,
+                target: resolve_target(target),
+            },
+        ),
+        C::ExportSql { table, target } => apply(
+            app,
+            Action::ExportSql {
+                table,
+                target: resolve_target(target),
+            },
+        ),
+        C::Format => apply(app, Action::FormatEditor),
+        C::Reload => apply(app, Action::ReloadSchemaCache),
+        C::Conn(sub) => dispatch_conn(app, sub),
+    }
+}
+
+fn dispatch_conn(app: &mut App, sub: ConnSubcommand) {
     match sub {
-        None | Some("list") | Some("ls") => open_conn_list(app),
-        Some("add") => open_conn_form_create(app, rest.first().copied()),
-        Some("edit") => open_conn_form_edit_command(app, rest.first().copied()),
-        Some("delete") | Some("rm") => delete_connection_command(app, rest.first().copied()),
-        Some("use") => use_connection_command(app, rest.first().copied()),
-        Some(other) => {
-            app.status = QueryStatus::Failed {
-                error: format!("unknown :conn subcommand: {other} (use list/add/edit/delete/use)"),
-            };
+        ConnSubcommand::List => open_conn_list(app),
+        ConnSubcommand::Add(name) => open_conn_form_create(app, name.as_deref()),
+        ConnSubcommand::Edit(name) => {
+            open_conn_form_edit(app, &name, ConnFormPostSave::ReturnToList)
         }
+        ConnSubcommand::Delete(name) => perform_delete(app, &name),
+        ConnSubcommand::Use(name) => use_connection(app, &name),
+    }
+}
+
+fn resolve_target(t: ParsedTarget) -> ExportTarget {
+    match t {
+        ParsedTarget::Clipboard => ExportTarget::Clipboard,
+        ParsedTarget::File(path) => ExportTarget::File(expand_tilde(&path)),
     }
 }
 
@@ -664,16 +674,6 @@ fn open_conn_form_create(app: &mut App, name: Option<&str>) {
         form = form.with_prefilled_name(n);
     }
     app.mode = Mode::EditConnection(form);
-}
-
-fn open_conn_form_edit_command(app: &mut App, name: Option<&str>) {
-    let Some(name) = name else {
-        app.status = QueryStatus::Failed {
-            error: "usage: :conn edit <name>".into(),
-        };
-        return;
-    };
-    open_conn_form_edit(app, name, ConnFormPostSave::ReturnToList);
 }
 
 fn open_conn_form_edit(app: &mut App, name: &str, post_save: ConnFormPostSave) {
@@ -709,16 +709,6 @@ fn open_conn_form_edit(app: &mut App, name: &str, post_save: ConnFormPostSave) {
     );
 }
 
-fn delete_connection_command(app: &mut App, name: Option<&str>) {
-    let Some(name) = name else {
-        app.status = QueryStatus::Failed {
-            error: "usage: :conn delete <name>".into(),
-        };
-        return;
-    };
-    perform_delete(app, name);
-}
-
 fn perform_delete(app: &mut App, name: &str) {
     if Some(name) == app.active_connection.as_deref() {
         app.status = QueryStatus::Failed {
@@ -742,16 +732,6 @@ fn perform_delete(app: &mut App, name: &str) {
             };
         }
     }
-}
-
-fn use_connection_command(app: &mut App, name: Option<&str>) {
-    let Some(name) = name else {
-        app.status = QueryStatus::Failed {
-            error: "usage: :conn use <name>".into(),
-        };
-        return;
-    };
-    use_connection(app, name);
 }
 
 fn use_connection(app: &mut App, name: &str) {
@@ -791,29 +771,9 @@ fn use_connection(app: &mut App, name: &str) {
     dispatch_connect(app, name.to_string(), url);
 }
 
-fn set_schema_width(app: &mut App, args: &[&str]) {
-    let Some(value) = args.first().and_then(|v| v.parse::<u16>().ok()) else {
-        app.status = QueryStatus::Failed {
-            error: "usage: :width <cols>".into(),
-        };
-        return;
-    };
+fn set_schema_width(app: &mut App, value: u16) {
     app.schema.width = value.clamp(MIN_SCHEMA_WIDTH, MAX_SCHEMA_WIDTH);
     persist_schema_width(app);
-}
-
-fn set_theme(app: &mut App, args: &[&str]) {
-    match args.first().copied() {
-        None | Some("toggle") => toggle_theme(app),
-        Some(name) => match ThemeKind::parse(name) {
-            Some(k) => apply_theme(app, k),
-            None => {
-                app.status = QueryStatus::Failed {
-                    error: format!("unknown theme: {name} (use dark|light|toggle)"),
-                };
-            }
-        },
-    }
 }
 
 fn toggle_theme(app: &mut App) {
@@ -1611,68 +1571,6 @@ fn result_cancel_yank_format(app: &mut App) {
     if let ResultViewMode::YankFormat { anchor } = *view {
         *view = ResultViewMode::Visual { anchor };
     }
-}
-
-fn run_export_command(app: &mut App, args: &[&str]) {
-    let Some(fmt_str) = args.first() else {
-        app.status = QueryStatus::Failed {
-            error: "usage: :export <csv|tsv|json|sql> [args...]".into(),
-        };
-        return;
-    };
-    let Some(fmt) = ExportFormat::parse(fmt_str) else {
-        app.status = QueryStatus::Failed {
-            error: format!("unknown export format: {fmt_str} (use csv|tsv|json|sql)"),
-        };
-        return;
-    };
-    // SQL export takes an optional `[table]` between the format and the
-    // path, so it has its own arg parser. The rest share the simple
-    // "everything after the format is a path (with optional `>` prefix)"
-    // shape.
-    if matches!(fmt, ExportFormat::Sql) {
-        run_export_sql_command(app, &args[1..]);
-        return;
-    }
-    let rest = &args[1..];
-    let target = match rest.first().copied() {
-        None => ExportTarget::Clipboard,
-        Some(">") if rest.len() == 1 => {
-            app.status = QueryStatus::Failed {
-                error: "missing path after `>`".into(),
-            };
-            return;
-        }
-        Some(">") => ExportTarget::File(expand_tilde(&rest[1..].join(" "))),
-        Some(_) => ExportTarget::File(expand_tilde(&rest.join(" "))),
-    };
-    apply(app, Action::Export { fmt, target });
-}
-
-/// Parse the args after `:export sql`. Shape:
-///   `:export sql`               → infer table, clipboard
-///   `:export sql <table>`        → table given, clipboard
-///   `:export sql <table> <path>` → table given, file
-///   `:export sql <table> > <path>` → table given, file (shell-style)
-///   `:export sql > <path>`       → infer table, file
-fn run_export_sql_command(app: &mut App, args: &[&str]) {
-    let (table, rest): (Option<String>, &[&str]) = match args.first().copied() {
-        None => (None, args),
-        Some(">") => (None, args),
-        Some(name) => (Some(name.to_string()), &args[1..]),
-    };
-    let target = match rest.first().copied() {
-        None => ExportTarget::Clipboard,
-        Some(">") if rest.len() == 1 => {
-            app.status = QueryStatus::Failed {
-                error: "missing path after `>`".into(),
-            };
-            return;
-        }
-        Some(">") => ExportTarget::File(expand_tilde(&rest[1..].join(" "))),
-        Some(_) => ExportTarget::File(expand_tilde(&rest.join(" "))),
-    };
-    apply(app, Action::ExportSql { table, target });
 }
 
 /// `:export sql` handler. Mirrors `export_command` (selection wins over
