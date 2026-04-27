@@ -147,6 +147,34 @@ pub fn replace_buffer_text(state: &mut EditorState, text: &str) {
     state.cursor = Index2::new(0, 0);
 }
 
+/// Replace the statement containing the cursor with `replacement`. The
+/// surrounding semicolons (and any whitespace outside the statement
+/// proper) are left in place. Returns `false` if the cursor isn't sitting
+/// inside any statement (empty buffer, or cursor between two `;` with no
+/// content). Cursor lands at the start of the replacement.
+pub fn replace_statement_under_cursor(state: &mut EditorState, replacement: &str) -> bool {
+    let Some(range) = statement_under_cursor(state) else {
+        return false;
+    };
+    let chars: Vec<char> = state.lines.flatten(&Some('\n'));
+    let start_off = index_to_offset(&chars, range.start);
+    // `range.end` is the last char index (inclusive); +1 makes it exclusive.
+    let end_off = index_to_offset(&chars, range.end)
+        .saturating_add(1)
+        .min(chars.len());
+
+    let mut next = String::with_capacity(start_off + replacement.len() + (chars.len() - end_off));
+    next.extend(chars[..start_off].iter());
+    next.push_str(replacement);
+    next.extend(chars[end_off..].iter());
+
+    state.lines = Lines::from(next.as_str());
+    state.selection = None;
+    state.mode = EditorMode::Normal;
+    state.cursor = clamp_index(&state.lines, range.start);
+    true
+}
+
 /// Replace the current selection with `replacement` and drop back to Normal
 /// mode. Cursor lands at the start of the replacement so a follow-up `=`
 /// (or any motion) starts somewhere predictable. No-ops if there's no
@@ -277,6 +305,25 @@ mod tests {
         let did = replace_selection_text(&mut state, "ignored");
         assert!(!did);
         assert_eq!(flatten(&state), "untouched");
+    }
+
+    #[test]
+    fn replace_statement_under_cursor_swaps_only_the_active_statement() {
+        let mut state = EditorState::new(Lines::from("SELECT 1;\nSELECT 2;\nSELECT 3;"));
+        // Park the cursor inside the second statement.
+        state.cursor = Index2::new(1, 3);
+
+        let did = replace_statement_under_cursor(&mut state, "SELECT\n  two");
+        assert!(did);
+        assert_eq!(flatten(&state), "SELECT 1;\nSELECT\n  two;\nSELECT 3;");
+    }
+
+    #[test]
+    fn replace_statement_under_cursor_returns_false_when_cursor_in_empty_segment() {
+        let mut state = EditorState::new(Lines::from(";;"));
+        state.cursor = Index2::new(0, 1);
+        assert!(!replace_statement_under_cursor(&mut state, "anything"));
+        assert_eq!(flatten(&state), ";;");
     }
 
     #[test]

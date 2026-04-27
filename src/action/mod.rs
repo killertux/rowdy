@@ -11,7 +11,7 @@ mod conn_list;
 
 use crate::app::{App, MAX_SCHEMA_WIDTH, MIN_SCHEMA_WIDTH};
 use crate::clipboard;
-use crate::command::{self, ConnSubcommand, ParsedTarget, ThemeChoice};
+use crate::command::{self, ConnSubcommand, FormatScope, ParsedTarget, ThemeChoice};
 use crate::datasource::{Cell, Column, QueryResult};
 use crate::export::{self, ExportFormat};
 use crate::session;
@@ -76,9 +76,11 @@ pub enum Action {
     /// Move the help popover viewport along `axis` by `delta` (a relative
     /// step) or to a named anchor (top/bottom).
     HelpScroll(HelpAxis, HelpScrollDelta),
-    /// Run the editor buffer (or active selection) through the SQL
-    /// formatter and replace the source in-place.
-    FormatEditor,
+    /// Run a slice of the editor buffer through the SQL formatter and
+    /// replace it in-place. `Cursor` formats the active selection (if
+    /// any) or the statement under the cursor; `All` rewrites the
+    /// whole buffer.
+    FormatEditor(FormatScope),
     /// Autocomplete popover lifecycle and navigation. See
     /// `CompletionAction` for the sub-variants.
     Completion(CompletionAction),
@@ -243,7 +245,7 @@ pub fn apply(app: &mut App, action: Action) {
         }
         Action::CloseHelp => app.overlay = None,
         Action::HelpScroll(axis, delta) => apply_help_scroll(app, axis, delta),
-        Action::FormatEditor => format_editor(app),
+        Action::FormatEditor(scope) => format_editor(app, scope),
         Action::Completion(c) => completion::apply(app, c),
         Action::ReloadSchemaCache => reload_schema_cache(app),
     }
@@ -347,7 +349,7 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
                 target: resolve_target(target),
             },
         ),
-        C::Format => apply(app, Action::FormatEditor),
+        C::Format(scope) => apply(app, Action::FormatEditor(scope)),
         C::Reload => apply(app, Action::ReloadSchemaCache),
         C::Conn(sub) => dispatch_conn(app, sub),
     }
@@ -1280,13 +1282,22 @@ fn finish_export(
     }
 }
 
-/// Format the editor buffer or active selection via `sqlformat`, then
-/// rewrite the source in-place. Mirrors `:export`'s "selection wins over
-/// buffer" rule. Sets a status notice on success so the user sees the
-/// command landed even when the visible diff is just whitespace.
-fn format_editor(app: &mut App) {
-    let selection = crate::state::editor::selection_text(&app.editor.state);
-    if let Some(sel) = selection {
+/// Run the SQL formatter against a slice of the editor buffer and
+/// rewrite it in-place. Sets a status notice on success so the user sees
+/// the command landed even when the visible diff is just whitespace.
+///
+/// `Cursor` mirrors how `r` picks what to run: a Visual selection wins,
+/// otherwise we format the statement containing the cursor.
+/// `All` rewrites the whole buffer, used by `:format all`.
+fn format_editor(app: &mut App, scope: FormatScope) {
+    match scope {
+        FormatScope::Cursor => format_at_cursor(app),
+        FormatScope::All => format_buffer(app),
+    }
+}
+
+fn format_at_cursor(app: &mut App) {
+    if let Some(sel) = crate::state::editor::selection_text(&app.editor.state) {
         let formatted = format_sql(&sel);
         if crate::state::editor::replace_selection_text(&mut app.editor.state, &formatted) {
             app.status = QueryStatus::Notice {
@@ -1296,6 +1307,23 @@ fn format_editor(app: &mut App) {
             return;
         }
     }
+    let Some(range) = crate::state::editor::statement_under_cursor(&app.editor.state) else {
+        app.status = QueryStatus::Failed {
+            error: "no statement under cursor".into(),
+        };
+        return;
+    };
+    // Trim so we don't smuggle a trailing newline back in front of the `;`.
+    let formatted = format_sql(&range.text).trim().to_string();
+    if crate::state::editor::replace_statement_under_cursor(&mut app.editor.state, &formatted) {
+        app.status = QueryStatus::Notice {
+            msg: "formatted statement".into(),
+        };
+        schedule_session_save(app);
+    }
+}
+
+fn format_buffer(app: &mut App) {
     let buffer = app.editor.text();
     if buffer.trim().is_empty() {
         app.status = QueryStatus::Failed {
