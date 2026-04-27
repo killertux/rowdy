@@ -5,156 +5,10 @@ A terminal SQL client built with [ratatui](https://github.com/ratatui/ratatui),
 The goal is a fast, modal, keyboard-first workspace for writing queries,
 exploring schemas, and inspecting results — all without leaving the terminal.
 
-> **Status:** early. The async event loop, query worker, and SQLite,
-> Postgres, and MySQL/MariaDB drivers are wired end-to-end. The export
-> feature is still ahead.
-
-## What's working today
-
-- **Three-pane layout**
-  - **Editor** (left): a vim-mode SQL editor powered by edtui.
-  - **Schema browser** (right): a collapsible tree of catalogs / schemas /
-    tables / views / columns / indices, populated **lazily** from the live
-    connection — each level loads on first expand.
-  - **Status / command bar** (bottom): vim-style modeline that doubles as a
-    `:command` prompt and as the run-confirmation prompt.
-- **Async query execution** through a tokio worker. The UI never blocks on
-  the database; a single in-flight query is enforced and `:cancel` aborts it.
-- **Confirm-before-run**: `<Space>r` highlights the SQL statement under the
-  cursor and asks before executing it. `<Space>R` bypasses the confirmation;
-  in editor Visual mode `<Space>r` runs the explicit selection straight away.
-- **Typed result cells** (`Null / Bool / Int / Float / Text / Bytes /
-  Timestamp / Date / Time / Uuid / Other`) — preserved end-to-end so the
-  CSV / TSV / JSON exporters keep type fidelity. The TUI renders each
-  cell via its own `display()`; `NULL` cells are dimmed.
-- **Yank and export** in the expanded result view: `y` copies the
-  current cell to the clipboard, `v` enters Visual mode for a
-  rectangular selection, and `:export csv|tsv|json` (or `y` from Visual)
-  copies the result — full or selected — in the chosen format.
-- **SQL autocomplete** (Phase 4): syntax-aware popover via sqlparser's
-  tokenizer — keywords, tables, columns, **SQL functions**, and
-  **CTE names** with FROM/JOIN alias resolution. Auto-triggers in
-  Insert mode after `.` or 2+ identifier chars (`Ctrl+Space` forces
-  it open). Fuzzy-ranked via `nucleo-matcher`, kind-boosted so
-  columns dominate column slots and tables dominate FROM/JOIN slots.
-  Identifiers are dialect-quoted on insert when they need it (mixed
-  case for Postgres, special chars, reserved keywords); accepting a
-  table appends a space; accepting an arg-taking function inserts
-  `()` with the cursor between them. Schema cache primed at connect
-  time (catalogs + default-schema tables); columns load lazily on
-  first reference. DDL run from within rowdy
-  (CREATE/ALTER/DROP/TRUNCATE/RENAME) auto-reloads the cache;
-  `:reload` re-primes manually.
-- **Three SQL drivers** sharing the same `Datasource` trait:
-  - **SQLite** — in-memory or file-based, schema via `sqlite_master` and
-    `pragma_*` virtual tables.
-  - **Postgres** — schema via `pg_namespace` + `information_schema`, indices
-    via `pg_class`/`pg_index` for the uniqueness flag.
-  - **MySQL / MariaDB** — schema via `information_schema`, `column_type` for
-    declared types (preserves `unsigned`, display widths, etc.).
-- **Two themes** (Dark / Light) switchable at runtime, both tuned for high
-  text contrast. Theme + schema-panel width persist to
-  `./.rowdy/config.toml` (lazily — the file is only created the first time
-  you change a default).
-- **File logger** at `./.rowdy/<datetime>.log`. The app and every datasource
-  write into the same file (connect / execute / cancel / errors).
-- **Saved connections** in `./.rowdy/config.toml`. Pick one from a `:conn`
-  list, switch live with `:conn use NAME`, manage them with the non-TUI
-  `rowdy connections …` subcommands. Connection strings can optionally be
-  encrypted with a password (argon2id + chacha20-poly1305) — the password
-  is prompted in-TUI on launch, or supplied via `--password`.
-- **Per-connection editor sessions** persisted at
-  `./.rowdy/sessions/<name>/session_0.sql`. The buffer is flushed 800ms
-  after the last edit and reloaded on the next launch (or `:conn use`
-  switch).
-- **Vim-style modal input** end-to-end: editor uses real vim bindings via
-  edtui; the schema panel and result viewer use the same `hjkl` / `gg` / `G`
-  vocabulary.
-
-## Architecture
-
-The codebase is a small, MVC-flavoured loop with an async worker on the side:
-
-```
-            ┌──────────────────────────────────────────────────┐
-            │  tokio runtime                                   │
-            │                                                  │
-            │  main task (event loop)                          │
-            │  ┌───────────────────────────────────────────┐   │
-            │  │ select!:                                  │   │
-            │  │   crossterm EventStream  → Action         │   │
-            │  │   worker → app channel   → Action::Worker │   │
-            │  └───────────────────────────────────────────┘   │
-            │              │                  ▲                │
-            │      cmd_tx  │                  │  evt_rx        │
-            │              ▼                  │                │
-            │  worker task                                     │
-            │  ┌───────────────────────────────────────────┐   │
-            │  │ owns Arc<dyn Datasource> (sqlx::Pool)     │   │
-            │  │ tracks current query JoinHandle           │   │
-            │  │ dispatches Execute / Cancel / Introspect  │   │
-            │  └───────────────────────────────────────────┘   │
-            └──────────────────────────────────────────────────┘
-```
-
-- `App` (`src/app.rs`) owns the entire UI state and the `cmd_tx` handle.
-- `Action` (`src/action.rs`) enumerates every legal mutation; `apply()` is
-  the single dispatcher.
-- `event::translate` (`src/event.rs`) is a pure function that turns a
-  `crossterm::Event` into an `Action` based on the current `Mode` and
-  `Focus`.
-- View functions under `src/ui/` derive entirely from `App` — they never
-  mutate state.
-- `Datasource` (`src/datasource/mod.rs`) is the cross-driver trait:
-  `introspect_catalogs`, `introspect_schemas`, `introspect_tables`,
-  `introspect_columns`, `introspect_indices`, `execute`, `cancel`, `close`.
-  Drivers live under `src/datasource/sql/`.
-- The worker (`src/worker/mod.rs`) owns the live connection pool, runs at
-  most one query at a time, and fans introspection out concurrently.
-  `:cancel` aborts the in-flight `JoinHandle` *and* sends a server-side
-  cancel (`pg_cancel_backend` for Postgres, `KILL QUERY` for MySQL) so the
-  database doesn't keep grinding on a query the user gave up on. SQLite
-  has no server-side cancel; the abort is the cancel.
-
-State is encoded so that invalid combinations are unrepresentable wherever
-possible:
-
-- `Focus { Editor, Schema }` — exactly one panel owns input.
-- `Mode { Normal, Command(CommandBuffer), ResultExpanded { id, cursor,
-  col_offset, row_offset }, ConfirmRun { statement }, Auth(AuthState),
-  EditConnection(ConnFormState), ConnectionList(ConnListState),
-  Connecting { name } }` — every variant carries the data its UI needs;
-  no "expanded but no result", no "in command mode but no buffer", no
-  "awaiting confirmation but no statement".
-- `QueryStatus { Idle, Running, Succeeded, Failed, Cancelled }` — replaces a
-  bag of booleans / `Option<String>` fields.
-- `LoadState { NotLoaded, Loading, Loaded, Failed(error) }` on every schema
-  node — drives the lazy-load UX without any "is_loading + error" pairs.
-- `IntrospectTarget` — a single value identifies both *which level* to load
-  and *which DB entity* it belongs to, so worker events reattach to the
-  right node deterministically.
-
-## Connection strings
-
-URL scheme dispatches to the driver:
-
-| Scheme                       | Driver     | Example                                                |
-|------------------------------|------------|--------------------------------------------------------|
-| `sqlite:`                    | SQLite     | `sqlite:./sample.db`, `sqlite::memory:?cache=shared`   |
-| `postgres:` / `postgresql:`  | Postgres   | `postgres://user:pass@host:5432/db`                    |
-| `mysql:` / `mariadb:`        | MySQL      | `mysql://user:pass@host:3306/db`                       |
-
-`mariadb://` is rewritten to `mysql://` before sqlx sees it — same wire
-protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
-
-> **In-memory SQLite caveat:** the worker uses a connection pool, and each
-> SQLite memory connection gets its *own* database unless you opt into
-> shared cache. Use `sqlite::memory:?cache=shared` (or a file path) so
-> introspection sees the data your queries created.
-
-> **System schemas are hidden** by default — Postgres `pg_catalog`,
-> `information_schema`, `pg_toast`, `pg_temp_*`; MySQL `information_schema`,
-> `mysql`, `performance_schema`, `sys`. You can still query them by name.
+SQLite, Postgres, and MySQL/MariaDB are wired end-to-end. Most authoring
+features (autocomplete, formatting, yank, CSV/TSV/JSON/SQL export) are
+shipped; the rough edges live around transactions and multi-statement
+execution — see [Roadmap](#roadmap).
 
 ## Install
 
@@ -177,18 +31,52 @@ Override via env:
 If the install dir isn't already on your `$PATH`, the script prints the
 line to add to your shell rc.
 
+### Build from source
+
+Requires Rust 2024 edition (≥ 1.85) and a terminal that supports truecolor
+for accurate theme rendering.
+
+```sh
+git clone https://github.com/killertux/rowdy
+cd rowdy
+cargo build --release
+# binary at ./target/release/rowdy
+```
+
 ## Running it
+
+Point rowdy at any database via a connection URL:
+
+```sh
+rowdy --connection sqlite:./sample.db
+```
+
+Or run straight from a checkout:
 
 ```sh
 cargo run -- --connection sqlite:./sample.db
 ```
 
-Requires Rust 2024 edition (≥ 1.85) and a terminal that supports truecolor
-for accurate theme rendering.
+### Sample database
 
-### Non-TUI connection management
+A seed program creates a sample SQLite database to poke at: a small
+e-commerce schema (`users` / `products` / `orders` / `order_items` plus a
+`recent_orders` view), an `events` table with 5000 rows, a `wide_metrics`
+table with 32 columns to exercise horizontal scroll, and 10 small lookup
+tables to exercise the schema panel's vertical scroll.
 
-You can manage saved connections without launching the TUI:
+```sh
+cargo run --example seed_sqlite -- ./sample.db
+cargo run -- --connection sqlite:./sample.db
+```
+
+Re-running the seeder is safe — it drops and re-creates the tables.
+
+### Saved connections
+
+You can save connection URLs (optionally encrypted) and switch between
+them inside the TUI. Open the connection list with `:conn`, or manage
+them without launching the TUI:
 
 ```sh
 rowdy connections list
@@ -227,39 +115,87 @@ doesn't exist. It holds:
   two names that differ only in path-unsafe characters share a session
   for now.
 
-### Sample database
+## Connection strings
 
-A seed program creates a sample SQLite database to poke at: a small
-e-commerce schema (`users` / `products` / `orders` / `order_items` plus a
-`recent_orders` view), an `events` table with 5000 rows, a `wide_metrics`
-table with 32 columns to exercise horizontal scroll, and 10 small lookup
-tables to exercise the schema panel's vertical scroll.
+URL scheme dispatches to the driver:
 
-```sh
-cargo run --example seed_sqlite -- ./sample.db
-cargo run -- --connection sqlite:./sample.db
-```
+| Scheme                       | Driver     | Example                                                |
+|------------------------------|------------|--------------------------------------------------------|
+| `sqlite:`                    | SQLite     | `sqlite:./sample.db`, `sqlite::memory:?cache=shared`   |
+| `postgres:` / `postgresql:`  | Postgres   | `postgres://user:pass@host:5432/db`                    |
+| `mysql:` / `mariadb:`        | MySQL      | `mysql://user:pass@host:3306/db`                       |
 
-Re-running the seeder is safe — it drops and re-creates the tables.
+`mariadb://` is rewritten to `mysql://` before sqlx sees it — same wire
+protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
 
-### Postgres / MySQL test databases
+> **In-memory SQLite caveat:** the worker uses a connection pool, and each
+> SQLite memory connection gets its *own* database unless you opt into
+> shared cache. Use `sqlite::memory:?cache=shared` (or a file path) so
+> introspection sees the data your queries created.
 
-The Postgres and MySQL drivers have integration tests gated on
-`ROWDY_POSTGRES_URL` and `ROWDY_MYSQL_URL` — when either is unset the
-test prints a skip notice and returns Ok, so `cargo test` is green on a
-machine without those databases. To exercise them locally:
+> **System schemas are hidden** by default — Postgres `pg_catalog`,
+> `information_schema`, `pg_toast`, `pg_temp_*`; MySQL `information_schema`,
+> `mysql`, `performance_schema`, `sys`. You can still query them by name.
 
-```sh
-docker compose up -d
-ROWDY_POSTGRES_URL=postgres://rowdy:rowdy@localhost:55432/rowdy_test \
-ROWDY_MYSQL_URL=mysql://rowdy:rowdy@localhost:53306/rowdy_test \
-cargo test
-```
+## Features
 
-The non-default ports (`55432` / `53306`) are deliberate so they don't
-collide with a system Postgres / MySQL on the standard ports. CI starts
-the same images via GitHub Actions `services` and uses the standard
-ports there.
+- **Three-pane layout**
+  - **Editor** (left): a vim-mode SQL editor powered by edtui.
+  - **Schema browser** (right): a collapsible tree of catalogs / schemas /
+    tables / views / columns / indices, populated **lazily** from the live
+    connection — each level loads on first expand.
+  - **Status / command bar** (bottom): vim-style modeline that doubles as a
+    `:command` prompt and as the run-confirmation prompt.
+- **Async query execution** through a tokio worker. The UI never blocks on
+  the database; a single in-flight query is enforced and `:cancel` aborts it.
+- **Confirm-before-run**: `<Space>r` highlights the SQL statement under the
+  cursor and asks before executing it. `<Space>R` bypasses the confirmation;
+  in editor Visual mode `<Space>r` runs the explicit selection straight away.
+- **Typed result cells** (`Null / Bool / Int / Float / Text / Bytes /
+  Timestamp / Date / Time / Uuid / Other`) — preserved end-to-end so the
+  CSV / TSV / JSON / SQL exporters keep type fidelity. The TUI renders each
+  cell via its own `display()`; `NULL` cells are dimmed. The bottom row of
+  the expanded result view shows the full value of the selected cell so
+  wide values stay readable when the column is narrower than them.
+- **Yank and export** in the expanded result view: `y` copies the
+  current cell to the clipboard, `v` enters Visual mode for a
+  rectangular selection, and `:export csv|tsv|json|sql` (or `y` from
+  Visual) copies the result — full or selected — in the chosen format.
+  `:export sql` infers the source table from simple `SELECT … FROM t`
+  shapes; pass it explicitly for joins/aggregates. Pass a path after the
+  format to write to disk instead of the clipboard.
+- **SQL autocomplete** — syntax-aware popover via sqlparser's tokenizer.
+  Completes keywords, tables, columns, SQL functions, and CTE names with
+  FROM/JOIN alias resolution. Auto-triggers in Insert mode after `.` or
+  2+ identifier chars (`Ctrl+Space` forces it). Fuzzy-ranked, kind-boosted,
+  dialect-quoted on insert. Schema cache primed at connect time; columns
+  load lazily; DDL run from rowdy auto-reloads. See the
+  [Autocomplete](#autocomplete) reference for the full behaviour.
+- **SQL formatter** — `=` in editor Normal mode formats the whole buffer;
+  in Visual mode formats the selection. `:format` does the same.
+- **Three SQL drivers** sharing the same `Datasource` trait:
+  - **SQLite** — in-memory or file-based, schema via `sqlite_master` and
+    `pragma_*` virtual tables.
+  - **Postgres** — schema via `pg_namespace` + `information_schema`, indices
+    via `pg_class`/`pg_index` for the uniqueness flag. User-defined `ENUM`
+    types decode to their variant string.
+  - **MySQL / MariaDB** — schema via `information_schema`, `column_type` for
+    declared types (preserves `unsigned`, display widths, etc.).
+- **Two themes** (Dark / Light) switchable at runtime, both tuned for high
+  text contrast. Theme + schema-panel width persist to `./.rowdy/config.toml`.
+- **Saved connections** in `./.rowdy/config.toml`, optionally encrypted with a
+  password (argon2id + chacha20-poly1305). Pick one from `:conn`, switch live
+  with `:conn use NAME`. The password prompts in-TUI on launch or via
+  `--password`. Manage them without the TUI via `rowdy connections …`.
+- **Per-connection editor sessions** persisted at
+  `./.rowdy/sessions/<name>/session_0.sql`. The buffer is flushed 800ms
+  after the last edit and reloaded on the next launch (or `:conn use`
+  switch).
+- **Vim-style modal input** end-to-end: editor uses real vim bindings via
+  edtui; the schema panel and result viewer use the same `hjkl` / `gg` / `G`
+  vocabulary.
+- **File logger** at `./.rowdy/<datetime>.log` — connect / execute / cancel /
+  errors. URL passwords are redacted; only the 5 most recent logs are kept.
 
 ## Keybindings
 
@@ -369,6 +305,10 @@ with `‹`/`›` markers when there are columns off-screen on either side. The
 inline preview shows only the leftmost columns that fit and a `+N →` count
 of how many were truncated — expand it to navigate.
 
+The bottom row of the expanded view shows `column: value` for the selected
+cell, clipped with `…` when the value is wider than the row. Use yank to
+get at the full text when the badge is clipped.
+
 #### Yank and export
 
 `y` in Normal sub-mode copies the current cell's rendered text straight
@@ -447,7 +387,7 @@ suggestions:
   the default schema (or the named schema after `<schema>.`), plus
   any **CTE names** declared with `WITH`.
 - After `<alias>.` or `<table>.` → **columns** of that bound table.
-  Bound CTEs return no columns (Phase 5 will parse the CTE body).
+  Bound CTEs return no columns yet.
 - After `SELECT` / `WHERE` / `ON` / `AND` / `,` / operators →
   **columns** unioned across FROM/JOIN bindings (qualifier-free)
   plus **SQL functions** (per-dialect curated list).
@@ -457,8 +397,8 @@ FROM/JOIN aliases are resolved by a forward pass over the *whole*
 statement, so `SELECT u.|` autocompletes correctly even when the
 `FROM users u` clause comes after the cursor. CTE definitions
 (`WITH name AS (…)`, optional `RECURSIVE`, multiple comma-separated
-CTEs) are recognized too; subqueries / derived-table aliases stay on
-the Phase 5 list.
+CTEs) are recognized too; subqueries and derived-table aliases are
+not yet bound.
 
 **Ranking.** Candidates are scored with `nucleo-matcher` (fuzzy
 subsequence match) and re-ordered by:
@@ -547,6 +487,88 @@ marked with `●`.
 | `d`            | Delete the selected (`y`/`Enter` confirms, `n`/`Esc`) |
 | `Esc` / `q`    | Close the list                                        |
 
+### Postgres / MySQL test databases
+
+The Postgres and MySQL drivers have integration tests gated on
+`ROWDY_POSTGRES_URL` and `ROWDY_MYSQL_URL` — when either is unset the
+test prints a skip notice and returns Ok, so `cargo test` is green on a
+machine without those databases. To exercise them locally:
+
+```sh
+docker compose up -d
+ROWDY_POSTGRES_URL=postgres://rowdy:rowdy@localhost:55432/rowdy_test \
+ROWDY_MYSQL_URL=mysql://rowdy:rowdy@localhost:53306/rowdy_test \
+cargo test
+```
+
+The non-default ports (`55432` / `53306`) are deliberate so they don't
+collide with a system Postgres / MySQL on the standard ports. CI starts
+the same images via GitHub Actions `services` and uses the standard
+ports there.
+
+## Architecture
+
+The codebase is a small, MVC-flavoured loop with an async worker on the side:
+
+```
+            ┌──────────────────────────────────────────────────┐
+            │  tokio runtime                                   │
+            │                                                  │
+            │  main task (event loop)                          │
+            │  ┌───────────────────────────────────────────┐   │
+            │  │ select!:                                  │   │
+            │  │   crossterm EventStream  → Action         │   │
+            │  │   worker → app channel   → Action::Worker │   │
+            │  └───────────────────────────────────────────┘   │
+            │              │                  ▲                │
+            │      cmd_tx  │                  │  evt_rx        │
+            │              ▼                  │                │
+            │  worker task                                     │
+            │  ┌───────────────────────────────────────────┐   │
+            │  │ owns Arc<dyn Datasource> (sqlx::Pool)     │   │
+            │  │ tracks current query JoinHandle           │   │
+            │  │ dispatches Execute / Cancel / Introspect  │   │
+            │  └───────────────────────────────────────────┘   │
+            └──────────────────────────────────────────────────┘
+```
+
+- `App` (`src/app.rs`) owns the entire UI state and the `cmd_tx` handle.
+- `Action` (`src/action.rs`) enumerates every legal mutation; `apply()` is
+  the single dispatcher.
+- `event::translate` (`src/event.rs`) is a pure function that turns a
+  `crossterm::Event` into an `Action` based on the current `Mode` and
+  `Focus`.
+- View functions under `src/ui/` derive entirely from `App` — they never
+  mutate state.
+- `Datasource` (`src/datasource/mod.rs`) is the cross-driver trait:
+  `introspect_catalogs`, `introspect_schemas`, `introspect_tables`,
+  `introspect_columns`, `introspect_indices`, `execute`, `cancel`, `close`.
+  Drivers live under `src/datasource/sql/`.
+- The worker (`src/worker/mod.rs`) owns the live connection pool, runs at
+  most one query at a time, and fans introspection out concurrently.
+  `:cancel` aborts the in-flight `JoinHandle` *and* sends a server-side
+  cancel (`pg_cancel_backend` for Postgres, `KILL QUERY` for MySQL) so the
+  database doesn't keep grinding on a query the user gave up on. SQLite
+  has no server-side cancel; the abort is the cancel.
+
+State is encoded so that invalid combinations are unrepresentable wherever
+possible:
+
+- `Focus { Editor, Schema }` — exactly one panel owns input.
+- `Mode { Normal, Command(CommandBuffer), ResultExpanded { id, cursor,
+  col_offset, row_offset }, ConfirmRun { statement }, Auth(AuthState),
+  EditConnection(ConnFormState), ConnectionList(ConnListState),
+  Connecting { name } }` — every variant carries the data its UI needs;
+  no "expanded but no result", no "in command mode but no buffer", no
+  "awaiting confirmation but no statement".
+- `QueryStatus { Idle, Running, Succeeded, Failed, Cancelled }` — replaces a
+  bag of booleans / `Option<String>` fields.
+- `LoadState { NotLoaded, Loading, Loaded, Failed(error) }` on every schema
+  node — drives the lazy-load UX without any "is_loading + error" pairs.
+- `IntrospectTarget` — a single value identifies both *which level* to load
+  and *which DB entity* it belongs to, so worker events reattach to the
+  right node deterministically.
+
 ## Project layout
 
 ```
@@ -561,7 +583,7 @@ src/
   connections.rs          ConnectionStore: encrypt/decrypt, unlock, make_entry
   config.rs               .rowdy/config.toml load + lazy save
   log.rs                  Logger — Arc<Mutex<File>>, info/warn/error
-  export.rs               CSV / TSV / JSON formatters for yank + :export
+  export.rs               CSV / TSV / JSON / SQL formatters for yank + :export
   session.rs              .rowdy/sessions/<name>/session_0.sql load + save
   subcommands.rs          non-TUI `rowdy connections …` handlers
   terminal.rs             terminal init / restore / panic hook
@@ -591,7 +613,7 @@ src/
     mod.rs                render() — layout + cursor placement
     editor_view.rs        edtui rendering with themed block + highlights
     schema_view.rs        tree + load-state glyphs
-    results_view.rs       inline preview + expanded grid
+    results_view.rs       inline preview + expanded grid + cell badge
     auth_view.rs          centered password prompt
     conn_form_view.rs     centered name+url form
     conn_list_view.rs     centered connection picker
@@ -626,14 +648,12 @@ Next likely steps, roughly ordered:
 
 ### Authoring
 
-- **Autocomplete Phase 5+.** Phases 1–4 are shipped (manual + auto
-  trigger; keyword / table / column / function / CTE completion with
-  FROM/JOIN alias resolution and schema-qualified contexts; lazy
-  column loads; fuzzy ranking; smart insert with quoting and per-kind
-  trails; DDL-aware cache invalidation; CTE name detection). Phase 5
-  ideas: parse CTE bodies to surface column completion against them,
-  derived-table aliases (`FROM (SELECT …) sub`), auto-alias
-  suggestion, configurable trigger thresholds.
+- **Autocomplete — bound subqueries / derived tables.** Currently
+  FROM/JOIN aliases against base tables and CTE names resolve, but
+  CTE *bodies* and `FROM (SELECT …) sub` derived tables don't yield
+  column completions. Parsing those into a binding scope is the next
+  step; auto-alias suggestion and configurable trigger thresholds
+  are smaller follow-ups.
 - **A real SQL lexer** for statement splitting (the current `;` splitter is
   intentionally naive — see the TODO at `state/editor.rs`).
 - **Multiple sessions per connection.** Each connection has a single
@@ -644,9 +664,10 @@ Next likely steps, roughly ordered:
 
 ### Result view
 
-- **Cell zoom / detail view** for long TEXT / JSON cells that overflow
-  the grid; press `Enter` (or similar) on a cell in the expanded view to
-  open a scrollable modal with the full value.
+- **Cell zoom / detail view** for long TEXT / JSON cells. The bottom-row
+  badge shows the full single-line value for the selected cell, but
+  multi-line or very long values still need a scrollable modal — open
+  it with `Enter` (or similar) on a cell in the expanded view.
 - **Multiple result blocks** stacked under the editor with scrolling
   (currently only the latest is shown).
 - **Query history** surfaced under each result block.
