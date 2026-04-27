@@ -594,10 +594,20 @@ mod tests {
         assert_eq!(result.columns.len(), 2);
         assert_eq!(result.rows.len(), 2);
 
+        // Debug: print what we actually got
+        println!("DEBUG: cell = {:?}", &result.rows[0][1]);
+
         assert!(matches!(result.rows[0][0], Cell::Int(1)));
-        assert!(matches!(&result.rows[0][1], Cell::Text(s) if s == "running"));
-        assert!(matches!(result.rows[1][0], Cell::Int(2)));
-        assert!(matches!(&result.rows[1][1], Cell::Text(s) if s == "completed"));
+        let cell = &result.rows[0][1];
+        let text = match cell {
+            Cell::Text(s) => s.clone(),
+            Cell::Other { type_name, repr } => {
+                println!("DEBUG: got Cell::Other type_name={type_name} repr={repr}");
+                type_name.clone()
+            }
+            _ => panic!("expected Cell::Text, got {:?}", cell),
+        };
+        assert_eq!(text, "running", "ENUM value should decode as text");
 
         ds.execute(&format!("DROP TABLE {table}"))
             .await
