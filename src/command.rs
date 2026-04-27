@@ -269,10 +269,7 @@ mod tests {
 
     #[test]
     fn export_redirect_without_path_errors() {
-        assert_eq!(
-            parse("export csv >"),
-            Err("missing path after `>`".into())
-        );
+        assert_eq!(parse("export csv >"), Err("missing path after `>`".into()));
     }
 
     #[test]
@@ -332,10 +329,7 @@ mod tests {
 
     #[test]
     fn conn_list_aliases() {
-        assert_eq!(
-            parse("conn"),
-            Ok(Some(Command::Conn(ConnSubcommand::List)))
-        );
+        assert_eq!(parse("conn"), Ok(Some(Command::Conn(ConnSubcommand::List))));
         assert_eq!(
             parse("conn list"),
             Ok(Some(Command::Conn(ConnSubcommand::List)))

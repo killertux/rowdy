@@ -2,9 +2,7 @@
 //! editor. Handles the create/edit common save path, including the
 //! post-save branch (auto-connect vs. return to picker).
 
-use crate::action::{
-    ConnFormAction, copy_from, cut_from, dispatch_connect, paste_into,
-};
+use crate::action::{ConnFormAction, copy_from, cut_from, dispatch_connect, paste_into};
 use crate::app::App;
 use crate::state::conn_form::ConnFormPostSave;
 use crate::state::conn_list::ConnListState;

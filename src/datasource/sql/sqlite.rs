@@ -6,10 +6,10 @@ use sqlx::{Column as _, Row, TypeInfo};
 
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
-use crate::datasource::sql::decode_to;
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
+use crate::datasource::sql::decode_to;
 use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
 

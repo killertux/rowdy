@@ -636,10 +636,7 @@ mod tests {
         assert!(table_node.expanded);
         assert_eq!(table_node.children.len(), 2);
         for child_id in &table_node.children {
-            assert!(matches!(
-                p.node(*child_id).load_state,
-                LoadState::Loading
-            ));
+            assert!(matches!(p.node(*child_id).load_state, LoadState::Loading));
         }
     }
 

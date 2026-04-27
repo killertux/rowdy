@@ -3,8 +3,8 @@ use ratatui::crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKin
 use ratatui_textarea::Input;
 
 use crate::action::{
-    Action, AuthAction, CommandAction, CompletionAction, ConnFormAction, ConnListAction,
-    HelpAxis, HelpScrollDelta, ResultNavAction, SchemaAction,
+    Action, AuthAction, CommandAction, CompletionAction, ConnFormAction, ConnListAction, HelpAxis,
+    HelpScrollDelta, ResultNavAction, SchemaAction,
 };
 use crate::app::App;
 use crate::export::ExportFormat;
@@ -18,9 +18,7 @@ pub fn translate(app: &App, event: CtEvent) -> Option<Action> {
         CtEvent::Key(key) if key.kind == KeyEventKind::Press => translate_key(app, key, event),
         CtEvent::Key(_) => None,
         CtEvent::Paste(_) => translate_paste(app, event),
-        _ if app.focus == Focus::Editor && is_plain_normal(app) => {
-            Some(Action::EditorEvent(event))
-        }
+        _ if app.focus == Focus::Editor && is_plain_normal(app) => Some(Action::EditorEvent(event)),
         _ => None,
     }
 }
@@ -94,12 +92,8 @@ fn translate_help_key(key: KeyEvent) -> Option<Action> {
         (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => Some(Action::CloseHelp),
         (KeyCode::Char('j') | KeyCode::Down, false) => Some(Action::HelpScroll(Vertical, By(1))),
         (KeyCode::Char('k') | KeyCode::Up, false) => Some(Action::HelpScroll(Vertical, By(-1))),
-        (KeyCode::Char('h') | KeyCode::Left, false) => {
-            Some(Action::HelpScroll(Horizontal, By(-2)))
-        }
-        (KeyCode::Char('l') | KeyCode::Right, false) => {
-            Some(Action::HelpScroll(Horizontal, By(2)))
-        }
+        (KeyCode::Char('h') | KeyCode::Left, false) => Some(Action::HelpScroll(Horizontal, By(-2))),
+        (KeyCode::Char('l') | KeyCode::Right, false) => Some(Action::HelpScroll(Horizontal, By(2))),
         (KeyCode::Char('d'), true) => Some(Action::HelpScroll(Vertical, By(8))),
         (KeyCode::Char('u'), true) => Some(Action::HelpScroll(Vertical, By(-8))),
         (KeyCode::Char('g'), false) => Some(Action::HelpScroll(Vertical, Top)),
@@ -495,19 +489,26 @@ mod tests {
 
     #[test]
     fn panic_quit_only_fires_for_bare_ctrl_c() {
-        assert!(matches!(panic_quit(ctrl(KeyCode::Char('c'))), Some(Action::Quit)));
+        assert!(matches!(
+            panic_quit(ctrl(KeyCode::Char('c'))),
+            Some(Action::Quit)
+        ));
         // Ctrl+Shift+C is a clipboard shortcut, must not quit.
-        assert!(panic_quit(key_mod(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT
-        ))
-        .is_none());
+        assert!(
+            panic_quit(key_mod(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ))
+            .is_none()
+        );
         // Cmd+C similarly.
-        assert!(panic_quit(key_mod(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL | KeyModifiers::SUPER
-        ))
-        .is_none());
+        assert!(
+            panic_quit(key_mod(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SUPER
+            ))
+            .is_none()
+        );
         // Plain `c` does nothing.
         assert!(panic_quit(key(KeyCode::Char('c'))).is_none());
     }
@@ -543,9 +544,18 @@ mod tests {
     #[test]
     fn clipboard_action_recognises_all_modifier_variants() {
         // Ctrl-only.
-        assert!(matches!(clipboard_action(ctrl(KeyCode::Char('v'))), Some(ClipboardOp::Paste)));
-        assert!(matches!(clipboard_action(ctrl(KeyCode::Char('c'))), Some(ClipboardOp::Copy)));
-        assert!(matches!(clipboard_action(ctrl(KeyCode::Char('x'))), Some(ClipboardOp::Cut)));
+        assert!(matches!(
+            clipboard_action(ctrl(KeyCode::Char('v'))),
+            Some(ClipboardOp::Paste)
+        ));
+        assert!(matches!(
+            clipboard_action(ctrl(KeyCode::Char('c'))),
+            Some(ClipboardOp::Copy)
+        ));
+        assert!(matches!(
+            clipboard_action(ctrl(KeyCode::Char('x'))),
+            Some(ClipboardOp::Cut)
+        ));
         // Ctrl+Shift.
         let cs = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
         assert!(matches!(
@@ -578,7 +588,10 @@ mod tests {
 
     #[test]
     fn help_key_close_aliases() {
-        assert!(matches!(translate_help_key(key(KeyCode::Esc)), Some(Action::CloseHelp)));
+        assert!(matches!(
+            translate_help_key(key(KeyCode::Esc)),
+            Some(Action::CloseHelp)
+        ));
         assert!(matches!(
             translate_help_key(key(KeyCode::Char('q'))),
             Some(Action::CloseHelp)
@@ -714,8 +727,10 @@ mod tests {
     fn conn_list_navigation() {
         let case = |k, want| {
             let action = translate_conn_list_key(key(k), false);
-            assert!(matches!(action, Some(Action::ConnList(ref a)) if std::mem::discriminant(a) == std::mem::discriminant(&want)),
-                "{k:?} → {want:?}");
+            assert!(
+                matches!(action, Some(Action::ConnList(ref a)) if std::mem::discriminant(a) == std::mem::discriminant(&want)),
+                "{k:?} → {want:?}"
+            );
         };
         case(KeyCode::Char('j'), ConnListAction::Down);
         case(KeyCode::Char('k'), ConnListAction::Up);
@@ -732,11 +747,7 @@ mod tests {
     #[test]
     fn conn_list_confirming_only_accepts_yes_no() {
         // y / Y / Enter → ConfirmDelete.
-        for k in [
-            KeyCode::Char('y'),
-            KeyCode::Char('Y'),
-            KeyCode::Enter,
-        ] {
+        for k in [KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter] {
             assert!(matches!(
                 translate_conn_list_key(key(k), true),
                 Some(Action::ConnList(ConnListAction::ConfirmDelete))
@@ -819,8 +830,10 @@ mod tests {
     fn schema_keys() {
         let case = |k, want| {
             let actual = translate_schema_key(key(k));
-            assert!(matches!(actual, Some(Action::Schema(ref a)) if std::mem::discriminant(a) == std::mem::discriminant(&want)),
-                "{k:?}");
+            assert!(
+                matches!(actual, Some(Action::Schema(ref a)) if std::mem::discriminant(a) == std::mem::discriminant(&want)),
+                "{k:?}"
+            );
         };
         case(KeyCode::Char('j'), SchemaAction::Down);
         case(KeyCode::Char('k'), SchemaAction::Up);
@@ -847,7 +860,9 @@ mod tests {
     #[test]
     fn completion_popover_keys() {
         let case = |key_event, want| {
-            assert!(matches!(translate_completion_popover_key(key_event), Some(Action::Completion(a)) if std::mem::discriminant(&a) == std::mem::discriminant(&want)));
+            assert!(
+                matches!(translate_completion_popover_key(key_event), Some(Action::Completion(a)) if std::mem::discriminant(&a) == std::mem::discriminant(&want))
+            );
         };
         case(key(KeyCode::Esc), CompletionAction::Close);
         case(key(KeyCode::Tab), CompletionAction::Accept);

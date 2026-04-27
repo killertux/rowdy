@@ -88,8 +88,7 @@ fn compute(app: &App) -> Option<Computed> {
         && !needs_loads.is_empty()
         && matches!(
             result.context,
-            autocomplete::CompletionContext::Column { .. }
-                | autocomplete::CompletionContext::Mixed
+            autocomplete::CompletionContext::Column { .. } | autocomplete::CompletionContext::Mixed
         )
     {
         items.push(loading_placeholder(&needs_loads[0]));

@@ -21,8 +21,8 @@ use crate::state::conn_list::ConnListState;
 use crate::state::focus::{Focus, PendingChord};
 use crate::state::overlay::Overlay;
 use crate::state::results::{ResultBlock, ResultCursor, ResultId, ResultViewMode, SelectionRect};
-use crate::state::screen::Screen;
 use crate::state::schema::{ExpandOutcome, SchemaPanel};
+use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
 use crate::ui::theme::{Theme, ThemeKind};
 use crate::worker::{IntrospectTarget, WorkerCommand, WorkerEvent};
@@ -895,11 +895,9 @@ fn on_query_failed(app: &mut App, req: crate::worker::RequestId, error: String) 
 // Auth flow
 // ---------------------------------------------------------------------------
 
-
 // ---------------------------------------------------------------------------
 // Connection-form flow
 // ---------------------------------------------------------------------------
-
 
 // ---------------------------------------------------------------------------
 // Connection list

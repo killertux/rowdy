@@ -9,10 +9,10 @@ use sqlx::{Column as _, Row, TypeInfo};
 
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
-use crate::datasource::sql::decode_to;
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
+use crate::datasource::sql::decode_to;
 use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
 
@@ -368,7 +368,9 @@ fn decode_typed(row: &MySqlRow, idx: usize, type_name: &str) -> Option<Cell> {
         "BIGINT" => decode_to!(row, idx, i64 => Cell::Int),
         "TINYINT UNSIGNED" => decode_to!(row, idx, u8 => |v| Cell::Int(v as i64)),
         "SMALLINT UNSIGNED" => decode_to!(row, idx, u16 => |v| Cell::Int(v as i64)),
-        "MEDIUMINT UNSIGNED" | "INT UNSIGNED" => decode_to!(row, idx, u32 => |v| Cell::Int(v as i64)),
+        "MEDIUMINT UNSIGNED" | "INT UNSIGNED" => {
+            decode_to!(row, idx, u32 => |v| Cell::Int(v as i64))
+        }
         "BIGINT UNSIGNED" => decode_to!(row, idx, u64 => Cell::UInt),
         "FLOAT" => decode_to!(row, idx, f32 => |v| Cell::Float(v as f64)),
         "DOUBLE" => decode_to!(row, idx, f64 => Cell::Float),
@@ -389,7 +391,9 @@ fn decode_typed(row: &MySqlRow, idx: usize, type_name: &str) -> Option<Cell> {
             decode_to!(row, idx, NaiveDateTime => |v| Cell::Text(v.to_string()))
         }
         "YEAR" => decode_to!(row, idx, u16 => |v| Cell::Int(v as i64)),
-        "JSON" => decode_to!(row, idx, sqlx::types::Json<JsonValue> => |w| Cell::Text(w.0.to_string())),
+        "JSON" => {
+            decode_to!(row, idx, sqlx::types::Json<JsonValue> => |w| Cell::Text(w.0.to_string()))
+        }
         _ => None,
     }
 }

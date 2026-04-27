@@ -129,5 +129,4 @@ mod tests {
         // Cursor lands between `(` and `)` — column 13 in "SELECT COUNT(|)".
         assert_eq!(cursor, Index2::new(0, 13));
     }
-
 }

@@ -10,10 +10,10 @@ use uuid::Uuid;
 
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
-use crate::datasource::sql::decode_to;
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
+use crate::datasource::sql::decode_to;
 use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
 
@@ -367,7 +367,9 @@ fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
         "INT8" | "BIGINT" => decode_to!(row, idx, i64 => Cell::Int),
         "FLOAT4" | "REAL" => decode_to!(row, idx, f32 => |v| Cell::Float(v as f64)),
         "FLOAT8" | "DOUBLE PRECISION" => decode_to!(row, idx, f64 => Cell::Float),
-        "NUMERIC" => decode_to!(row, idx, sqlx::types::BigDecimal => |v| Cell::Decimal(v.to_string())),
+        "NUMERIC" => {
+            decode_to!(row, idx, sqlx::types::BigDecimal => |v| Cell::Decimal(v.to_string()))
+        }
         "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" => {
             decode_to!(row, idx, String => Cell::Text)
         }
@@ -377,7 +379,9 @@ fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
         "DATE" => decode_to!(row, idx, NaiveDate => Cell::Date),
         "TIME" => decode_to!(row, idx, NaiveTime => Cell::Time),
         "UUID" => decode_to!(row, idx, Uuid => Cell::Uuid),
-        "JSON" | "JSONB" => decode_to!(row, idx, sqlx::types::Json<JsonValue> => |w| Cell::Text(w.0.to_string())),
+        "JSON" | "JSONB" => {
+            decode_to!(row, idx, sqlx::types::Json<JsonValue> => |w| Cell::Text(w.0.to_string()))
+        }
         _ => None,
     }
 }
