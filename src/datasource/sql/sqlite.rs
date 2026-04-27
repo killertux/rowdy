@@ -6,6 +6,7 @@ use sqlx::{Column as _, Row, TypeInfo};
 
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
+use crate::datasource::sql::decode_to;
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
@@ -244,18 +245,16 @@ fn decode_typed(row: &SqliteRow, idx: usize, type_name: &str) -> Option<Cell> {
     let upper = type_name.to_uppercase();
     match upper.as_str() {
         "INTEGER" | "INT" | "BIGINT" | "TINYINT" | "SMALLINT" | "MEDIUMINT" => {
-            decode_or_null::<i64>(row, idx).map(|opt| opt.map(Cell::Int).unwrap_or(Cell::Null))
+            decode_to!(row, idx, i64 => Cell::Int)
         }
-        "BOOLEAN" | "BOOL" => decode_or_null::<i64>(row, idx)
-            .map(|opt| opt.map(|n| Cell::Bool(n != 0)).unwrap_or(Cell::Null)),
+        "BOOLEAN" | "BOOL" => decode_to!(row, idx, i64 => |n| Cell::Bool(n != 0)),
         "REAL" | "DOUBLE" | "FLOAT" | "NUMERIC" | "DECIMAL" => {
-            decode_or_null::<f64>(row, idx).map(|opt| opt.map(Cell::Float).unwrap_or(Cell::Null))
+            decode_to!(row, idx, f64 => Cell::Float)
         }
         "TEXT" | "VARCHAR" | "CHAR" | "DATETIME" | "TIMESTAMP" | "DATE" | "TIME" => {
-            decode_or_null::<String>(row, idx).map(|opt| opt.map(Cell::Text).unwrap_or(Cell::Null))
+            decode_to!(row, idx, String => Cell::Text)
         }
-        "BLOB" => decode_or_null::<Vec<u8>>(row, idx)
-            .map(|opt| opt.map(Cell::Bytes).unwrap_or(Cell::Null)),
+        "BLOB" => decode_to!(row, idx, Vec<u8> => Cell::Bytes),
         _ => None,
     }
 }

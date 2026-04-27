@@ -9,6 +9,7 @@ use sqlx::{Column as _, Row, TypeInfo};
 
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
+use crate::datasource::sql::decode_to;
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
@@ -360,57 +361,35 @@ fn decode_fallback(row: &MySqlRow, idx: usize) -> Option<Cell> {
 
 fn decode_typed(row: &MySqlRow, idx: usize, type_name: &str) -> Option<Cell> {
     match type_name {
-        "BOOLEAN" => {
-            decode_or_null::<bool>(row, idx).map(|opt| opt.map(Cell::Bool).unwrap_or(Cell::Null))
+        "BOOLEAN" => decode_to!(row, idx, bool => Cell::Bool),
+        "TINYINT" => decode_to!(row, idx, i8 => |v| Cell::Int(v as i64)),
+        "SMALLINT" => decode_to!(row, idx, i16 => |v| Cell::Int(v as i64)),
+        "MEDIUMINT" | "INT" => decode_to!(row, idx, i32 => |v| Cell::Int(v as i64)),
+        "BIGINT" => decode_to!(row, idx, i64 => Cell::Int),
+        "TINYINT UNSIGNED" => decode_to!(row, idx, u8 => |v| Cell::Int(v as i64)),
+        "SMALLINT UNSIGNED" => decode_to!(row, idx, u16 => |v| Cell::Int(v as i64)),
+        "MEDIUMINT UNSIGNED" | "INT UNSIGNED" => decode_to!(row, idx, u32 => |v| Cell::Int(v as i64)),
+        "BIGINT UNSIGNED" => decode_to!(row, idx, u64 => Cell::UInt),
+        "FLOAT" => decode_to!(row, idx, f32 => |v| Cell::Float(v as f64)),
+        "DOUBLE" => decode_to!(row, idx, f64 => Cell::Float),
+        "DECIMAL" | "NUMERIC" => {
+            decode_to!(row, idx, sqlx::types::BigDecimal => |v| Cell::Decimal(v.to_string()))
         }
-        "TINYINT" => decode_or_null::<i8>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
-        "SMALLINT" => decode_or_null::<i16>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
-        "MEDIUMINT" | "INT" => decode_or_null::<i32>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
-        "BIGINT" => {
-            decode_or_null::<i64>(row, idx).map(|opt| opt.map(Cell::Int).unwrap_or(Cell::Null))
-        }
-        "TINYINT UNSIGNED" => decode_or_null::<u8>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
-        "SMALLINT UNSIGNED" => decode_or_null::<u16>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
-        "MEDIUMINT UNSIGNED" | "INT UNSIGNED" => decode_or_null::<u32>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
-        "BIGINT UNSIGNED" => {
-            decode_or_null::<u64>(row, idx).map(|opt| opt.map(Cell::UInt).unwrap_or(Cell::Null))
-        }
-        "FLOAT" => decode_or_null::<f32>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Float(v as f64)).unwrap_or(Cell::Null)),
-        "DOUBLE" => {
-            decode_or_null::<f64>(row, idx).map(|opt| opt.map(Cell::Float).unwrap_or(Cell::Null))
-        }
-        "DECIMAL" | "NUMERIC" => decode_or_null::<sqlx::types::BigDecimal>(row, idx).map(|opt| {
-            opt.map(|v| Cell::Decimal(v.to_string()))
-                .unwrap_or(Cell::Null)
-        }),
         "VARCHAR" | "CHAR" | "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" | "ENUM" | "SET" => {
-            decode_or_null::<String>(row, idx).map(|opt| opt.map(Cell::Text).unwrap_or(Cell::Null))
+            decode_to!(row, idx, String => Cell::Text)
         }
         "BINARY" | "VARBINARY" | "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" => {
-            decode_or_null::<Vec<u8>>(row, idx)
-                .map(|opt| opt.map(Cell::Bytes).unwrap_or(Cell::Null))
+            decode_to!(row, idx, Vec<u8> => Cell::Bytes)
         }
-        "DATE" => decode_or_null::<NaiveDate>(row, idx)
-            .map(|opt| opt.map(Cell::Date).unwrap_or(Cell::Null)),
-        "TIME" => decode_or_null::<NaiveTime>(row, idx)
-            .map(|opt| opt.map(Cell::Time).unwrap_or(Cell::Null)),
+        "DATE" => decode_to!(row, idx, NaiveDate => Cell::Date),
+        "TIME" => decode_to!(row, idx, NaiveTime => Cell::Time),
         // MySQL's TIMESTAMP/DATETIME are timezone-naive on the wire; preserve
         // them as text rather than fabricating a UTC offset they don't have.
-        "DATETIME" | "TIMESTAMP" => decode_or_null::<NaiveDateTime>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Text(v.to_string())).unwrap_or(Cell::Null)),
-        "YEAR" => decode_or_null::<u16>(row, idx)
-            .map(|opt| opt.map(|v| Cell::Int(v as i64)).unwrap_or(Cell::Null)),
-        "JSON" => decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx).map(|opt| {
-            opt.map(|w| Cell::Text(w.0.to_string()))
-                .unwrap_or(Cell::Null)
-        }),
+        "DATETIME" | "TIMESTAMP" => {
+            decode_to!(row, idx, NaiveDateTime => |v| Cell::Text(v.to_string()))
+        }
+        "YEAR" => decode_to!(row, idx, u16 => |v| Cell::Int(v as i64)),
+        "JSON" => decode_to!(row, idx, sqlx::types::Json<JsonValue> => |w| Cell::Text(w.0.to_string())),
         _ => None,
     }
 }
