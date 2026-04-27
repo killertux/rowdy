@@ -8,17 +8,28 @@ use crate::action::{
 };
 use crate::app::App;
 use crate::export::ExportFormat;
-use crate::state::focus::{Focus, Mode, PendingChord};
+use crate::state::focus::{Focus, PendingChord};
+use crate::state::overlay::Overlay;
 use crate::state::results::ResultViewMode;
+use crate::state::screen::Screen;
 
 pub fn translate(app: &App, event: CtEvent) -> Option<Action> {
     match event {
         CtEvent::Key(key) if key.kind == KeyEventKind::Press => translate_key(app, key, event),
         CtEvent::Key(_) => None,
         CtEvent::Paste(_) => translate_paste(app, event),
-        _ if app.focus == Focus::Editor && app.mode.is_normal() => Some(Action::EditorEvent(event)),
+        _ if app.focus == Focus::Editor && is_plain_normal(app) => {
+            Some(Action::EditorEvent(event))
+        }
         _ => None,
     }
+}
+
+/// `true` when there's no overlay AND the screen is `Normal` — the
+/// "user is just sitting in the editor" state where raw events are
+/// safe to forward to edtui.
+fn is_plain_normal(app: &App) -> bool {
+    app.overlay.is_none() && matches!(app.screen, Screen::Normal)
 }
 
 /// Bracketed-paste flow: many terminals (and macOS by default) handle
@@ -31,11 +42,15 @@ fn translate_paste(app: &App, event: CtEvent) -> Option<Action> {
         return None;
     };
     let text = text.clone();
-    match &app.mode {
-        Mode::Command(_) => Some(Action::Command(CommandAction::Paste(Some(text)))),
-        Mode::Auth(_) => Some(Action::Auth(AuthAction::Paste(Some(text)))),
-        Mode::EditConnection(_) => Some(Action::ConnForm(ConnFormAction::Paste(Some(text)))),
-        Mode::Normal if app.focus == Focus::Editor => Some(Action::EditorEvent(event)),
+    // Overlays preempt paste routing — `:` command bar takes the
+    // bracketed-paste payload before the underlying screen sees it.
+    if let Some(Overlay::Command(_)) = &app.overlay {
+        return Some(Action::Command(CommandAction::Paste(Some(text))));
+    }
+    match &app.screen {
+        Screen::Auth(_) => Some(Action::Auth(AuthAction::Paste(Some(text)))),
+        Screen::EditConnection(_) => Some(Action::ConnForm(ConnFormAction::Paste(Some(text)))),
+        Screen::Normal if app.focus == Focus::Editor => Some(Action::EditorEvent(event)),
         _ => None,
     }
 }
@@ -43,21 +58,28 @@ fn translate_paste(app: &App, event: CtEvent) -> Option<Action> {
 fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
     // Ctrl+C is the global escape hatch — except in TextArea-input modes,
     // where it's bound to "copy" instead.
-    if !consumes_ctrl_c(&app.mode)
+    if !consumes_ctrl_c(app.overlay.as_ref(), &app.screen)
         && let Some(action) = panic_quit(key)
     {
         return Some(action);
     }
-    match &app.mode {
-        Mode::Command(_) => translate_command_key(key),
-        Mode::Normal => translate_normal_key(app, key, raw),
-        Mode::ResultExpanded { view, .. } => translate_expanded_key(key, view),
-        Mode::ConfirmRun { .. } => translate_confirm_key(key),
-        Mode::Auth(_) => translate_auth_key(key),
-        Mode::EditConnection(_) => translate_conn_form_key(key),
-        Mode::ConnectionList(state) => translate_conn_list_key(key, state.is_confirming()),
-        Mode::Connecting { .. } => None, // keys are inert until the worker responds
-        Mode::Help { .. } => translate_help_key(key),
+    // Overlays preempt the screen keymap — Help is open over the result
+    // grid, key goes to the help popover and not the grid.
+    if let Some(overlay) = &app.overlay {
+        return match overlay {
+            Overlay::Command(_) => translate_command_key(key),
+            Overlay::ConfirmRun { .. } => translate_confirm_key(key),
+            // Keys are inert until the worker responds.
+            Overlay::Connecting { .. } => None,
+            Overlay::Help { .. } => translate_help_key(key),
+        };
+    }
+    match &app.screen {
+        Screen::Normal => translate_normal_key(app, key, raw),
+        Screen::ResultExpanded { view, .. } => translate_expanded_key(key, view),
+        Screen::Auth(_) => translate_auth_key(key),
+        Screen::EditConnection(_) => translate_conn_form_key(key),
+        Screen::ConnectionList(state) => translate_conn_list_key(key, state.is_confirming()),
     }
 }
 
@@ -88,11 +110,11 @@ fn translate_help_key(key: KeyEvent) -> Option<Action> {
     }
 }
 
-fn consumes_ctrl_c(mode: &Mode) -> bool {
-    matches!(
-        mode,
-        Mode::Command(_) | Mode::Auth(_) | Mode::EditConnection(_)
-    )
+fn consumes_ctrl_c(overlay: Option<&Overlay>, screen: &Screen) -> bool {
+    if matches!(overlay, Some(Overlay::Command(_))) {
+        return true;
+    }
+    matches!(screen, Screen::Auth(_) | Screen::EditConnection(_))
 }
 
 // NOTE: any new connection-list binding MUST also be listed in the `:help`
@@ -432,9 +454,9 @@ fn translate_gg_chord(app: &App, key: KeyEvent) -> Option<Action> {
     if key.code != KeyCode::Char('g') {
         return None;
     }
-    match (&app.mode, app.focus) {
-        (Mode::ResultExpanded { .. }, _) => Some(Action::ResultNav(ResultNavAction::Top)),
-        (Mode::Normal, Focus::Schema) => Some(Action::Schema(SchemaAction::Top)),
+    match (&app.screen, app.focus) {
+        (Screen::ResultExpanded { .. }, _) => Some(Action::ResultNav(ResultNavAction::Top)),
+        (Screen::Normal, Focus::Schema) => Some(Action::Schema(SchemaAction::Top)),
         _ => None,
     }
 }
@@ -495,18 +517,27 @@ mod tests {
         use crate::state::auth::{AuthKind, AuthState};
         use crate::state::command::CommandBuffer;
         use crate::state::conn_form::ConnFormState;
-        assert!(consumes_ctrl_c(&Mode::Command(CommandBuffer::default())));
-        assert!(consumes_ctrl_c(&Mode::Auth(AuthState::new(
-            AuthKind::FirstSetup
-        ))));
-        assert!(consumes_ctrl_c(&Mode::EditConnection(
-            ConnFormState::new_create()
-        )));
-        assert!(!consumes_ctrl_c(&Mode::Normal));
-        assert!(!consumes_ctrl_c(&Mode::Help {
+        // Command overlay over Normal screen.
+        let cmd = Overlay::Command(CommandBuffer::default());
+        assert!(consumes_ctrl_c(Some(&cmd), &Screen::Normal));
+        // Auth and EditConnection screens (no overlay).
+        assert!(consumes_ctrl_c(
+            None,
+            &Screen::Auth(AuthState::new(AuthKind::FirstSetup))
+        ));
+        assert!(consumes_ctrl_c(
+            None,
+            &Screen::EditConnection(ConnFormState::new_create())
+        ));
+        // Plain Normal screen with no overlay does NOT consume Ctrl+C
+        // (the panic-quit branch fires).
+        assert!(!consumes_ctrl_c(None, &Screen::Normal));
+        // Help overlay does not consume Ctrl+C either — only Command does.
+        let help = Overlay::Help {
             scroll: 0,
             h_scroll: 0,
-        }));
+        };
+        assert!(!consumes_ctrl_c(Some(&help), &Screen::Normal));
     }
 
     #[test]

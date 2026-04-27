@@ -18,8 +18,10 @@ use crate::session;
 use crate::state::command::CommandBuffer;
 use crate::state::conn_form::{ConnFormPostSave, ConnFormState};
 use crate::state::conn_list::ConnListState;
-use crate::state::focus::{Focus, Mode, PendingChord};
+use crate::state::focus::{Focus, PendingChord};
+use crate::state::overlay::Overlay;
 use crate::state::results::{ResultBlock, ResultCursor, ResultId, ResultViewMode, SelectionRect};
+use crate::state::screen::Screen;
 use crate::state::schema::{ExpandOutcome, SchemaPanel};
 use crate::state::status::QueryStatus;
 use crate::ui::theme::{Theme, ThemeKind};
@@ -209,7 +211,7 @@ pub fn apply(app: &mut App, action: Action) {
             }
             schedule_session_save(app);
         }
-        Action::OpenCommand => app.mode = Mode::Command(CommandBuffer::default()),
+        Action::OpenCommand => app.overlay = Some(Overlay::Command(CommandBuffer::default())),
         Action::Command(cmd) => apply_command(app, cmd),
         Action::Schema(s) => apply_schema(app, s),
         Action::PrepareConfirmRun => prepare_confirm_run(app),
@@ -219,7 +221,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::RunSelection => run_selection(app),
         Action::CancelQuery => cancel_query(app),
         Action::ExpandLatestResult => expand_latest(app),
-        Action::CollapseResult => app.mode = Mode::Normal,
+        Action::CollapseResult => app.screen = Screen::Normal,
         Action::ResultNav(nav) => apply_result_nav(app, nav),
         Action::ResultEnterVisual => result_enter_visual(app),
         Action::ResultExitVisual => result_exit_visual(app),
@@ -234,12 +236,12 @@ pub fn apply(app: &mut App, action: Action) {
         Action::ConnForm(a) => conn_form::apply(app, a),
         Action::ConnList(a) => conn_list::apply(app, a),
         Action::OpenHelp => {
-            app.mode = Mode::Help {
+            app.overlay = Some(Overlay::Help {
                 scroll: 0,
                 h_scroll: 0,
-            }
+            })
         }
-        Action::CloseHelp => app.mode = Mode::Normal,
+        Action::CloseHelp => app.overlay = None,
         Action::HelpScroll(axis, delta) => apply_help_scroll(app, axis, delta),
         Action::FormatEditor => format_editor(app),
         Action::Completion(c) => completion::apply(app, c),
@@ -261,7 +263,7 @@ fn reload_schema_cache(app: &mut App) {
 }
 
 fn apply_help_scroll(app: &mut App, axis: HelpAxis, delta: HelpScrollDelta) {
-    let Mode::Help { scroll, h_scroll } = &mut app.mode else {
+    let Some(Overlay::Help { scroll, h_scroll }) = &mut app.overlay else {
         return;
     };
     let target: &mut u16 = match axis {
@@ -289,7 +291,7 @@ fn resize_schema(app: &mut App, delta: i16) {
 }
 
 fn apply_command(app: &mut App, action: CommandAction) {
-    let Mode::Command(buf) = &mut app.mode else {
+    let Some(Overlay::Command(buf)) = &mut app.overlay else {
         return;
     };
     match action {
@@ -299,17 +301,17 @@ fn apply_command(app: &mut App, action: CommandAction) {
         CommandAction::Paste(text) => paste_into(&mut buf.input, &app.log, text),
         CommandAction::Copy => copy_from(&mut buf.input, &app.log),
         CommandAction::Cut => cut_from(&mut buf.input, &app.log),
-        CommandAction::Cancel => app.mode = Mode::Normal,
+        CommandAction::Cancel => app.overlay = None,
         CommandAction::Submit => submit_command(app),
     }
 }
 
 fn submit_command(app: &mut App) {
-    let Mode::Command(buf) = &app.mode else {
+    let Some(Overlay::Command(buf)) = &app.overlay else {
         return;
     };
     let raw = buf.text().trim().to_string();
-    app.mode = Mode::Normal;
+    app.overlay = None;
     // NOTE: any command parsed in `crate::command` MUST also be listed in
     // the `:help` popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
     match command::parse(&raw) {
@@ -375,7 +377,7 @@ fn open_conn_list(app: &mut App) {
     if entries.is_empty() {
         // Nothing to list — bounce straight to the create form so the user
         // doesn't get an empty modal and have to type `:conn add` next.
-        app.mode = Mode::EditConnection(
+        app.screen = Screen::EditConnection(
             ConnFormState::new_create().with_post_save(ConnFormPostSave::ReturnToList),
         );
         return;
@@ -386,7 +388,7 @@ fn open_conn_list(app: &mut App) {
     {
         state.selected = idx;
     }
-    app.mode = Mode::ConnectionList(state);
+    app.screen = Screen::ConnectionList(state);
 }
 
 fn open_conn_form_create(app: &mut App, name: Option<&str>) {
@@ -394,7 +396,7 @@ fn open_conn_form_create(app: &mut App, name: Option<&str>) {
     if let Some(n) = name {
         form = form.with_prefilled_name(n);
     }
-    app.mode = Mode::EditConnection(form);
+    app.screen = Screen::EditConnection(form);
 }
 
 pub(super) fn open_conn_form_edit(app: &mut App, name: &str, post_save: ConnFormPostSave) {
@@ -425,7 +427,7 @@ pub(super) fn open_conn_form_edit(app: &mut App, name: &str, post_save: ConnForm
             return;
         }
     };
-    app.mode = Mode::EditConnection(
+    app.screen = Screen::EditConnection(
         ConnFormState::editing(name.to_string(), url).with_post_save(post_save),
     );
 }
@@ -557,13 +559,13 @@ fn prepare_confirm_run(app: &mut App) {
         app.theme.selection_fg,
     );
     crate::state::editor::highlight_range(&mut app.editor.state, &range, style);
-    app.mode = Mode::ConfirmRun {
+    app.overlay = Some(Overlay::ConfirmRun {
         statement: range.text,
-    };
+    });
 }
 
 fn confirm_run_submit(app: &mut App) {
-    let Mode::ConfirmRun { statement } = std::mem::replace(&mut app.mode, Mode::Normal) else {
+    let Some(Overlay::ConfirmRun { statement }) = app.overlay.take() else {
         return;
     };
     crate::state::editor::clear_confirm_highlight(&mut app.editor.state);
@@ -571,10 +573,10 @@ fn confirm_run_submit(app: &mut App) {
 }
 
 fn confirm_run_cancel(app: &mut App) {
-    if !matches!(app.mode, Mode::ConfirmRun { .. }) {
+    if !matches!(app.overlay, Some(Overlay::ConfirmRun { .. })) {
         return;
     }
-    app.mode = Mode::Normal;
+    app.overlay = None;
     crate::state::editor::clear_confirm_highlight(&mut app.editor.state);
 }
 
@@ -645,7 +647,7 @@ fn expand_latest(app: &mut App) {
         };
         return;
     };
-    app.mode = Mode::ResultExpanded {
+    app.screen = Screen::ResultExpanded {
         id: block.id,
         cursor: ResultCursor::default(),
         col_offset: 0,
@@ -655,9 +657,9 @@ fn expand_latest(app: &mut App) {
 }
 
 fn apply_result_nav(app: &mut App, nav: ResultNavAction) {
-    let Mode::ResultExpanded {
+    let Screen::ResultExpanded {
         id, cursor, view, ..
-    } = &mut app.mode
+    } = &mut app.screen
     else {
         return;
     };
@@ -736,12 +738,14 @@ fn on_cache_failed(app: &mut App, stage: crate::worker::CacheStage, error: Strin
 fn on_connected(app: &mut App, name: String) {
     // Only react if we're still expecting this connection. A late event from
     // an aborted swap would otherwise clobber the active connection.
-    let expected = matches!(&app.mode, Mode::Connecting { name: pending } if pending == &name);
+    let expected =
+        matches!(&app.overlay, Some(Overlay::Connecting { name: pending }) if pending == &name);
     if !expected {
         return;
     }
     app.active_connection = Some(name.clone());
-    app.mode = Mode::Normal;
+    app.overlay = None;
+    app.screen = Screen::Normal;
     app.status = QueryStatus::Idle;
     // Fresh tree — drop any nodes left over from the previous connection
     // and re-fire the catalog load.
@@ -762,17 +766,21 @@ fn on_connected(app: &mut App, name: String) {
 }
 
 fn on_connect_failed(app: &mut App, name: String, error: String) {
-    let was_pending = matches!(&app.mode, Mode::Connecting { name: pending } if pending == &name);
+    let was_pending =
+        matches!(&app.overlay, Some(Overlay::Connecting { name: pending }) if pending == &name);
     if !was_pending {
         return;
     }
     app.log
         .warn("app", format!("connect failed for {name}: {error}"));
+    // Either way, the in-flight connect is over — the spinner clears.
+    app.overlay = None;
 
     // Live switch (`:conn use`) — the previous datasource is still alive in
-    // the worker, so just surface the error and stay in Normal.
+    // the worker, so just surface the error and leave the underlying screen
+    // alone (typically Normal).
     if app.active_connection.is_some() {
-        app.mode = Mode::Normal;
+        app.screen = Screen::Normal;
         app.status = QueryStatus::Failed {
             error: format!("connect to {name} failed: {error}"),
         };
@@ -791,10 +799,10 @@ fn on_connect_failed(app: &mut App, name: String, error: String) {
         Some(url) => {
             let mut form = ConnFormState::editing(name.clone(), url);
             form.error = Some(format!("connect failed: {error}"));
-            app.mode = Mode::EditConnection(form);
+            app.screen = Screen::EditConnection(form);
         }
         None => {
-            app.mode = Mode::Normal;
+            app.screen = Screen::Normal;
             app.status = QueryStatus::Failed {
                 error: format!("connect to {name} failed: {error}"),
             };
@@ -911,7 +919,7 @@ pub(crate) fn dispatch_connect(app: &mut App, name: String, url: String) {
         cache.clear();
     }
     app.completion = None;
-    app.mode = Mode::Connecting { name: name.clone() };
+    app.overlay = Some(Overlay::Connecting { name: name.clone() });
     app.status = QueryStatus::Idle;
     let _ = app.cmd_tx.send(WorkerCommand::Connect { name, url });
 }
@@ -962,7 +970,7 @@ pub(super) fn cut_from(input: &mut TextArea<'static>, log: &crate::log::Logger) 
 // ---------------------------------------------------------------------------
 
 fn result_enter_visual(app: &mut App) {
-    let Mode::ResultExpanded { cursor, view, .. } = &mut app.mode else {
+    let Screen::ResultExpanded { cursor, view, .. } = &mut app.screen else {
         return;
     };
     if matches!(view, ResultViewMode::Normal) {
@@ -971,16 +979,16 @@ fn result_enter_visual(app: &mut App) {
 }
 
 fn result_exit_visual(app: &mut App) {
-    let Mode::ResultExpanded { view, .. } = &mut app.mode else {
+    let Screen::ResultExpanded { view, .. } = &mut app.screen else {
         return;
     };
     *view = ResultViewMode::Normal;
 }
 
 fn result_yank(app: &mut App) {
-    let Mode::ResultExpanded {
+    let Screen::ResultExpanded {
         id, cursor, view, ..
-    } = &mut app.mode
+    } = &mut app.screen
     else {
         return;
     };
@@ -1013,9 +1021,9 @@ fn result_yank(app: &mut App) {
 
 fn result_yank_format(app: &mut App, fmt: ExportFormat) {
     let (id, cursor, anchor) = {
-        let Mode::ResultExpanded {
+        let Screen::ResultExpanded {
             id, cursor, view, ..
-        } = &app.mode
+        } = &app.screen
         else {
             return;
         };
@@ -1031,7 +1039,7 @@ fn result_yank_format(app: &mut App, fmt: ExportFormat) {
             Err(e) => {
                 // Stay in Visual on error — the user might want to copy the
                 // selection in another format, or expand it.
-                if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+                if let Screen::ResultExpanded { view, .. } = &mut app.screen {
                     *view = ResultViewMode::Visual { anchor };
                 }
                 app.status = QueryStatus::Failed { error: e };
@@ -1043,7 +1051,7 @@ fn result_yank_format(app: &mut App, fmt: ExportFormat) {
             None => {
                 // Block disappeared between expand and yank — drop back to
                 // Normal and surface the error.
-                if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+                if let Screen::ResultExpanded { view, .. } = &mut app.screen {
                     *view = ResultViewMode::Normal;
                 }
                 app.status = QueryStatus::Failed {
@@ -1054,7 +1062,7 @@ fn result_yank_format(app: &mut App, fmt: ExportFormat) {
         },
     };
     clipboard::write(&app.log, &payload);
-    if let Mode::ResultExpanded { view, .. } = &mut app.mode {
+    if let Screen::ResultExpanded { view, .. } = &mut app.screen {
         *view = ResultViewMode::Normal;
     }
     app.status = QueryStatus::Notice {
@@ -1069,7 +1077,7 @@ fn result_yank_format(app: &mut App, fmt: ExportFormat) {
 }
 
 fn result_cancel_yank_format(app: &mut App) {
-    let Mode::ResultExpanded { view, .. } = &mut app.mode else {
+    let Screen::ResultExpanded { view, .. } = &mut app.screen else {
         return;
     };
     if let ResultViewMode::YankFormat { anchor } = *view {
@@ -1086,9 +1094,9 @@ fn export_sql_command(app: &mut App, table: Option<String>, target: ExportTarget
     // selection branch passes the column-index slice down to inference
     // so a Visual subset can succeed even when the full projection
     // wouldn't.
-    if let Mode::ResultExpanded {
+    if let Screen::ResultExpanded {
         id, cursor, view, ..
-    } = &app.mode
+    } = &app.screen
         && let Some(anchor) = view.anchor()
     {
         let id = *id;
@@ -1132,7 +1140,7 @@ fn export_sql_command(app: &mut App, table: Option<String>, target: ExportTarget
             rect.cols(),
             payload,
         );
-        if drop_visual && let Mode::ResultExpanded { view, .. } = &mut app.mode {
+        if drop_visual && let Screen::ResultExpanded { view, .. } = &mut app.screen {
             *view = ResultViewMode::Normal;
         }
         return;
@@ -1189,9 +1197,9 @@ fn export_command(app: &mut App, fmt: ExportFormat, target: ExportTarget) {
     // Two routes:
     // - Inside an expanded result with an active selection → export the rect.
     // - Otherwise → export the latest result block in full.
-    if let Mode::ResultExpanded {
+    if let Screen::ResultExpanded {
         id, cursor, view, ..
-    } = &app.mode
+    } = &app.screen
         && let Some(anchor) = view.anchor()
     {
         let id = *id;
@@ -1205,7 +1213,7 @@ fn export_command(app: &mut App, fmt: ExportFormat, target: ExportTarget) {
         };
         let drop_visual = matches!(target, ExportTarget::Clipboard);
         finish_export(app, fmt, target, rect.rows(), rect.cols(), payload);
-        if drop_visual && let Mode::ResultExpanded { view, .. } = &mut app.mode {
+        if drop_visual && let Screen::ResultExpanded { view, .. } = &mut app.screen {
             *view = ResultViewMode::Normal;
         }
         return;

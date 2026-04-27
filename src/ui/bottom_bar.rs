@@ -7,8 +7,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use crate::app::App;
-use crate::state::focus::Mode;
+use crate::state::overlay::Overlay;
 use crate::state::results::ResultViewMode;
+use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
 use crate::ui::theme::Theme;
 
@@ -27,20 +28,33 @@ impl<'a> BottomBar<'a> {
 impl Widget for BottomBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         paint_background(area, buf, &self.app.theme);
-        match &self.app.mode {
-            Mode::Command(_) => render_command_prefix(area, buf, &self.app.theme),
-            Mode::ConfirmRun { .. } => render_confirm(area, buf, &self.app.theme),
-            Mode::Auth(_)
-            | Mode::EditConnection(_)
-            | Mode::ConnectionList(_)
-            | Mode::Help { .. } => {
-                // Modal screens own their own help text — keep the status
-                // bar empty so the user isn't reading two things at once.
+        // Overlay wins — it's the layer the user is actively interacting
+        // with. Only fall through to screen-specific bars when nothing
+        // is preempting input.
+        match &self.app.overlay {
+            Some(Overlay::Command(_)) => {
+                render_command_prefix(area, buf, &self.app.theme);
+                return;
             }
-            Mode::Connecting { name } => {
+            Some(Overlay::ConfirmRun { .. }) => {
+                render_confirm(area, buf, &self.app.theme);
+                return;
+            }
+            Some(Overlay::Connecting { name }) => {
                 render_connecting(name, area, buf, &self.app.theme);
+                return;
             }
-            Mode::ResultExpanded {
+            Some(Overlay::Help { .. }) => {
+                // Help popover owns its own footer — leave the bar blank.
+                return;
+            }
+            None => {}
+        }
+        match &self.app.screen {
+            // Modal screens own their own help text — keep the status
+            // bar empty so the user isn't reading two things at once.
+            Screen::Auth(_) | Screen::EditConnection(_) | Screen::ConnectionList(_) => {}
+            Screen::ResultExpanded {
                 view: ResultViewMode::YankFormat { .. },
                 ..
             } => {

@@ -8,10 +8,10 @@ use crate::action::{
 use crate::app::App;
 use crate::state::conn_form::ConnFormPostSave;
 use crate::state::conn_list::ConnListState;
-use crate::state::focus::Mode;
+use crate::state::screen::Screen;
 
 pub fn apply(app: &mut App, action: ConnFormAction) {
-    let Mode::EditConnection(state) = &mut app.mode else {
+    let Screen::EditConnection(state) = &mut app.screen else {
         return;
     };
     match action {
@@ -28,7 +28,7 @@ pub fn apply(app: &mut App, action: ConnFormAction) {
 }
 
 fn submit(app: &mut App) {
-    let Mode::EditConnection(state) = &mut app.mode else {
+    let Screen::EditConnection(state) = &mut app.screen else {
         return;
     };
     state.error = None;
@@ -74,7 +74,7 @@ fn submit(app: &mut App) {
             if let Some(idx) = list.entries.iter().position(|n| n == &name) {
                 list.selected = idx;
             }
-            app.mode = Mode::ConnectionList(list);
+            app.screen = Screen::ConnectionList(list);
         }
     }
 }

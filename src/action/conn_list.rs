@@ -7,10 +7,10 @@
 use crate::action::{ConnListAction, open_conn_form_edit, perform_delete, use_connection};
 use crate::app::App;
 use crate::state::conn_form::{ConnFormPostSave, ConnFormState};
-use crate::state::focus::Mode;
+use crate::state::screen::Screen;
 
 pub fn apply(app: &mut App, action: ConnListAction) {
-    let Mode::ConnectionList(state) = &mut app.mode else {
+    let Screen::ConnectionList(state) = &mut app.screen else {
         return;
     };
     // While confirming a delete, only y/Enter and n/Esc do anything (handled
@@ -34,7 +34,7 @@ pub fn apply(app: &mut App, action: ConnListAction) {
         ConnListAction::Top => state.jump_top(),
         ConnListAction::Bottom => state.jump_bottom(),
         ConnListAction::AddNew => {
-            app.mode = Mode::EditConnection(
+            app.screen = Screen::EditConnection(
                 ConnFormState::new_create().with_post_save(ConnFormPostSave::ReturnToList),
             );
         }
@@ -49,7 +49,7 @@ pub fn apply(app: &mut App, action: ConnListAction) {
             }
         }
         ConnListAction::BeginDelete => state.begin_delete(),
-        ConnListAction::Close => app.mode = Mode::Normal,
+        ConnListAction::Close => app.screen = Screen::Normal,
         // Handled in the confirming branch above.
         ConnListAction::ConfirmDelete | ConnListAction::CancelDelete => {}
     }
@@ -57,12 +57,12 @@ pub fn apply(app: &mut App, action: ConnListAction) {
 
 /// Re-load the picker's entry list from `app.config` after a delete or
 /// other config edit. If the list is now empty there's nothing to pick
-/// from, so we drop straight back to Normal mode.
+/// from, so we drop straight back to the Normal screen.
 pub fn refresh_conn_list(app: &mut App) {
-    if let Mode::ConnectionList(state) = &mut app.mode {
+    if let Screen::ConnectionList(state) = &mut app.screen {
         state.refresh(app.config.connection_names());
         if state.entries.is_empty() {
-            app.mode = Mode::Normal;
+            app.screen = Screen::Normal;
         }
     }
 }

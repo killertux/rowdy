@@ -10,9 +10,11 @@ use crate::datasource::DriverKind;
 use crate::log::Logger;
 use crate::state::completion::CompletionState;
 use crate::state::editor::EditorPanel;
-use crate::state::focus::{Focus, Mode, PendingChord};
+use crate::state::focus::{Focus, PendingChord};
+use crate::state::overlay::Overlay;
 use crate::state::results::ResultBlock;
 use crate::state::schema::SchemaPanel;
+use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
 use crate::ui::theme::Theme;
 use crate::worker::{RequestCounter, RequestId, WorkerCommand};
@@ -33,7 +35,13 @@ pub struct App {
     pub status: QueryStatus,
     pub results: Vec<ResultBlock>,
     pub focus: Focus,
-    pub mode: Mode,
+    /// Persistent UI surface. Survives transient overlays (the run
+    /// prompt, `:help`, etc.) — closing an overlay returns the user to
+    /// whichever screen they were on.
+    pub screen: Screen,
+    /// Transient input-preempting layer. `Some` when a `:` prompt,
+    /// confirm-run, in-flight connect, or help popover is up.
+    pub overlay: Option<Overlay>,
     pub pending: PendingChord,
     pub theme: Theme,
     pub should_quit: bool,
@@ -100,7 +108,8 @@ impl App {
             status: QueryStatus::Idle,
             results: Vec::new(),
             focus: Focus::Editor,
-            mode: Mode::Normal,
+            screen: Screen::Normal,
+            overlay: None,
             pending: PendingChord::None,
             theme,
             should_quit: false,

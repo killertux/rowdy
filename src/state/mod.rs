@@ -5,6 +5,8 @@ pub mod conn_form;
 pub mod conn_list;
 pub mod editor;
 pub mod focus;
+pub mod overlay;
 pub mod results;
 pub mod schema;
+pub mod screen;
 pub mod status;

@@ -15,8 +15,9 @@ use ratatui::style::Style;
 use ratatui::widgets::{Block, Widget};
 
 use crate::app::App;
-use crate::state::focus::Mode;
+use crate::state::overlay::Overlay;
 use crate::state::results::{ResultBlock, SelectionRect, fit_columns};
+use crate::state::screen::Screen;
 use auth_view::AuthPrompt;
 use autocomplete_popover::CompletionPopover;
 use bottom_bar::{BottomBar, COMMAND_PREFIX};
@@ -35,11 +36,19 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     paint_background(frame, area, app);
     let (main, bottom_area) = split_vertical(area);
 
-    match &app.mode {
-        Mode::Auth(_) | Mode::EditConnection(_) | Mode::ConnectionList(_) | Mode::Help { .. } => {
+    // Help is the only overlay that takes over the full screen. The
+    // other overlays (Command, ConfirmRun, Connecting) are bottom-bar
+    // affordances and let the underlying screen keep rendering.
+    if matches!(&app.overlay, Some(Overlay::Help { .. })) {
+        render_help(app, frame, area, bottom_area);
+        return;
+    }
+
+    match &app.screen {
+        Screen::Auth(_) | Screen::EditConnection(_) | Screen::ConnectionList(_) => {
             render_modal(app, frame, area, bottom_area);
         }
-        Mode::ResultExpanded { .. } => render_expanded(app, frame, main, bottom_area),
+        Screen::ResultExpanded { .. } => render_expanded(app, frame, main, bottom_area),
         _ => render_workspace(app, frame, main, bottom_area),
     }
 }
@@ -77,8 +86,8 @@ fn render_workspace(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: R
 fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Rect) {
     frame.render_widget(BottomBar::new(app), bottom_area);
 
-    let (id, cur, prev_col_offset, prev_row_offset, view) = match app.mode {
-        Mode::ResultExpanded {
+    let (id, cur, prev_col_offset, prev_row_offset, view) = match app.screen {
+        Screen::ResultExpanded {
             id,
             cursor,
             col_offset,
@@ -117,11 +126,11 @@ fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Re
         main,
     );
 
-    if let Mode::ResultExpanded {
+    if let Screen::ResultExpanded {
         col_offset: cstored,
         row_offset: rstored,
         ..
-    } = &mut app.mode
+    } = &mut app.screen
     {
         *cstored = new_col_offset;
         *rstored = new_row_offset;
@@ -167,8 +176,8 @@ fn render_immutable_panes(
     }
     frame.render_widget(BottomBar::new(app), bottom_area);
 
-    // Command-mode input value rides on top of the bar.
-    if let Mode::Command(buf) = &app.mode {
+    // Command overlay's input value rides on top of the bottom bar.
+    if let Some(Overlay::Command(buf)) = &app.overlay {
         let input_area = command_input_area(bottom_area);
         frame.render_widget(&buf.input, input_area);
     }
@@ -184,41 +193,40 @@ fn command_input_area(bottom_area: Rect) -> Rect {
     }
 }
 
-fn render_modal(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {
-    // The help popover is the only modal that mutates state during
-    // render (clamping scroll against the actual content size), so it
-    // gets the `&mut App`. Everything else takes an immutable reborrow.
-    if matches!(&app.mode, Mode::Help { .. }) {
-        frame.render_widget(BottomBar::new(app), bottom_area);
-        let App { mode, theme, .. } = &mut *app;
-        if let Mode::Help { scroll, h_scroll } = mode {
-            let popover = HelpPopover {
-                scroll,
-                h_scroll,
-                theme,
-            };
-            frame.render_widget(popover, full);
-        }
-        return;
+/// Help is the only modal that mutates state during render (clamping
+/// scroll against the actual content size), so it gets the `&mut App`.
+fn render_help(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {
+    frame.render_widget(BottomBar::new(app), bottom_area);
+    let App { overlay, theme, .. } = &mut *app;
+    if let Some(Overlay::Help { scroll, h_scroll }) = overlay {
+        let popover = HelpPopover {
+            scroll,
+            h_scroll,
+            theme,
+        };
+        frame.render_widget(popover, full);
     }
+}
+
+fn render_modal(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {
     let app: &App = app;
     frame.render_widget(BottomBar::new(app), bottom_area);
-    match &app.mode {
-        Mode::Auth(state) => {
+    match &app.screen {
+        Screen::Auth(state) => {
             let prompt = AuthPrompt {
                 state,
                 theme: &app.theme,
             };
             frame.render_widget(prompt, full);
         }
-        Mode::EditConnection(state) => {
+        Screen::EditConnection(state) => {
             let form = ConnForm {
                 state,
                 theme: &app.theme,
             };
             frame.render_widget(form, full);
         }
-        Mode::ConnectionList(state) => {
+        Screen::ConnectionList(state) => {
             let list = ConnList {
                 state,
                 active: app.active_connection.as_deref(),

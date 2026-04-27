@@ -72,7 +72,7 @@ impl ResultCursor {
     }
 }
 
-/// Sub-mode within `Mode::ResultExpanded`. The anchor in `Visual` /
+/// Sub-mode within `Screen::ResultExpanded`. The anchor in `Visual` /
 /// `YankFormat` plus the live cursor define a rectangular selection.
 #[derive(Debug, Clone, Copy)]
 pub enum ResultViewMode {

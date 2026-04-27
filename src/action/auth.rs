@@ -11,10 +11,10 @@ use crate::connections::{self, ConnectionStore};
 use crate::state::auth::AuthKind;
 use crate::state::conn_form::ConnFormState;
 use crate::state::conn_list::ConnListState;
-use crate::state::focus::Mode;
+use crate::state::screen::Screen;
 
 pub fn apply(app: &mut App, action: AuthAction) {
-    let Mode::Auth(state) = &mut app.mode else {
+    let Screen::Auth(state) = &mut app.screen else {
         return;
     };
     match action {
@@ -31,7 +31,7 @@ pub fn apply(app: &mut App, action: AuthAction) {
 }
 
 fn submit(app: &mut App) {
-    let Mode::Auth(state) = &mut app.mode else {
+    let Screen::Auth(state) = &mut app.screen else {
         return;
     };
     state.error = None;
@@ -69,7 +69,7 @@ fn submit(app: &mut App) {
                 transition_post_auth(app);
             }
             Err(_) => {
-                if let Mode::Auth(state) = &mut app.mode {
+                if let Screen::Auth(state) = &mut app.screen {
                     state.attempts = state.attempts.saturating_add(1);
                     state.clear_input();
                     let remaining = state.attempts_remaining();
@@ -95,19 +95,19 @@ fn submit(app: &mut App) {
 }
 
 fn set_error(app: &mut App, msg: String) {
-    if let Mode::Auth(state) = &mut app.mode {
+    if let Screen::Auth(state) = &mut app.screen {
         state.error = Some(msg);
     }
 }
 
-/// Decides what to render after the auth Mode resolves. Either jumps
+/// Decides what to render after the Auth screen resolves. Either jumps
 /// straight into a connection form (no saved connections) or opens the
 /// connection picker so the user can choose one.
 fn transition_post_auth(app: &mut App) {
     let entries = app.config.connection_names();
     if entries.is_empty() {
-        app.mode = Mode::EditConnection(ConnFormState::new_create());
+        app.screen = Screen::EditConnection(ConnFormState::new_create());
         return;
     }
-    app.mode = Mode::ConnectionList(ConnListState::new(entries));
+    app.screen = Screen::ConnectionList(ConnListState::new(entries));
 }
