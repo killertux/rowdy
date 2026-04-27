@@ -371,7 +371,7 @@ fn decode_typed(row: &PgRow, idx: usize, type_name: &str) -> Option<Cell> {
             opt.map(|v| Cell::Decimal(v.to_string()))
                 .unwrap_or(Cell::Null)
         }),
-        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" => {
+        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" | "ENUM" => {
             decode_or_null::<String>(row, idx).map(|opt| opt.map(Cell::Text).unwrap_or(Cell::Null))
         }
         "BYTEA" => decode_or_null::<Vec<u8>>(row, idx)
