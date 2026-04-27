@@ -7,6 +7,7 @@ use crate::action::{
     HelpScrollDelta, ResultNavAction, SchemaAction,
 };
 use crate::app::App;
+use crate::command::FormatScope;
 use crate::export::ExportFormat;
 use crate::state::focus::{Focus, PendingChord};
 use crate::state::overlay::Overlay;
@@ -333,7 +334,7 @@ fn translate_global(key: KeyEvent) -> Option<Action> {
         return Some(Action::SetPendingChord(PendingChord::Leader));
     }
     if key.code == KeyCode::Char('=') && key.modifiers.is_empty() {
-        return Some(Action::FormatEditor);
+        return Some(Action::FormatEditor(FormatScope::Cursor));
     }
     None
 }
@@ -821,7 +822,7 @@ mod tests {
         ));
         assert!(matches!(
             translate_global(key(KeyCode::Char('='))),
-            Some(Action::FormatEditor)
+            Some(Action::FormatEditor(FormatScope::Cursor))
         ));
         assert!(translate_global(key(KeyCode::Char('a'))).is_none());
     }

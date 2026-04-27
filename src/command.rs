@@ -31,9 +31,21 @@ pub enum Command {
         table: Option<String>,
         target: ParsedTarget,
     },
-    Format,
+    Format(FormatScope),
     Reload,
     Conn(ConnSubcommand),
+}
+
+/// Which slice of the editor buffer `:format` should rewrite.
+///
+/// - `Cursor` (the bare `:format` / `:fmt`) — Visual selection if any,
+///   otherwise the statement containing the cursor. Mirrors how `r`
+///   picks what to run.
+/// - `All` (`:format all`) — the entire buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatScope {
+    Cursor,
+    All,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,12 +91,25 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
         "collapse" | "c" => Command::Collapse,
         "theme" => parse_theme(&args)?,
         "export" => parse_export(&args)?,
-        "format" | "fmt" => Command::Format,
+        "format" | "fmt" => parse_format(&args)?,
         "reload" => Command::Reload,
         "conn" | "conns" => Command::Conn(parse_conn(&args)?),
         _ => return Err(format!("unknown command: {cmd}")),
     };
     Ok(Some(parsed))
+}
+
+fn parse_format(args: &[&str]) -> Result<Command, String> {
+    let scope = match args.first().copied() {
+        None => FormatScope::Cursor,
+        Some("all") => FormatScope::All,
+        Some(other) => {
+            return Err(format!(
+                "unknown :format scope: {other} (use `all` or omit)"
+            ));
+        }
+    };
+    Ok(Command::Format(scope))
 }
 
 fn parse_width(args: &[&str]) -> Result<Command, String> {
@@ -146,25 +171,31 @@ fn parse_target(rest: &[&str]) -> Result<ParsedTarget, String> {
 
 fn parse_conn(args: &[&str]) -> Result<ConnSubcommand, String> {
     let sub = args.first().copied();
-    let rest_first = || args.get(1).copied();
+    // Connection names are allowed to contain spaces (the conn-form doesn't
+    // forbid it), so the tail of the arg list is joined back together rather
+    // than only taking the next token. Multiple internal spaces collapse to
+    // one — round-tripping the exact whitespace through `:conn` isn't
+    // supported.
+    let rest_joined = || {
+        let joined = args[1..].join(" ");
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
+    };
     Ok(match sub {
         None | Some("list") | Some("ls") => ConnSubcommand::List,
-        Some("add") => ConnSubcommand::Add(rest_first().map(str::to_string)),
+        Some("add") => ConnSubcommand::Add(rest_joined()),
         Some("edit") => ConnSubcommand::Edit(
-            rest_first()
-                .map(str::to_string)
-                .ok_or_else(|| "usage: :conn edit <name>".to_string())?,
+            rest_joined().ok_or_else(|| "usage: :conn edit <name>".to_string())?,
         ),
         Some("delete") | Some("rm") => ConnSubcommand::Delete(
-            rest_first()
-                .map(str::to_string)
-                .ok_or_else(|| "usage: :conn delete <name>".to_string())?,
+            rest_joined().ok_or_else(|| "usage: :conn delete <name>".to_string())?,
         ),
-        Some("use") => ConnSubcommand::Use(
-            rest_first()
-                .map(str::to_string)
-                .ok_or_else(|| "usage: :conn use <name>".to_string())?,
-        ),
+        Some("use") => {
+            ConnSubcommand::Use(rest_joined().ok_or_else(|| "usage: :conn use <name>".to_string())?)
+        }
         Some(other) => {
             return Err(format!(
                 "unknown :conn subcommand: {other} (use list/add/edit/delete/use)"
@@ -361,6 +392,63 @@ mod tests {
             Ok(Some(Command::Conn(ConnSubcommand::Use("staging".into()))))
         );
         assert_eq!(parse("conn use"), Err("usage: :conn use <name>".into()));
+    }
+
+    #[test]
+    fn format_defaults_to_cursor_scope() {
+        assert_eq!(
+            parse("format"),
+            Ok(Some(Command::Format(FormatScope::Cursor)))
+        );
+        assert_eq!(parse("fmt"), Ok(Some(Command::Format(FormatScope::Cursor))));
+    }
+
+    #[test]
+    fn format_all_scope() {
+        assert_eq!(
+            parse("format all"),
+            Ok(Some(Command::Format(FormatScope::All)))
+        );
+        assert_eq!(
+            parse("fmt all"),
+            Ok(Some(Command::Format(FormatScope::All)))
+        );
+    }
+
+    #[test]
+    fn format_unknown_scope_errors() {
+        assert!(matches!(
+            parse("format buffer"),
+            Err(msg) if msg.contains("unknown :format scope")
+        ));
+    }
+
+    #[test]
+    fn conn_subcommands_accept_names_with_spaces() {
+        assert_eq!(
+            parse("conn use staging server"),
+            Ok(Some(Command::Conn(ConnSubcommand::Use(
+                "staging server".into()
+            ))))
+        );
+        assert_eq!(
+            parse("conn edit my prod db"),
+            Ok(Some(Command::Conn(ConnSubcommand::Edit(
+                "my prod db".into()
+            ))))
+        );
+        assert_eq!(
+            parse("conn delete read replica"),
+            Ok(Some(Command::Conn(ConnSubcommand::Delete(
+                "read replica".into()
+            ))))
+        );
+        assert_eq!(
+            parse("conn add staging server"),
+            Ok(Some(Command::Conn(ConnSubcommand::Add(Some(
+                "staging server".into()
+            )))))
+        );
     }
 
     #[test]

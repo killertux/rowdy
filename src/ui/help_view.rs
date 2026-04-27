@@ -222,7 +222,7 @@ const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 keys: "=",
-                desc: "Format SQL (Visual: selection; Normal: whole buffer)",
+                desc: "Format the statement under the cursor (or Visual selection)",
             },
             HelpEntry {
                 keys: "Ctrl+Space",
@@ -446,7 +446,11 @@ const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 keys: ":format, :fmt",
-                desc: "Format SQL buffer (or Visual selection) via sqlformat",
+                desc: "Format the statement under the cursor (or Visual selection)",
+            },
+            HelpEntry {
+                keys: ":format all",
+                desc: "Format the entire editor buffer",
             },
             HelpEntry {
                 keys: ":reload",
