@@ -22,6 +22,7 @@ use crate::state::status::QueryStatus;
 use crate::ui::theme::{Theme, ThemeKind};
 use crate::worker::{IntrospectTarget, WorkerCommand, WorkerEvent};
 
+#[derive(Debug)]
 pub enum Action {
     Quit,
     FocusPanel(Focus),
@@ -115,6 +116,7 @@ pub enum ExportTarget {
     File(PathBuf),
 }
 
+#[derive(Debug)]
 pub enum AuthAction {
     Input(Input),
     /// `None` reads the system clipboard; `Some(text)` is supplied directly
@@ -126,6 +128,7 @@ pub enum AuthAction {
     Cancel,
 }
 
+#[derive(Debug)]
 pub enum ConnFormAction {
     Input(Input),
     /// `None` reads the system clipboard; `Some(text)` is supplied directly
@@ -138,6 +141,7 @@ pub enum ConnFormAction {
     Cancel,
 }
 
+#[derive(Debug)]
 pub enum ConnListAction {
     Down,
     Up,
@@ -152,6 +156,7 @@ pub enum ConnListAction {
     Close,
 }
 
+#[derive(Debug)]
 pub enum CommandAction {
     Input(Input),
     /// `None` reads the system clipboard. `Some(text)` carries text supplied
@@ -163,6 +168,7 @@ pub enum CommandAction {
     Cancel,
 }
 
+#[derive(Debug)]
 pub enum SchemaAction {
     Down,
     Up,
@@ -173,6 +179,7 @@ pub enum SchemaAction {
     Bottom,
 }
 
+#[derive(Debug)]
 pub enum ResultNavAction {
     Left,
     Right,
