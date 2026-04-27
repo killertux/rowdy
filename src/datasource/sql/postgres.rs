@@ -552,4 +552,58 @@ mod tests {
             .await
             .expect("drop");
     }
+
+    #[tokio::test]
+    async fn enum_values_decoded_as_text() {
+        let Some(url) = url() else {
+            eprintln!("ROWDY_POSTGRES_URL not set; skipping postgres integration test");
+            return;
+        };
+        let ds = PostgresDatasource::connect(&url, Logger::discard())
+            .await
+            .expect("connect");
+        let table = unique_table();
+        let enum_type = format!("{table}_status");
+
+        ds.execute(&format!("DROP TABLE IF EXISTS {table}"))
+            .await
+            .expect("pre-clean");
+        ds.execute(&format!("DROP TYPE IF EXISTS {enum_type}"))
+            .await
+            .expect("pre-clean enum");
+        ds.execute(&format!(
+            "CREATE TYPE {enum_type} AS ENUM ('created', 'running', 'completed', 'failed')"
+        ))
+        .await
+        .expect("create enum type");
+        ds.execute(&format!(
+            "CREATE TABLE {table} (id INTEGER PRIMARY KEY, status {enum_type} NOT NULL)"
+        ))
+        .await
+        .expect("create table with enum");
+        ds.execute(&format!(
+            "INSERT INTO {table}(id, status) VALUES (1, 'running'), (2, 'completed')"
+        ))
+        .await
+        .expect("insert enum values");
+
+        let result = ds
+            .execute(&format!("SELECT id, status FROM {table} ORDER BY id"))
+            .await
+            .expect("select enum");
+        assert_eq!(result.columns.len(), 2);
+        assert_eq!(result.rows.len(), 2);
+
+        assert!(matches!(result.rows[0][0], Cell::Int(1)));
+        assert!(matches!(&result.rows[0][1], Cell::Text(s) if s == "running"));
+        assert!(matches!(result.rows[1][0], Cell::Int(2)));
+        assert!(matches!(&result.rows[1][1], Cell::Text(s) if s == "completed"));
+
+        ds.execute(&format!("DROP TABLE {table}"))
+            .await
+            .expect("drop table");
+        ds.execute(&format!("DROP TYPE {enum_type}"))
+            .await
+            .expect("drop enum type");
+    }
 }
