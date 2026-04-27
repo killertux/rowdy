@@ -332,13 +332,17 @@ fn decode_cell(row: &PgRow, idx: usize) -> Cell {
 }
 
 fn decode_fallback(row: &PgRow, idx: usize) -> Option<Cell> {
+    // Try JSON first as it handles custom types via serde
     if let Some(opt) = decode_or_null::<sqlx::types::Json<JsonValue>>(row, idx) {
         return Some(
             opt.map(|w| Cell::Text(w.0.to_string()))
                 .unwrap_or(Cell::Null),
         );
     }
-    if let Some(opt) = decode_or_null::<String>(row, idx) {
+    // For custom PostgreSQL types (like ENUM variants), we need to use
+    // sqlx's unknown type decoding. The database stores these as strings,
+    // so we use `try_get` without type specification to bypass type checking.
+    if let Some(opt) = row.try_get::<Option<String>, _>(idx).ok() {
         return Some(opt.map(Cell::Text).unwrap_or(Cell::Null));
     }
     if let Some(opt) = decode_or_null::<Vec<u8>>(row, idx) {
@@ -594,20 +598,10 @@ mod tests {
         assert_eq!(result.columns.len(), 2);
         assert_eq!(result.rows.len(), 2);
 
-        // Debug: print what we actually got
-        println!("DEBUG: cell = {:?}", &result.rows[0][1]);
-
         assert!(matches!(result.rows[0][0], Cell::Int(1)));
-        let cell = &result.rows[0][1];
-        let text = match cell {
-            Cell::Text(s) => s.clone(),
-            Cell::Other { type_name, repr } => {
-                println!("DEBUG: got Cell::Other type_name={type_name} repr={repr}");
-                type_name.clone()
-            }
-            _ => panic!("expected Cell::Text, got {:?}", cell),
-        };
-        assert_eq!(text, "running", "ENUM value should decode as text");
+        assert!(matches!(&result.rows[0][1], Cell::Text(s) if s == "running"));
+        assert!(matches!(result.rows[1][0], Cell::Int(2)));
+        assert!(matches!(&result.rows[1][1], Cell::Text(s) if s == "completed"));
 
         ds.execute(&format!("DROP TABLE {table}"))
             .await
