@@ -3,6 +3,7 @@ mod app;
 mod autocomplete;
 mod cli;
 mod clipboard;
+mod command;
 mod config;
 mod connections;
 mod crypto;
