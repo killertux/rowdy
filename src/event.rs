@@ -4,7 +4,7 @@ use ratatui_textarea::Input;
 
 use crate::action::{
     Action, AuthAction, CommandAction, CompletionAction, ConnFormAction, ConnListAction,
-    ResultNavAction, SchemaAction,
+    HelpAxis, HelpScrollDelta, ResultNavAction, SchemaAction,
 };
 use crate::app::App;
 use crate::export::ExportFormat;
@@ -65,19 +65,25 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
 /// here should be reflected in the "Help (this screen)" section of
 /// `HELP_SECTIONS` in `src/ui/help_view.rs`.
 fn translate_help_key(key: KeyEvent) -> Option<Action> {
+    use HelpAxis::{Horizontal, Vertical};
+    use HelpScrollDelta::{Bottom, By, Top};
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match (key.code, ctrl) {
         (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => Some(Action::CloseHelp),
-        (KeyCode::Char('j') | KeyCode::Down, false) => Some(Action::HelpScroll(1)),
-        (KeyCode::Char('k') | KeyCode::Up, false) => Some(Action::HelpScroll(-1)),
-        (KeyCode::Char('h') | KeyCode::Left, false) => Some(Action::HelpScrollH(-2)),
-        (KeyCode::Char('l') | KeyCode::Right, false) => Some(Action::HelpScrollH(2)),
-        (KeyCode::Char('d'), true) => Some(Action::HelpScroll(8)),
-        (KeyCode::Char('u'), true) => Some(Action::HelpScroll(-8)),
-        (KeyCode::Char('g'), false) => Some(Action::HelpScroll(i32::MIN / 2)),
-        (KeyCode::Char('G'), false) => Some(Action::HelpScroll(i32::MAX / 2)),
-        (KeyCode::Char('0') | KeyCode::Home, _) => Some(Action::HelpScrollH(i32::MIN / 2)),
-        (KeyCode::Char('$') | KeyCode::End, _) => Some(Action::HelpScrollH(i32::MAX / 2)),
+        (KeyCode::Char('j') | KeyCode::Down, false) => Some(Action::HelpScroll(Vertical, By(1))),
+        (KeyCode::Char('k') | KeyCode::Up, false) => Some(Action::HelpScroll(Vertical, By(-1))),
+        (KeyCode::Char('h') | KeyCode::Left, false) => {
+            Some(Action::HelpScroll(Horizontal, By(-2)))
+        }
+        (KeyCode::Char('l') | KeyCode::Right, false) => {
+            Some(Action::HelpScroll(Horizontal, By(2)))
+        }
+        (KeyCode::Char('d'), true) => Some(Action::HelpScroll(Vertical, By(8))),
+        (KeyCode::Char('u'), true) => Some(Action::HelpScroll(Vertical, By(-8))),
+        (KeyCode::Char('g'), false) => Some(Action::HelpScroll(Vertical, Top)),
+        (KeyCode::Char('G'), false) => Some(Action::HelpScroll(Vertical, Bottom)),
+        (KeyCode::Char('0') | KeyCode::Home, _) => Some(Action::HelpScroll(Horizontal, Top)),
+        (KeyCode::Char('$') | KeyCode::End, _) => Some(Action::HelpScroll(Horizontal, Bottom)),
         _ => None,
     }
 }
@@ -117,12 +123,13 @@ fn translate_conn_list_key(key: KeyEvent, confirming: bool) -> Option<Action> {
 }
 
 fn translate_auth_key(key: KeyEvent) -> Option<Action> {
-    if let Some(clip) = clipboard_action(key) {
-        return Some(Action::Auth(match clip {
-            ClipboardOp::Paste => AuthAction::Paste(None),
-            ClipboardOp::Copy => AuthAction::Copy,
-            ClipboardOp::Cut => AuthAction::Cut,
-        }));
+    if let Some(act) = clipboard_arm(
+        key,
+        AuthAction::Paste(None),
+        AuthAction::Copy,
+        AuthAction::Cut,
+    ) {
+        return Some(Action::Auth(act));
     }
     match key.code {
         KeyCode::Esc => Some(Action::Auth(AuthAction::Cancel)),

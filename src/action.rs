@@ -66,10 +66,9 @@ pub enum Action {
     ConnList(ConnListAction),
     OpenHelp,
     CloseHelp,
-    /// Scroll the help popover vertically by `delta` lines.
-    HelpScroll(i32),
-    /// Scroll the help popover horizontally by `delta` columns.
-    HelpScrollH(i32),
+    /// Move the help popover viewport along `axis` by `delta` (a relative
+    /// step) or to a named anchor (top/bottom).
+    HelpScroll(HelpAxis, HelpScrollDelta),
     /// Run the editor buffer (or active selection) through the SQL
     /// formatter and replace the source in-place.
     FormatEditor,
@@ -79,6 +78,22 @@ pub enum Action {
     /// User-facing `:reload`. Drops the autocomplete schema cache and
     /// re-primes from the active connection.
     ReloadSchemaCache,
+}
+
+/// Which axis of the help popover viewport to move.
+#[derive(Debug, Clone, Copy)]
+pub enum HelpAxis {
+    Vertical,
+    Horizontal,
+}
+
+/// What kind of help-popover move to perform: a relative step or a jump
+/// to a named anchor.
+#[derive(Debug, Clone, Copy)]
+pub enum HelpScrollDelta {
+    By(i32),
+    Top,
+    Bottom,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -214,8 +229,7 @@ pub fn apply(app: &mut App, action: Action) {
             }
         }
         Action::CloseHelp => app.mode = Mode::Normal,
-        Action::HelpScroll(delta) => apply_help_scroll(app, delta),
-        Action::HelpScrollH(delta) => apply_help_scroll_h(app, delta),
+        Action::HelpScroll(axis, delta) => apply_help_scroll(app, axis, delta),
         Action::FormatEditor => format_editor(app),
         Action::Completion(c) => apply_completion(app, c),
         Action::ReloadSchemaCache => reload_schema_cache(app),
@@ -524,17 +538,24 @@ fn reload_schema_cache(app: &mut App) {
     };
 }
 
-fn apply_help_scroll(app: &mut App, delta: i32) {
-    if let Mode::Help { scroll, .. } = &mut app.mode {
-        let next = (*scroll as i32).saturating_add(delta).max(0);
-        *scroll = u16::try_from(next).unwrap_or(u16::MAX);
-    }
-}
-
-fn apply_help_scroll_h(app: &mut App, delta: i32) {
-    if let Mode::Help { h_scroll, .. } = &mut app.mode {
-        let next = (*h_scroll as i32).saturating_add(delta).max(0);
-        *h_scroll = u16::try_from(next).unwrap_or(u16::MAX);
+fn apply_help_scroll(app: &mut App, axis: HelpAxis, delta: HelpScrollDelta) {
+    let Mode::Help { scroll, h_scroll } = &mut app.mode else {
+        return;
+    };
+    let target: &mut u16 = match axis {
+        HelpAxis::Vertical => scroll,
+        HelpAxis::Horizontal => h_scroll,
+    };
+    match delta {
+        HelpScrollDelta::By(n) => {
+            let next = (*target as i32).saturating_add(n).max(0);
+            *target = u16::try_from(next).unwrap_or(u16::MAX);
+        }
+        // Render-time clamping pulls these back to the actual content
+        // bounds, so `u16::MAX` is the cheapest way to say "as far as
+        // it'll go" without re-deriving the content size here.
+        HelpScrollDelta::Top => *target = 0,
+        HelpScrollDelta::Bottom => *target = u16::MAX,
     }
 }
 
