@@ -287,7 +287,7 @@ fn collect_bindings(
     while i < toks.len() {
         let is_intro = matches!(
             toks[i],
-            Token::Word(w) if matches!(w.keyword, Keyword::FROM | Keyword::JOIN)
+            Token::Word(w) if matches!(w.keyword, Keyword::FROM | Keyword::JOIN | Keyword::UPDATE)
         );
         if !is_intro {
             i += 1;
@@ -788,5 +788,22 @@ mod tests {
             .find(|b| b.table == "recent")
             .expect("recent in bindings");
         assert!(recent.is_cte);
+    }
+
+    #[test]
+    fn update_statement_collects_target_table() {
+        let r = classify_at_end("UPDATE users SET ");
+        assert_eq!(r.bindings.len(), 1);
+        assert_eq!(r.bindings[0].table, "users");
+        assert_eq!(r.context, CompletionContext::Column { qualifier: None });
+    }
+
+    #[test]
+    fn update_with_alias_collects_binding() {
+        let stmt = "UPDATE users u SET u.name = ";
+        let r = classify_at_end(stmt);
+        assert_eq!(r.bindings.len(), 1);
+        let u = r.bindings.iter().find(|b| b.table == "users").unwrap();
+        assert_eq!(u.table, "users");
     }
 }
