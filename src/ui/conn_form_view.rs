@@ -123,7 +123,7 @@ fn render_field(
     input.render(input_area, buf);
 }
 
-fn inner_box(area: Rect) -> Option<Rect> {
+pub fn inner_box(area: Rect) -> Option<Rect> {
     let width = area.width.min(70);
     let height = 10.min(area.height);
     if width < 30 || height < 7 {

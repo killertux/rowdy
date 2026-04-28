@@ -15,6 +15,7 @@ use ratatui::style::Style;
 use ratatui::widgets::{Block, Widget};
 
 use crate::app::App;
+use crate::state::layout::OverlayLayout;
 use crate::state::overlay::Overlay;
 use crate::state::results::{ResultBlock, SelectionRect, fit_columns};
 use crate::state::screen::Screen;
@@ -33,8 +34,10 @@ const INLINE_PREVIEW_ROWS: usize = 8;
 
 pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
+    app.layout.reset_for_render();
     paint_background(frame, area, app);
     let (main, bottom_area) = split_vertical(area);
+    app.layout.bottom_bar = Some(bottom_area);
 
     // Help is the only overlay that takes over the full screen. The
     // other overlays (Command, ConfirmRun, Connecting) are bottom-bar
@@ -62,6 +65,7 @@ fn paint_background(frame: &mut Frame, area: Rect, app: &App) {
 fn render_workspace(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Rect) {
     let (left, schema_area) = split_horizontal(main, app.schema.width);
     let (editor_area, inline_area) = split_editor_area(left, latest_result(app).is_some());
+    app.layout.editor = Some(editor_area);
 
     render_immutable_panes(app, frame, schema_area, bottom_area, inline_area);
     frame.render_widget(EditorPane { app }, editor_area);
@@ -112,6 +116,16 @@ fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Re
 
     let selection = view.anchor().map(|anchor| SelectionRect::new(anchor, cur));
 
+    let expanded_layout = results_view::expanded_layout(
+        block,
+        main,
+        new_col_offset,
+        visible_cols,
+        new_row_offset,
+        visible_rows,
+    );
+    app.layout.expanded_result = Some(expanded_layout);
+
     frame.render_widget(
         ExpandedResult {
             block,
@@ -161,6 +175,14 @@ fn render_immutable_panes(
     // Schema panel: clamp scroll first so the selected node stays visible.
     let schema_viewport = schema_area.height.saturating_sub(2) as usize;
     app.schema.clamp_scroll(schema_viewport);
+    let schema_layout = schema_view::layout_for(&app.schema, schema_area);
+    app.layout.schema = Some(schema_layout);
+
+    let inline_layout = match (inline_area, latest_result(app)) {
+        (Some(area), Some(block)) => Some(results_view::inline_layout(block, area)),
+        _ => None,
+    };
+    app.layout.inline_result = inline_layout;
 
     let app: &App = app;
     frame.render_widget(SchemaPane { app }, schema_area);
@@ -197,6 +219,9 @@ fn command_input_area(bottom_area: Rect) -> Rect {
 /// scroll against the actual content size), so it gets the `&mut App`.
 fn render_help(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {
     frame.render_widget(BottomBar::new(app), bottom_area);
+    if let Some(area) = help_view::inner_box(full) {
+        app.layout.overlay = Some(OverlayLayout::Help { area });
+    }
     let App { overlay, theme, .. } = &mut *app;
     if let Some(Overlay::Help { scroll, h_scroll }) = overlay {
         let popover = HelpPopover {
@@ -209,6 +234,26 @@ fn render_help(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) 
 }
 
 fn render_modal(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {
+    // Capture overlay rect before the borrow flips to &App.
+    match &app.screen {
+        Screen::Auth(_) => {
+            if let Some(area) = auth_view::inner_box(full) {
+                app.layout.overlay = Some(OverlayLayout::Auth { area });
+            }
+        }
+        Screen::EditConnection(_) => {
+            if let Some(area) = conn_form_view::inner_box(full) {
+                app.layout.overlay = Some(OverlayLayout::ConnForm { area });
+            }
+        }
+        Screen::ConnectionList(state) => {
+            if let Some(area) = conn_list_view::inner_box(full, state.entries.len()) {
+                app.layout.overlay = Some(OverlayLayout::ConnList { area });
+            }
+        }
+        _ => {}
+    }
+
     let app: &App = app;
     frame.render_widget(BottomBar::new(app), bottom_area);
     match &app.screen {

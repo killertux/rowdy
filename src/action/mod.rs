@@ -19,9 +19,10 @@ use crate::state::command::CommandBuffer;
 use crate::state::conn_form::{ConnFormPostSave, ConnFormState};
 use crate::state::conn_list::ConnListState;
 use crate::state::focus::{Focus, PendingChord};
+use crate::state::layout::DragState;
 use crate::state::overlay::Overlay;
 use crate::state::results::{ResultBlock, ResultCursor, ResultId, ResultViewMode, SelectionRect};
-use crate::state::schema::{ExpandOutcome, SchemaPanel};
+use crate::state::schema::{ExpandOutcome, NodeId, SchemaPanel};
 use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
 use crate::ui::theme::{Theme, ThemeKind};
@@ -87,6 +88,41 @@ pub enum Action {
     /// User-facing `:reload`. Drops the autocomplete schema cache and
     /// re-primes from the active connection.
     ReloadSchemaCache,
+    /// Mouse-driven action with a panel-specific target. See [`MouseTarget`].
+    Mouse(MouseTarget),
+}
+
+/// What a click or scroll-wheel was aimed at. Translated from
+/// `crossterm::MouseEvent` by `event::translate_mouse`; consumed by
+/// `apply_mouse` which routes back into the existing per-panel state
+/// mutations.
+#[derive(Debug)]
+pub enum MouseTarget {
+    /// Click landed on the editor pane. The raw event is forwarded to edtui
+    /// (which handles its own mouse selection / cursor placement).
+    Editor(CtEvent),
+    /// Click on a row in the schema tree.
+    SchemaRow(NodeId),
+    /// Toggle (or first-expand) the given schema node.
+    SchemaToggle(NodeId),
+    /// Scroll-wheel over the schema panel; positive scrolls down.
+    SchemaScroll(i32),
+    /// Mouse-down began a drag at this cell — anchor for the visual
+    /// rectangle. A click that doesn't move (DragEnd with anchor==cursor)
+    /// is treated as plain "select this cell" by `apply_mouse`.
+    ResultDragStart { row: usize, col: usize },
+    /// Drag-extend the current selection to this cell.
+    ResultDragTo { row: usize, col: usize },
+    /// Mouse-up released the drag.
+    ResultDragEnd,
+    /// Scroll-wheel over the expanded result body; positive scrolls down.
+    /// Moves the viewport, not the cursor.
+    ResultScroll(i32),
+    /// Click on a cell in the inline preview — opens the expanded view
+    /// pre-positioned at that cell.
+    InlineResultJump { row: usize, col: usize },
+    /// Click outside the active overlay; dismiss it.
+    OverlayDismiss,
 }
 
 /// Which axis of the help popover viewport to move.
@@ -198,6 +234,31 @@ pub enum ResultNavAction {
     Bottom,
 }
 
+/// Snap the schema selection to a specific node and toggle/expand it.
+/// `select` only moves the selection; `toggle` does both. Helpers exist
+/// in the apply layer so the mouse-click and chevron-click paths share a
+/// canonical implementation.
+fn schema_select(app: &mut App, id: NodeId) {
+    app.schema.selected = Some(id);
+}
+
+fn schema_toggle_at(app: &mut App, id: NodeId) {
+    app.schema.selected = Some(id);
+    let outcome = app.schema.toggle_selected();
+    maybe_dispatch(app, outcome);
+}
+
+fn schema_scroll(app: &mut App, delta: i32) {
+    let total = app.schema.visible_rows().len();
+    if total == 0 {
+        return;
+    }
+    let max_offset = total.saturating_sub(1);
+    let next = (app.schema.scroll_offset as i32).saturating_add(delta);
+    let next = next.clamp(0, max_offset as i32) as usize;
+    app.schema.scroll_offset = next;
+}
+
 pub fn apply(app: &mut App, action: Action) {
     match action {
         Action::Quit => app.should_quit = true,
@@ -248,7 +309,171 @@ pub fn apply(app: &mut App, action: Action) {
         Action::FormatEditor(scope) => format_editor(app, scope),
         Action::Completion(c) => completion::apply(app, c),
         Action::ReloadSchemaCache => reload_schema_cache(app),
+        Action::Mouse(target) => apply_mouse(app, target),
     }
+}
+
+fn apply_mouse(app: &mut App, target: MouseTarget) {
+    match target {
+        MouseTarget::Editor(ev) => {
+            // Click on the editor: focus it, then forward the raw event so
+            // edtui can place the cursor / start its own selection.
+            app.focus = Focus::Editor;
+            apply(app, Action::EditorEvent(ev));
+        }
+        MouseTarget::SchemaRow(id) => {
+            app.focus = Focus::Schema;
+            schema_select(app, id);
+        }
+        MouseTarget::SchemaToggle(id) => {
+            app.focus = Focus::Schema;
+            schema_toggle_at(app, id);
+        }
+        MouseTarget::SchemaScroll(delta) => {
+            schema_scroll(app, delta);
+        }
+        MouseTarget::ResultDragStart { row, col } => result_drag_start(app, row, col),
+        MouseTarget::ResultDragTo { row, col } => result_drag_to(app, row, col),
+        MouseTarget::ResultDragEnd => result_drag_end(app),
+        MouseTarget::ResultScroll(delta) => result_scroll(app, delta),
+        MouseTarget::InlineResultJump { row, col } => inline_result_jump(app, row, col),
+        MouseTarget::OverlayDismiss => overlay_dismiss(app),
+    }
+}
+
+fn overlay_dismiss(app: &mut App) {
+    match &app.overlay {
+        Some(Overlay::Help { .. }) => app.overlay = None,
+        Some(Overlay::Command(_)) => app.overlay = None,
+        // Other overlays (ConfirmRun, Connecting) intentionally don't dismiss
+        // on outside-click — ConfirmRun needs an explicit yes/no to avoid
+        // accidental "yes I meant to run that" via stray clicks; Connecting
+        // is in-flight and dismissing it wouldn't actually cancel the work.
+        _ => {}
+    }
+    if app.overlay.is_some() {
+        return;
+    }
+    // Modal screens (ConnList, EditConnection, Auth) are full-screen;
+    // outside-click closes them only when there's a sane place to return to.
+    if matches!(app.screen, Screen::ConnectionList(_)) {
+        app.screen = Screen::Normal;
+    }
+}
+
+fn result_drag_start(app: &mut App, row: usize, col: usize) {
+    let Screen::ResultExpanded { id, .. } = &app.screen else {
+        return;
+    };
+    let id = *id;
+    let Some(block) = app.results.iter().find(|b| b.id == id) else {
+        return;
+    };
+    let max_rows = block.rows().len();
+    let max_cols = block.columns.len();
+    if max_rows == 0 || max_cols == 0 {
+        return;
+    }
+    let Screen::ResultExpanded { cursor, view, .. } = &mut app.screen else {
+        return;
+    };
+    if matches!(view, ResultViewMode::YankFormat { .. }) {
+        return;
+    }
+    let r = row.min(max_rows - 1);
+    let c = col.min(max_cols - 1);
+    cursor.jump_to(r, c);
+    // Anchor visual selection at the click cell; subsequent Drag events
+    // extend `cursor` while `anchor` stays put.
+    *view = ResultViewMode::Visual { anchor: *cursor };
+    app.layout.drag = Some(DragState::ResultSelect);
+}
+
+fn result_drag_to(app: &mut App, row: usize, col: usize) {
+    if !matches!(app.layout.drag, Some(DragState::ResultSelect)) {
+        return;
+    }
+    let Screen::ResultExpanded { id, .. } = &app.screen else {
+        return;
+    };
+    let id = *id;
+    let Some(block) = app.results.iter().find(|b| b.id == id) else {
+        return;
+    };
+    let max_rows = block.rows().len();
+    let max_cols = block.columns.len();
+    if max_rows == 0 || max_cols == 0 {
+        return;
+    }
+    let Screen::ResultExpanded { cursor, view, .. } = &mut app.screen else {
+        return;
+    };
+    if matches!(view, ResultViewMode::YankFormat { .. }) {
+        return;
+    }
+    let r = row.min(max_rows - 1);
+    let c = col.min(max_cols - 1);
+    cursor.jump_to(r, c);
+}
+
+fn result_drag_end(app: &mut App) {
+    if !matches!(app.layout.drag, Some(DragState::ResultSelect)) {
+        return;
+    }
+    app.layout.drag = None;
+    // If anchor == cursor (no actual drag), drop visual mode back to
+    // Normal — the user just clicked a single cell.
+    let Screen::ResultExpanded { cursor, view, .. } = &mut app.screen else {
+        return;
+    };
+    if let ResultViewMode::Visual { anchor } = *view
+        && anchor.row == cursor.row
+        && anchor.col == cursor.col
+    {
+        *view = ResultViewMode::Normal;
+    }
+}
+
+fn result_scroll(app: &mut App, delta: i32) {
+    let Screen::ResultExpanded { id, row_offset, .. } = &mut app.screen else {
+        return;
+    };
+    let id = *id;
+    let Some(block) = app.results.iter().find(|b| b.id == id) else {
+        return;
+    };
+    let total = block.rows().len();
+    if total == 0 {
+        return;
+    }
+    let max_offset = total.saturating_sub(1) as i32;
+    let next = (*row_offset as i32)
+        .saturating_add(delta)
+        .clamp(0, max_offset);
+    *row_offset = next as usize;
+}
+
+fn inline_result_jump(app: &mut App, row: usize, col: usize) {
+    let Some(block) = app.results.last() else {
+        return;
+    };
+    let max_rows = block.rows().len();
+    let max_cols = block.columns.len();
+    if max_rows == 0 || max_cols == 0 {
+        return;
+    }
+    let id = block.id;
+    let r = row.min(max_rows - 1);
+    let c = col.min(max_cols - 1);
+    let mut cursor = ResultCursor::default();
+    cursor.jump_to(r, c);
+    app.screen = Screen::ResultExpanded {
+        id,
+        cursor,
+        col_offset: 0,
+        row_offset: 0,
+        view: ResultViewMode::Normal,
+    };
 }
 
 fn reload_schema_cache(app: &mut App) {
