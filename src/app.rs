@@ -3,17 +3,23 @@ use std::sync::{Arc, RwLock};
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::worker::WorkerEvent;
+
 use crate::autocomplete::SchemaCache;
 use crate::config::ConfigStore;
 use crate::connections::ConnectionStore;
 use crate::datasource::DriverKind;
+use crate::llm::keystore::LlmKeyStore;
+use crate::llm::worker::PendingChatTool;
 use crate::log::Logger;
+use crate::state::chat::ChatPanel;
 use crate::state::completion::CompletionState;
 use crate::state::editor::EditorPanel;
 use crate::state::focus::{Focus, PendingChord};
 use crate::state::layout::LayoutCache;
 use crate::state::overlay::Overlay;
 use crate::state::results::ResultBlock;
+use crate::state::right_panel::RightPanelMode;
 use crate::state::schema::SchemaPanel;
 use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
@@ -33,6 +39,10 @@ pub struct InFlightQuery {
 pub struct App {
     pub editor: EditorPanel,
     pub schema: SchemaPanel,
+    pub chat: ChatPanel,
+    /// Which panel the right side of the workspace shows. Toggles between
+    /// schema and chat; defaults to schema so existing UX is preserved.
+    pub right_panel: RightPanelMode,
     pub status: QueryStatus,
     pub results: Vec<ResultBlock>,
     pub focus: Focus,
@@ -50,6 +60,11 @@ pub struct App {
     /// the right status to the shell.
     pub exit_code: i32,
     pub cmd_tx: UnboundedSender<WorkerCommand>,
+    /// Sink for `WorkerEvent`s from short-lived tokio tasks (currently
+    /// the LLM streaming task). The long-running `worker::run` keeps its
+    /// own clone; this one lets the action layer spawn ad-hoc tasks
+    /// that funnel events into the same loop.
+    pub evt_tx: UnboundedSender<WorkerEvent>,
     pub requests: RequestCounter,
     /// The currently in-flight query, if any. The SQL travels alongside so
     /// `on_query_done` can attach it to the resulting `ResultBlock` (used by
@@ -60,6 +75,10 @@ pub struct App {
     /// `Some` once the store is unlocked (or known plaintext). Until then
     /// connection management actions short-circuit.
     pub connection_store: Option<ConnectionStore>,
+    /// Parallel keystore for LLM provider API keys. Populated together with
+    /// `connection_store` (same `DerivedKey`, same plaintext-vs-encrypted
+    /// mode), so a single password unlocks both.
+    pub llm_keystore: Option<LlmKeyStore>,
     /// Name of the currently active connection (set on `Connected`). `None`
     /// while the worker has no datasource.
     pub active_connection: Option<String>,
@@ -94,11 +113,17 @@ pub struct App {
     /// side-effect of `ui::render`; consumed by the next `CtEvent::Mouse`
     /// to map (column, row) back to the panel that was clicked.
     pub layout: LayoutCache,
+    /// Tool calls from the LLM stream that we paused while waiting for an
+    /// introspection round-trip (auto-expand of an unloaded schema node).
+    /// Drained by `action::chat::complete_pending_for_target` when the
+    /// matching `WorkerEvent::SchemaLoaded` / `SchemaFailed` lands.
+    pub pending_chat_tools: Vec<PendingChatTool>,
 }
 
 impl App {
     pub fn new(
         cmd_tx: UnboundedSender<WorkerCommand>,
+        evt_tx: UnboundedSender<WorkerEvent>,
         config: ConfigStore,
         log: Logger,
         data_dir: PathBuf,
@@ -110,6 +135,8 @@ impl App {
         Self {
             editor: EditorPanel::new(),
             schema,
+            chat: ChatPanel::new(),
+            right_panel: RightPanelMode::default(),
             status: QueryStatus::Idle,
             results: Vec::new(),
             focus: Focus::Editor,
@@ -120,11 +147,13 @@ impl App {
             should_quit: false,
             exit_code: 0,
             cmd_tx,
+            evt_tx,
             requests: RequestCounter::new(),
             in_flight_query: None,
             config,
             log,
             connection_store: None,
+            llm_keystore: None,
             active_connection: None,
             active_dialect: None,
             data_dir,
@@ -134,6 +163,7 @@ impl App {
             completion: None,
             completion_snoozed_at: None,
             layout: LayoutCache::default(),
+            pending_chat_tools: Vec::new(),
         }
     }
 }

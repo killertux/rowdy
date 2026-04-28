@@ -281,6 +281,72 @@ const HELP_SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
+        title: "LLM chat (right panel)",
+        entries: &[
+            HelpEntry {
+                keys: ":chat",
+                desc: "Toggle right panel between schema and chat (focus follows)",
+            },
+            HelpEntry {
+                keys: ":chat clear",
+                desc: "Wipe the message log",
+            },
+            HelpEntry {
+                keys: ":chat settings",
+                desc: "Configure provider, model, and API key",
+            },
+            HelpEntry {
+                keys: "Enter",
+                desc: "Submit composer · Shift+Enter inserts a newline",
+            },
+            HelpEntry {
+                keys: "Ctrl+U",
+                desc: "Clear the composer (message log untouched)",
+            },
+            HelpEntry {
+                keys: "PgUp / PgDn",
+                desc: "Scroll the message log by a page",
+            },
+            HelpEntry {
+                keys: "Ctrl+↑ / Ctrl+↓",
+                desc: "Scroll the message log line by line",
+            },
+            HelpEntry {
+                keys: "Ctrl+Home / Ctrl+End",
+                desc: "Jump to the top / bottom of the log (End re-engages auto-follow)",
+            },
+            HelpEntry {
+                keys: "Esc",
+                desc: "Bounce back to the schema panel",
+            },
+        ],
+    },
+    HelpSection {
+        title: "Form fields (any modal: settings, conn-form, auth, : prompt)",
+        entries: &[
+            HelpEntry {
+                keys: "Tab / Shift+Tab",
+                desc: "Move between fields",
+            },
+            HelpEntry {
+                keys: "Ctrl+V / Ctrl+C / Ctrl+X",
+                desc: "Paste / copy / cut (system clipboard)",
+            },
+            HelpEntry {
+                keys: "Ctrl+U",
+                desc: "Clear the focused field",
+            },
+            HelpEntry {
+                keys: "Enter / Esc",
+                desc: "Submit / cancel",
+            },
+            HelpEntry {
+                keys: "← → or [ ]",
+                desc: ":chat settings — change provider (only on Backend field)",
+            },
+        ],
+    },
+    HelpSection {
         title: "Expanded result view",
         entries: &[
             HelpEntry {

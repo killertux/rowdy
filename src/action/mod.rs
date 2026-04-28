@@ -5,13 +5,17 @@ use ratatui::crossterm::event::Event as CtEvent;
 use ratatui_textarea::{Input, TextArea};
 
 mod auth;
+mod chat;
 mod completion;
 mod conn_form;
 mod conn_list;
+mod llm_settings;
 
 use crate::app::{App, MAX_SCHEMA_WIDTH, MIN_SCHEMA_WIDTH};
 use crate::clipboard;
-use crate::command::{self, ConnSubcommand, FormatScope, ParsedTarget, ThemeChoice};
+use crate::command::{
+    self, ChatSubcommand, ConnSubcommand, FormatScope, ParsedTarget, ThemeChoice,
+};
 use crate::datasource::{Cell, Column, QueryResult};
 use crate::export::{self, ExportFormat};
 use crate::session;
@@ -90,6 +94,13 @@ pub enum Action {
     ReloadSchemaCache,
     /// Mouse-driven action with a panel-specific target. See [`MouseTarget`].
     Mouse(MouseTarget),
+    /// Per-keystroke or scroll input directed at the chat panel.
+    Chat(ChatAction),
+    /// Flip the right panel between schema and chat. Also moves focus into
+    /// the new right pane so the user can immediately type / navigate.
+    ToggleRightPanel,
+    /// `:chat settings` modal interactions.
+    LlmSettings(LlmSettingsAction),
 }
 
 /// What a click or scroll-wheel was aimed at. Translated from
@@ -167,6 +178,8 @@ pub enum AuthAction {
     Paste(Option<String>),
     Copy,
     Cut,
+    /// Wipe the password field (`Ctrl+U`).
+    ClearField,
     Submit,
     Cancel,
 }
@@ -180,6 +193,8 @@ pub enum ConnFormAction {
     Copy,
     Cut,
     ToggleFocus,
+    /// Wipe the focused field (`Ctrl+U`).
+    ClearField,
     Submit,
     Cancel,
 }
@@ -200,6 +215,53 @@ pub enum ConnListAction {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // `Cancel` lights up in phase 3 once streaming exists.
+pub enum ChatAction {
+    /// Composer keystroke. Routed straight into the `TextArea`.
+    Input(Input),
+    /// `None` reads the system clipboard; `Some(text)` carries the
+    /// terminal's bracketed-paste payload.
+    Paste(Option<String>),
+    Copy,
+    Cut,
+    /// Enter (no modifiers) — submits the composer's contents as a user
+    /// message. Phase 2 stub appends a placeholder assistant reply; phase
+    /// 3 dispatches a real LLM turn.
+    Submit,
+    /// Cancel an in-flight stream (no-op in phase 2; meaningful from
+    /// phase 3 onward).
+    Cancel,
+    /// Wipe the message log and reset the composer.
+    Clear,
+    /// Wipe just the composer (`Ctrl+U`), leaving the message log intact.
+    ClearComposer,
+    ScrollUp(u16),
+    ScrollDown(u16),
+    /// Jump the message log to the top.
+    ScrollToTop,
+    /// Jump to the bottom and re-engage auto-follow.
+    ScrollToBottom,
+}
+
+#[derive(Debug)]
+pub enum LlmSettingsAction {
+    Input(Input),
+    Paste(Option<String>),
+    Copy,
+    Cut,
+    /// Move backend selection by `±1` (left/right arrows or `[`/`]`).
+    CycleBackend(i32),
+    /// Tab forward through the four fields.
+    CycleField,
+    /// Shift+Tab backward through the four fields.
+    CycleFieldBack,
+    /// Wipe the focused field (`Ctrl+U`). No-op when focus is on Backend.
+    ClearField,
+    Submit,
+    Cancel,
+}
+
+#[derive(Debug)]
 pub enum CommandAction {
     Input(Input),
     /// `None` reads the system clipboard. `Some(text)` carries text supplied
@@ -207,6 +269,8 @@ pub enum CommandAction {
     Paste(Option<String>),
     Copy,
     Cut,
+    /// Wipe the command-bar input (`Ctrl+U`).
+    ClearField,
     Submit,
     Cancel,
 }
@@ -310,6 +374,9 @@ pub fn apply(app: &mut App, action: Action) {
         Action::Completion(c) => completion::apply(app, c),
         Action::ReloadSchemaCache => reload_schema_cache(app),
         Action::Mouse(target) => apply_mouse(app, target),
+        Action::Chat(a) => chat::apply(app, a),
+        Action::ToggleRightPanel => chat::toggle_right_panel(app),
+        Action::LlmSettings(a) => llm_settings::apply(app, a),
     }
 }
 
@@ -528,6 +595,9 @@ fn apply_command(app: &mut App, action: CommandAction) {
         CommandAction::Paste(text) => paste_into(&mut buf.input, &app.log, text),
         CommandAction::Copy => copy_from(&mut buf.input, &app.log),
         CommandAction::Cut => cut_from(&mut buf.input, &app.log),
+        CommandAction::ClearField => {
+            buf.input.clear();
+        }
         CommandAction::Cancel => app.overlay = None,
         CommandAction::Submit => submit_command(app),
     }
@@ -577,6 +647,15 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         C::Format(scope) => apply(app, Action::FormatEditor(scope)),
         C::Reload => apply(app, Action::ReloadSchemaCache),
         C::Conn(sub) => dispatch_conn(app, sub),
+        C::Chat(sub) => dispatch_chat(app, sub),
+    }
+}
+
+fn dispatch_chat(app: &mut App, sub: ChatSubcommand) {
+    match sub {
+        ChatSubcommand::Toggle => apply(app, Action::ToggleRightPanel),
+        ChatSubcommand::Clear => apply(app, Action::Chat(ChatAction::Clear)),
+        ChatSubcommand::Settings => llm_settings::open(app),
     }
 }
 
@@ -938,6 +1017,13 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
         WorkerEvent::CompletionCacheFailed { stage, error } => {
             on_cache_failed(app, stage, error.to_string())
         }
+        WorkerEvent::ChatDelta(delta) => chat::on_delta(app, delta),
+        WorkerEvent::ChatToolRequest {
+            call_id,
+            name,
+            args_json,
+            reply,
+        } => chat::on_tool_request(app, call_id, name, args_json, reply),
     }
 }
 
@@ -979,6 +1065,7 @@ fn on_connected(app: &mut App, name: String) {
     app.schema = SchemaPanel::new(app.schema.width);
     app.results.clear();
     load_session(app, &name);
+    load_chat_session(app, &name);
     app.schema.begin_root_load();
     let _ = app.cmd_tx.send(WorkerCommand::Introspect {
         target: IntrospectTarget::Catalogs,
@@ -1043,18 +1130,81 @@ fn on_schema_loaded(
     payload: crate::worker::SchemaPayload,
 ) {
     use crate::worker::SchemaPayload;
+    if let Ok(mut guard) = app.schema_cache.write() {
+        cache_introspect_payload(&mut guard, &target, &payload);
+    }
     match payload {
         SchemaPayload::Catalogs(catalogs) => app.schema.populate_catalogs(catalogs),
         other => app.schema.populate(&target, other),
     }
+    chat::complete_pending_for_target(app, &target, None);
 }
 
 fn on_schema_failed(app: &mut App, target: IntrospectTarget, error: String) {
     if matches!(target, IntrospectTarget::Catalogs) {
-        app.schema.fail_root_load(error);
-        return;
+        app.schema.fail_root_load(error.clone());
+    } else {
+        app.schema.record_failure(&target, error.clone());
     }
-    app.schema.record_failure(&target, error);
+    chat::complete_pending_for_target(app, &target, Some(error));
+}
+
+/// Mirror an introspection result into the autocomplete `SchemaCache`.
+/// `worker::prime_cache` and `worker::load_columns` already do this for
+/// the cache-prime / lazy-column paths; the chat auto-expand path
+/// reaches the cache through here instead so a schema tool that
+/// triggered the introspect can re-run against fresh data.
+fn cache_introspect_payload(
+    cache: &mut crate::autocomplete::SchemaCache,
+    target: &IntrospectTarget,
+    payload: &crate::worker::SchemaPayload,
+) {
+    use crate::autocomplete::cache::{CachedColumn, CachedTable};
+    use crate::worker::SchemaPayload;
+    match (target, payload) {
+        (IntrospectTarget::Catalogs, SchemaPayload::Catalogs(catalogs)) => {
+            cache.catalogs = catalogs.iter().map(|c| c.name.clone()).collect();
+        }
+        (IntrospectTarget::Schemas { catalog }, SchemaPayload::Schemas(schemas)) => {
+            cache.schemas.insert(
+                catalog.clone(),
+                schemas.iter().map(|s| s.name.clone()).collect(),
+            );
+        }
+        (IntrospectTarget::Tables { catalog, schema }, SchemaPayload::Tables(tables)) => {
+            let cached: Vec<CachedTable> = tables
+                .iter()
+                .map(|t| CachedTable {
+                    name: t.name.clone(),
+                    kind: t.kind,
+                })
+                .collect();
+            cache
+                .tables
+                .insert((catalog.clone(), schema.clone()), cached);
+        }
+        (
+            IntrospectTarget::Columns {
+                catalog,
+                schema,
+                table,
+            },
+            SchemaPayload::Columns(columns),
+        ) => {
+            let cached: Vec<CachedColumn> = columns
+                .iter()
+                .map(|c| CachedColumn {
+                    name: c.name.clone(),
+                    type_name: c.type_name.clone(),
+                })
+                .collect();
+            cache
+                .columns
+                .insert((catalog.clone(), schema.clone(), table.clone()), cached);
+        }
+        // Indices aren't in the cache and aren't surfaced as a tool.
+        _ => {}
+    }
 }
 
 fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResult) {
@@ -1704,6 +1854,35 @@ fn load_session(app: &mut App, name: &str) {
     }
     app.editor_dirty = false;
     app.pending_save_at = None;
+}
+
+/// Load the persisted chat-session messages for `name` into
+/// `app.chat.messages`. Missing file → empty history. Failures are
+/// surfaced as a warning + empty history rather than a hard error;
+/// chat is non-essential to the rest of the UI.
+fn load_chat_session(app: &mut App, name: &str) {
+    let path = crate::chat_session::path_for(&app.data_dir, name);
+    match crate::chat_session::load(&path) {
+        Ok(messages) => {
+            let count = messages.len();
+            app.chat.messages = messages;
+            // Land at the bottom of the loaded history — that's where
+            // the conversation left off, and what the user expects when
+            // resuming a session.
+            app.chat.scroll_to_bottom();
+            app.chat.streaming = false;
+            app.chat.error = None;
+            app.log.info(
+                "chat",
+                format!("loaded {count} message(s) from {}", path.display()),
+            );
+        }
+        Err(err) => {
+            app.log
+                .warn("chat", format!("load {} failed: {err}", path.display()));
+            app.chat.messages.clear();
+        }
+    }
 }
 
 #[cfg(test)]

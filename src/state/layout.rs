@@ -20,6 +20,7 @@ use crate::state::schema::NodeId;
 #[derive(Debug, Default)]
 pub struct LayoutCache {
     pub schema: Option<SchemaLayout>,
+    pub chat: Option<ChatLayout>,
     pub editor: Option<Rect>,
     pub inline_result: Option<TableLayout>,
     pub expanded_result: Option<TableLayout>,
@@ -28,6 +29,19 @@ pub struct LayoutCache {
     /// Active drag, if any. Set on `MouseDown` over a draggable surface,
     /// cleared on `MouseUp` (or when focus shifts via something else).
     pub drag: Option<DragState>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // log_area / composer_area are used in phase 3+ for click routing.
+pub struct ChatLayout {
+    /// Outer rect (including the border).
+    pub area: Rect,
+    /// Where messages paint. Mouse-wheel events inside this rect scroll
+    /// the log; clicks are reserved for future "click message to copy".
+    pub log_area: Rect,
+    /// Where the composer's TextArea paints. Clicks here focus the
+    /// composer (i.e. flip `app.focus` to `Chat`).
+    pub composer_area: Rect,
 }
 
 #[derive(Debug)]
@@ -106,6 +120,8 @@ pub enum OverlayLayout {
     ConnForm { area: Rect },
     /// Auth prompt (password).
     Auth { area: Rect },
+    /// LLM settings modal.
+    LlmSettings { area: Rect },
 }
 
 impl OverlayLayout {
@@ -114,7 +130,8 @@ impl OverlayLayout {
             Self::Help { area }
             | Self::ConnList { area }
             | Self::ConnForm { area }
-            | Self::Auth { area } => *area,
+            | Self::Auth { area }
+            | Self::LlmSettings { area } => *area,
         }
     }
 }
@@ -134,6 +151,7 @@ impl LayoutCache {
     /// handler, not by the renderer.
     pub fn reset_for_render(&mut self) {
         self.schema = None;
+        self.chat = None;
         self.editor = None;
         self.inline_result = None;
         self.expanded_result = None;

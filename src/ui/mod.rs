@@ -1,10 +1,12 @@
 pub mod auth_view;
 pub mod autocomplete_popover;
 pub mod bottom_bar;
+pub mod chat_view;
 pub mod conn_form_view;
 pub mod conn_list_view;
 pub mod editor_view;
 pub mod help_view;
+pub mod llm_settings_view;
 pub mod results_view;
 pub mod schema_view;
 pub mod theme;
@@ -18,14 +20,17 @@ use crate::app::App;
 use crate::state::layout::OverlayLayout;
 use crate::state::overlay::Overlay;
 use crate::state::results::{ResultBlock, SelectionRect, fit_columns};
+use crate::state::right_panel::RightPanelMode;
 use crate::state::screen::Screen;
 use auth_view::AuthPrompt;
 use autocomplete_popover::CompletionPopover;
 use bottom_bar::{BottomBar, COMMAND_PREFIX};
+use chat_view::ChatPane;
 use conn_form_view::ConnForm;
 use conn_list_view::ConnList;
 use editor_view::EditorPane;
 use help_view::HelpPopover;
+use llm_settings_view::LlmSettingsForm;
 use results_view::{ExpandedResult, InlineResult};
 use schema_view::SchemaPane;
 
@@ -46,6 +51,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         render_help(app, frame, area, bottom_area);
         return;
     }
+    if matches!(&app.overlay, Some(Overlay::LlmSettings(_))) {
+        render_llm_settings(app, frame, area, bottom_area);
+        return;
+    }
 
     match &app.screen {
         Screen::Auth(_) | Screen::EditConnection(_) | Screen::ConnectionList(_) => {
@@ -56,6 +65,21 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
 }
 
+fn render_llm_settings(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {
+    if let Some(area) = llm_settings_view::inner_box(full) {
+        app.layout.overlay = Some(OverlayLayout::LlmSettings { area });
+    }
+    let app: &App = app;
+    frame.render_widget(BottomBar::new(app), bottom_area);
+    if let Some(Overlay::LlmSettings(state)) = &app.overlay {
+        let form = LlmSettingsForm {
+            state,
+            theme: &app.theme,
+        };
+        frame.render_widget(form, full);
+    }
+}
+
 fn paint_background(frame: &mut Frame, area: Rect, app: &App) {
     Block::default()
         .style(Style::default().bg(app.theme.bg).fg(app.theme.fg))
@@ -63,11 +87,11 @@ fn paint_background(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_workspace(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Rect) {
-    let (left, schema_area) = split_horizontal(main, app.schema.width);
+    let (left, right_area) = split_horizontal(main, app.schema.width);
     let (editor_area, inline_area) = split_editor_area(left, latest_result(app).is_some());
     app.layout.editor = Some(editor_area);
 
-    render_immutable_panes(app, frame, schema_area, bottom_area, inline_area);
+    render_immutable_panes(app, frame, right_area, bottom_area, inline_area);
     frame.render_widget(EditorPane { app }, editor_area);
 
     // After the editor renders, edtui has populated `cursor_screen_position()`;
@@ -168,15 +192,33 @@ fn clamp_offset(prev: usize, cursor: usize, viewport: usize, total: usize) -> us
 fn render_immutable_panes(
     app: &mut App,
     frame: &mut Frame,
-    schema_area: Rect,
+    right_area: Rect,
     bottom_area: Rect,
     inline_area: Option<Rect>,
 ) {
-    // Schema panel: clamp scroll first so the selected node stays visible.
-    let schema_viewport = schema_area.height.saturating_sub(2) as usize;
-    app.schema.clamp_scroll(schema_viewport);
-    let schema_layout = schema_view::layout_for(&app.schema, schema_area);
-    app.layout.schema = Some(schema_layout);
+    // Right pane layout depends on which panel is active. Both populate
+    // their respective layout-cache slot so the mouse handler can
+    // hit-test against whichever is painted.
+    match app.right_panel {
+        RightPanelMode::Schema => {
+            // Schema panel: clamp scroll first so the selected node stays visible.
+            let schema_viewport = right_area.height.saturating_sub(2) as usize;
+            app.schema.clamp_scroll(schema_viewport);
+            let schema_layout = schema_view::layout_for(&app.schema, right_area);
+            app.layout.schema = Some(schema_layout);
+        }
+        RightPanelMode::Chat => {
+            let chat_layout = chat_view::layout_for(&app.chat, right_area);
+            // Clamp the chat scroll against actual content+viewport
+            // before we hand &App to ChatPane. Mirrors the schema
+            // panel's pattern so the renderer itself stays read-only.
+            let log_w = chat_layout.log_area.width;
+            let log_h = chat_layout.log_area.height;
+            let content_h = app.chat.content_height(log_w);
+            app.chat.clamp_scroll(content_h, log_h);
+            app.layout.chat = Some(chat_layout);
+        }
+    }
 
     let inline_layout = match (inline_area, latest_result(app)) {
         (Some(area), Some(block)) => Some(results_view::inline_layout(block, area)),
@@ -185,7 +227,10 @@ fn render_immutable_panes(
     app.layout.inline_result = inline_layout;
 
     let app: &App = app;
-    frame.render_widget(SchemaPane { app }, schema_area);
+    match app.right_panel {
+        RightPanelMode::Schema => frame.render_widget(SchemaPane { app }, right_area),
+        RightPanelMode::Chat => frame.render_widget(ChatPane { app }, right_area),
+    }
     if let (Some(area), Some(block)) = (inline_area, latest_result(app)) {
         frame.render_widget(
             InlineResult {

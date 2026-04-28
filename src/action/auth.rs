@@ -8,6 +8,7 @@
 use crate::action::{AuthAction, paste_into};
 use crate::app::App;
 use crate::connections::{self, ConnectionStore};
+use crate::llm::keystore::LlmKeyStore;
 use crate::state::auth::AuthKind;
 use crate::state::conn_form::ConnFormState;
 use crate::state::conn_list::ConnListState;
@@ -25,6 +26,7 @@ pub fn apply(app: &mut App, action: AuthAction) {
         // Copying a masked password buffer would defeat the masking;
         // ignore copy/cut here.
         AuthAction::Copy | AuthAction::Cut => {}
+        AuthAction::ClearField => state.clear_input(),
         AuthAction::Cancel => app.should_quit = true,
         AuthAction::Submit => submit(app),
     }
@@ -40,9 +42,9 @@ fn submit(app: &mut App) {
 
     match kind {
         AuthKind::FirstSetup => {
-            let store = if attempt.is_empty() {
+            let (conn_store, llm_keystore) = if attempt.is_empty() {
                 app.log.info("auth", "plaintext store chosen");
-                ConnectionStore::plaintext()
+                (ConnectionStore::plaintext(), LlmKeyStore::plaintext())
             } else {
                 match connections::initialise_crypto(&attempt) {
                     Ok((block, key)) => {
@@ -51,7 +53,10 @@ fn submit(app: &mut App) {
                             return;
                         }
                         app.log.info("auth", "encrypted store initialised");
-                        ConnectionStore::encrypted(key)
+                        (
+                            ConnectionStore::encrypted(key.clone()),
+                            LlmKeyStore::encrypted(key),
+                        )
                     }
                     Err(err) => {
                         set_error(app, format!("crypto setup failed: {err}"));
@@ -59,12 +64,14 @@ fn submit(app: &mut App) {
                     }
                 }
             };
-            app.connection_store = Some(store);
+            app.connection_store = Some(conn_store);
+            app.llm_keystore = Some(llm_keystore);
             transition_post_auth(app);
         }
         AuthKind::Unlock { block } => match connections::unlock(&attempt, &block) {
             Ok(key) => {
-                app.connection_store = Some(ConnectionStore::encrypted(key));
+                app.connection_store = Some(ConnectionStore::encrypted(key.clone()));
+                app.llm_keystore = Some(LlmKeyStore::encrypted(key));
                 app.log.info("auth", "store unlocked");
                 transition_post_auth(app);
             }

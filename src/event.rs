@@ -6,16 +6,19 @@ use ratatui::crossterm::event::{
 use ratatui_textarea::Input;
 
 use crate::action::{
-    Action, AuthAction, CommandAction, CompletionAction, ConnFormAction, ConnListAction, HelpAxis,
-    HelpScrollDelta, MouseTarget, ResultNavAction, SchemaAction,
+    Action, AuthAction, ChatAction, CommandAction, CompletionAction, ConnFormAction,
+    ConnListAction, HelpAxis, HelpScrollDelta, LlmSettingsAction, MouseTarget, ResultNavAction,
+    SchemaAction,
 };
 use crate::app::App;
 use crate::command::FormatScope;
 use crate::export::ExportFormat;
 use crate::state::focus::{Focus, PendingChord};
 use crate::state::layout::{DragState, rect_contains};
+use crate::state::llm_settings::{LlmSettingsField, LlmSettingsState};
 use crate::state::overlay::Overlay;
 use crate::state::results::ResultViewMode;
+use crate::state::right_panel::RightPanelMode;
 use crate::state::schema::NodeId;
 use crate::state::screen::Screen;
 
@@ -41,13 +44,23 @@ fn translate_paste(app: &App, event: CtEvent) -> Option<Action> {
     let text = text.clone();
     // Overlays preempt paste routing — `:` command bar takes the
     // bracketed-paste payload before the underlying screen sees it.
-    if let Some(Overlay::Command(_)) = &app.overlay {
-        return Some(Action::Command(CommandAction::Paste(Some(text))));
+    if let Some(overlay) = &app.overlay {
+        return match overlay {
+            Overlay::Command(_) => Some(Action::Command(CommandAction::Paste(Some(text)))),
+            Overlay::LlmSettings(_) => {
+                Some(Action::LlmSettings(LlmSettingsAction::Paste(Some(text))))
+            }
+            // Help / ConfirmRun / Connecting don't take text input.
+            _ => None,
+        };
     }
     match &app.screen {
         Screen::Auth(_) => Some(Action::Auth(AuthAction::Paste(Some(text)))),
         Screen::EditConnection(_) => Some(Action::ConnForm(ConnFormAction::Paste(Some(text)))),
         Screen::Normal if app.focus == Focus::Editor => Some(Action::EditorEvent(event)),
+        Screen::Normal if app.focus == Focus::Chat => {
+            Some(Action::Chat(ChatAction::Paste(Some(text))))
+        }
         _ => None,
     }
 }
@@ -69,6 +82,7 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
             // Keys are inert until the worker responds.
             Overlay::Connecting { .. } => None,
             Overlay::Help { .. } => translate_help_key(key),
+            Overlay::LlmSettings(state) => translate_llm_settings_key(state, key),
         };
     }
     match &app.screen {
@@ -146,6 +160,9 @@ fn translate_auth_key(key: KeyEvent) -> Option<Action> {
     ) {
         return Some(Action::Auth(act));
     }
+    if is_ctrl_u(key) {
+        return Some(Action::Auth(AuthAction::ClearField));
+    }
     match key.code {
         KeyCode::Esc => Some(Action::Auth(AuthAction::Cancel)),
         KeyCode::Enter => Some(Action::Auth(AuthAction::Submit)),
@@ -161,6 +178,9 @@ fn translate_conn_form_key(key: KeyEvent) -> Option<Action> {
         ConnFormAction::Cut,
     ) {
         return Some(Action::ConnForm(act));
+    }
+    if is_ctrl_u(key) {
+        return Some(Action::ConnForm(ConnFormAction::ClearField));
     }
     match key.code {
         KeyCode::Esc => Some(Action::ConnForm(ConnFormAction::Cancel)),
@@ -240,6 +260,9 @@ fn translate_command_key(key: KeyEvent) -> Option<Action> {
     ) {
         return Some(Action::Command(act));
     }
+    if is_ctrl_u(key) {
+        return Some(Action::Command(CommandAction::ClearField));
+    }
     match key.code {
         KeyCode::Esc => Some(Action::Command(CommandAction::Cancel)),
         KeyCode::Enter => Some(Action::Command(CommandAction::Submit)),
@@ -273,6 +296,7 @@ fn translate_normal_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action
     match app.focus {
         Focus::Editor => Some(Action::EditorEvent(raw)),
         Focus::Schema => translate_schema_key(key),
+        Focus::Chat => translate_chat_key(key),
     }
 }
 
@@ -280,6 +304,14 @@ fn is_ctrl_space(key: KeyEvent) -> bool {
     key.code == KeyCode::Char(' ')
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::SHIFT)
+}
+
+/// Recognise the "clear current field" shortcut. `Ctrl+U` is the
+/// universal *kill-to-start-of-line* convention; in our single-line
+/// form fields it functions as "wipe everything I typed".
+fn is_ctrl_u(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// Keys consumed by the popover when it's open. `None` means "fall
@@ -301,7 +333,7 @@ fn translate_completion_popover_key(key: KeyEvent) -> Option<Action> {
 
 fn translate_pending_chord(app: &App, key: KeyEvent) -> Option<Action> {
     match app.pending {
-        PendingChord::Window => translate_window_chord(key),
+        PendingChord::Window => translate_window_chord(app.right_panel, key),
         PendingChord::GG => translate_gg_chord(app, key),
         PendingChord::Leader => translate_leader_chord(app, key),
         PendingChord::None => None,
@@ -315,6 +347,10 @@ fn can_intercept_globally(app: &App) -> bool {
             EditorMode::Normal | EditorMode::Visual
         ),
         Focus::Schema => true,
+        // The chat composer is always in "insert mode" — keystrokes flow
+        // into the TextArea. Globals like `:` and `Ctrl+W` are routed
+        // explicitly inside `translate_chat_key`.
+        Focus::Chat => false,
     }
 }
 
@@ -412,10 +448,16 @@ fn translate_expanded_key(key: KeyEvent, view: &ResultViewMode) -> Option<Action
     Some(Action::ResultNav(action))
 }
 
-fn translate_window_chord(key: KeyEvent) -> Option<Action> {
+fn translate_window_chord(right: RightPanelMode, key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char('h') => Some(Action::FocusPanel(Focus::Editor)),
-        KeyCode::Char('l') => Some(Action::FocusPanel(Focus::Schema)),
+        // Ctrl+W l targets whichever pane is currently painted on the
+        // right — Schema by default, Chat once the user has toggled.
+        KeyCode::Char('l') => Some(Action::FocusPanel(if right.is_chat() {
+            Focus::Chat
+        } else {
+            Focus::Schema
+        })),
         KeyCode::Char('<') => Some(Action::ResizeSchema(2)),
         KeyCode::Char('>') => Some(Action::ResizeSchema(-2)),
         // No vertical neighbours yet; chord is consumed by the loop regardless.
@@ -452,6 +494,100 @@ fn translate_gg_chord(app: &App, key: KeyEvent) -> Option<Action> {
         (Screen::Normal, Focus::Schema) => Some(Action::Schema(SchemaAction::Top)),
         _ => None,
     }
+}
+
+fn translate_llm_settings_key(state: &LlmSettingsState, key: KeyEvent) -> Option<Action> {
+    if let Some(act) = clipboard_arm(
+        key,
+        LlmSettingsAction::Paste(None),
+        LlmSettingsAction::Copy,
+        LlmSettingsAction::Cut,
+    ) {
+        return Some(Action::LlmSettings(act));
+    }
+    let mods = key.modifiers;
+    let bare = mods.is_empty();
+    let on_backend = state.focus == LlmSettingsField::Backend;
+
+    // Ctrl+U clears the focused TextArea (no-op when focus is Backend).
+    if key.code == KeyCode::Char('u') && mods.contains(KeyModifiers::CONTROL) {
+        return Some(Action::LlmSettings(LlmSettingsAction::ClearField));
+    }
+    match (key.code, bare) {
+        (KeyCode::Esc, _) => Some(Action::LlmSettings(LlmSettingsAction::Cancel)),
+        (KeyCode::Enter, true) => Some(Action::LlmSettings(LlmSettingsAction::Submit)),
+        (KeyCode::Tab, _) => Some(Action::LlmSettings(LlmSettingsAction::CycleField)),
+        (KeyCode::BackTab, _) => Some(Action::LlmSettings(LlmSettingsAction::CycleFieldBack)),
+        // Backend cycling — only fires when the Backend field is active so
+        // the user can use ← / → / `[` / `]` normally inside text fields.
+        (KeyCode::Left, true) | (KeyCode::Char('['), true) if on_backend => {
+            Some(Action::LlmSettings(LlmSettingsAction::CycleBackend(-1)))
+        }
+        (KeyCode::Right, true) | (KeyCode::Char(']'), true) if on_backend => {
+            Some(Action::LlmSettings(LlmSettingsAction::CycleBackend(1)))
+        }
+        _ => Some(Action::LlmSettings(LlmSettingsAction::Input(Input::from(
+            key,
+        )))),
+    }
+}
+
+fn translate_chat_key(key: KeyEvent) -> Option<Action> {
+    if let Some(act) = clipboard_arm(
+        key,
+        ChatAction::Paste(None),
+        ChatAction::Copy,
+        ChatAction::Cut,
+    ) {
+        return Some(Action::Chat(act));
+    }
+    if is_ctrl_u(key) {
+        return Some(Action::Chat(ChatAction::ClearComposer));
+    }
+    let mods = key.modifiers;
+    let bare = mods.is_empty();
+    let shift_only = mods == KeyModifiers::SHIFT;
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+
+    // Ctrl+W routes back through the window-chord layer so the user can
+    // hop to the editor without leaving chat focus first.
+    if key.code == KeyCode::Char('w') && ctrl {
+        return Some(Action::SetPendingChord(PendingChord::Window));
+    }
+    // Esc bounces to schema — the chat panel doesn't survive Esc.
+    if key.code == KeyCode::Esc && bare {
+        return Some(Action::ToggleRightPanel);
+    }
+    // Plain Enter submits; Shift+Enter falls through to the TextArea
+    // (insert newline). The composer is multi-line by design.
+    if key.code == KeyCode::Enter && bare {
+        return Some(Action::Chat(ChatAction::Submit));
+    }
+    if (key.code == KeyCode::PageUp) && bare {
+        return Some(Action::Chat(ChatAction::ScrollUp(8)));
+    }
+    if (key.code == KeyCode::PageDown) && bare {
+        return Some(Action::Chat(ChatAction::ScrollDown(8)));
+    }
+    // Ctrl+Up/Down — line-by-line scroll. Plain Up/Down is reserved for
+    // the composer's textarea (multi-line cursor movement).
+    if key.code == KeyCode::Up && ctrl {
+        return Some(Action::Chat(ChatAction::ScrollUp(1)));
+    }
+    if key.code == KeyCode::Down && ctrl {
+        return Some(Action::Chat(ChatAction::ScrollDown(1)));
+    }
+    // Ctrl+Home / Ctrl+End — jump to top/bottom of the log. Plain
+    // Home/End remain delegated to the composer for line-start /
+    // line-end movement, matching the rest of the app's text inputs.
+    if key.code == KeyCode::Home && ctrl {
+        return Some(Action::Chat(ChatAction::ScrollToTop));
+    }
+    if key.code == KeyCode::End && ctrl {
+        return Some(Action::Chat(ChatAction::ScrollToBottom));
+    }
+    let _ = shift_only;
+    Some(Action::Chat(ChatAction::Input(Input::from(key))))
 }
 
 // ============================================================================
@@ -563,9 +699,14 @@ fn translate_mouse_expanded(app: &App, ev: MouseEvent) -> Option<Action> {
 }
 
 fn translate_mouse_workspace(app: &App, ev: MouseEvent) -> Option<Action> {
-    // Order: schema → editor → inline-result. Each is a thin wrapper that
-    // hit-tests against `app.layout` and emits an action if the click lands.
+    // Order: schema → chat → editor → inline-result. Each is a thin wrapper
+    // that hit-tests against `app.layout` and emits an action if the click
+    // lands. Schema and chat are mutually exclusive (only one populates its
+    // layout slot per frame) so order between them doesn't matter.
     if let Some(action) = translate_mouse_schema(app, ev) {
+        return Some(action);
+    }
+    if let Some(action) = translate_mouse_chat(app, ev) {
         return Some(action);
     }
     if let Some(action) = translate_mouse_inline(app, ev) {
@@ -575,6 +716,25 @@ fn translate_mouse_workspace(app: &App, ev: MouseEvent) -> Option<Action> {
         return Some(action);
     }
     None
+}
+
+fn translate_mouse_chat(app: &App, ev: MouseEvent) -> Option<Action> {
+    let layout = app.layout.chat.as_ref()?;
+    if !rect_contains(layout.area, ev.column, ev.row) {
+        return None;
+    }
+    match ev.kind {
+        MouseEventKind::ScrollDown => Some(Action::Chat(ChatAction::ScrollDown(3))),
+        MouseEventKind::ScrollUp => Some(Action::Chat(ChatAction::ScrollUp(3))),
+        MouseEventKind::Down(MouseButton::Left) => {
+            // A click anywhere inside the chat panel focuses it. We don't
+            // attempt to position the composer cursor — TextArea doesn't
+            // expose a "click → cursor" hook, and the focus change alone
+            // is what the user is usually after.
+            Some(Action::FocusPanel(Focus::Chat))
+        }
+        _ => None,
+    }
 }
 
 fn translate_mouse_schema(app: &App, ev: MouseEvent) -> Option<Action> {
@@ -983,24 +1143,34 @@ mod tests {
 
     #[test]
     fn window_chord_focus_and_resize() {
+        let m = RightPanelMode::Schema;
         assert!(matches!(
-            translate_window_chord(key(KeyCode::Char('h'))),
+            translate_window_chord(m, key(KeyCode::Char('h'))),
             Some(Action::FocusPanel(Focus::Editor))
         ));
         assert!(matches!(
-            translate_window_chord(key(KeyCode::Char('l'))),
+            translate_window_chord(m, key(KeyCode::Char('l'))),
             Some(Action::FocusPanel(Focus::Schema))
         ));
         // `<` grows the schema panel, `>` shrinks it.
         assert!(matches!(
-            translate_window_chord(key(KeyCode::Char('<'))),
+            translate_window_chord(m, key(KeyCode::Char('<'))),
             Some(Action::ResizeSchema(2))
         ));
         assert!(matches!(
-            translate_window_chord(key(KeyCode::Char('>'))),
+            translate_window_chord(m, key(KeyCode::Char('>'))),
             Some(Action::ResizeSchema(-2))
         ));
-        assert!(translate_window_chord(key(KeyCode::Char('z'))).is_none());
+        assert!(translate_window_chord(m, key(KeyCode::Char('z'))).is_none());
+    }
+
+    #[test]
+    fn window_chord_l_targets_chat_when_right_panel_is_chat() {
+        // Same chord, different right-panel mode → focus follows the painted pane.
+        assert!(matches!(
+            translate_window_chord(RightPanelMode::Chat, key(KeyCode::Char('l'))),
+            Some(Action::FocusPanel(Focus::Chat))
+        ));
     }
 
     #[test]
@@ -1160,6 +1330,73 @@ mod tests {
         assert!(matches!(
             translate_expanded_key(key(KeyCode::Char('v')), &view),
             Some(Action::ResultExitVisual)
+        ));
+    }
+
+    // ----- translate_llm_settings_key ----------------------------------
+
+    #[test]
+    fn llm_settings_arrows_cycle_backend_only_on_backend_field() {
+        let mut state = LlmSettingsState::new_create();
+        // Default focus is Backend — arrows cycle.
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Left)),
+            "CycleBackend(-1)"
+        ));
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Right)),
+            "CycleBackend(1)"
+        ));
+        // Move focus to Model — arrows now fall through to TextArea Input.
+        state.focus = LlmSettingsField::Model;
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Left)),
+            "Input"
+        ));
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Right)),
+            "Input"
+        ));
+        // `[` and `]` follow the same gating.
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Char('['))),
+            "Input"
+        ));
+        state.focus = LlmSettingsField::Backend;
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Char('['))),
+            "CycleBackend(-1)"
+        ));
+    }
+
+    #[test]
+    fn llm_settings_ctrl_u_clears_field() {
+        let state = LlmSettingsState::new_create();
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, ctrl(KeyCode::Char('u'))),
+            "ClearField"
+        ));
+    }
+
+    #[test]
+    fn ctrl_u_recognised_in_form_keymaps() {
+        // Ctrl+U → ClearField across every modal that has a TextArea.
+        assert!(matches_action(
+            &translate_auth_key(ctrl(KeyCode::Char('u'))),
+            "ClearField"
+        ));
+        assert!(matches_action(
+            &translate_conn_form_key(ctrl(KeyCode::Char('u'))),
+            "ClearField"
+        ));
+        assert!(matches_action(
+            &translate_command_key(ctrl(KeyCode::Char('u'))),
+            "ClearField"
+        ));
+        // Chat composer uses ClearComposer to disambiguate from `:chat clear`.
+        assert!(matches_action(
+            &translate_chat_key(ctrl(KeyCode::Char('u'))),
+            "ClearComposer"
         ));
     }
 }

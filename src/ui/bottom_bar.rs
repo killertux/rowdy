@@ -48,6 +48,10 @@ impl Widget for BottomBar<'_> {
                 // Help popover owns its own footer — leave the bar blank.
                 return;
             }
+            Some(Overlay::LlmSettings(_)) => {
+                // Settings modal owns its own footer.
+                return;
+            }
             None => {}
         }
         match &self.app.screen {

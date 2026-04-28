@@ -20,6 +20,9 @@ pub fn apply(app: &mut App, action: ConnFormAction) {
         ConnFormAction::Copy => copy_from(state.current_input_mut(), &app.log),
         ConnFormAction::Cut => cut_from(state.current_input_mut(), &app.log),
         ConnFormAction::ToggleFocus => state.toggle_focus(),
+        ConnFormAction::ClearField => {
+            state.current_input_mut().clear();
+        }
         ConnFormAction::Cancel => app.should_quit = true,
         ConnFormAction::Submit => submit(app),
     }
