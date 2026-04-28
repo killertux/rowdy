@@ -170,10 +170,7 @@ mod tests {
     #[test]
     fn with_cte_is_row_returning() {
         let d = PostgreSqlDialect {};
-        assert!(is_row_returning(
-            "WITH x AS (SELECT 1) SELECT * FROM x",
-            &d
-        ));
+        assert!(is_row_returning("WITH x AS (SELECT 1) SELECT * FROM x", &d));
     }
 
     #[test]
@@ -205,7 +202,10 @@ mod tests {
     #[test]
     fn update_is_not_row_returning() {
         let d = PostgreSqlDialect {};
-        assert!(!is_row_returning("UPDATE users SET name='x' WHERE id=1", &d));
+        assert!(!is_row_returning(
+            "UPDATE users SET name='x' WHERE id=1",
+            &d
+        ));
     }
 
     #[test]
