@@ -21,7 +21,11 @@
 //!    a `search` snippet that must match exactly once (optionally
 //!    constrained to lines at or after `start_line`). Zero or multiple
 //!    matches surface as an error so the LLM extends the snippet rather
-//!    than blindly clobbering the buffer.
+//!    than blindly clobbering the buffer. The exact-match contract is
+//!    also our main lever against the model treating the buffer as a
+//!    scratch surface it can wipe — both the prompt and the tool
+//!    description push it toward "anchor + replacement" splicing when
+//!    adding fresh SQL alongside the user's existing queries.
 //!
 //! Tool execution is sync: the action layer pulls the request off
 //! the worker channel, calls [`dispatch`], and replies via oneshot.
@@ -102,13 +106,16 @@ pub fn all() -> Vec<Tool> {
         ),
         function_tool(
             READ_BUFFER,
-            "Read the user's current SQL editor buffer with line-based \
-             pagination. Returns { text, start_line, end_line, total_lines, \
-             remaining_lines }. `text` carries the lines from `start_line` \
-             through `end_line` joined with '\\n'. If `remaining_lines > 0`, \
-             call again with `start_line = end_line + 1` to continue. \
-             Always read the buffer before calling write_buffer so you know \
-             exactly what's there to replace.",
+            "Read the user's SQL editor buffer (their working SQL file — a \
+             scratchpad with multiple queries, comments, and \
+             work-in-progress they iterate on and run). Paginated: returns \
+             { text, start_line, end_line, total_lines, remaining_lines }. \
+             `text` carries the lines from `start_line` through `end_line` \
+             joined with '\\n'. If `remaining_lines > 0`, call again with \
+             `start_line = end_line + 1` to keep paging until you've seen \
+             all of it. ALWAYS read the full buffer before any \
+             write_buffer call: you need to know what queries the user \
+             has there so you don't overwrite their work.",
             &[
                 (
                     "start_line",
@@ -125,27 +132,53 @@ pub fn all() -> Vec<Tool> {
         ),
         function_tool(
             WRITE_BUFFER,
-            "Replace a specific snippet in the user's SQL editor buffer. \
-             `search` must match exactly once in the eligible region — if \
-             it matches zero or multiple times, the call errors and you \
-             must supply a longer / more specific snippet. Use this for \
-             every edit: drafting a fresh query (replace the existing \
-             content), refactoring a single CTE, fixing a typo, etc. The \
-             user reviews and runs the SQL themselves — you do NOT \
-             execute. Read the buffer first so your `search` snippet \
-             matches the actual contents. Returns { ok: true, line } \
-             where `line` is the 1-indexed start line of the replacement.",
+            "Splice a snippet into the user's SQL editor buffer (find / \
+             replace). `search` must match exactly once in the eligible \
+             region — zero or multiple matches return an error and you \
+             must extend `search` with more surrounding context. Returns \
+             { ok: true, line } where `line` is the 1-indexed start line \
+             of the replacement. \
+             \
+             The buffer is the user's working SQL file — it usually \
+             contains queries they wrote and are iterating on. Treat \
+             everything you didn't author this session as theirs; do NOT \
+             delete or overwrite it. \
+             \
+             Correct uses: \
+             (1) editing SQL you wrote earlier this session; \
+             (2) rewriting a snippet the user explicitly asked you to \
+             rewrite — point `search` at exactly that snippet, not at \
+             unrelated surrounding content; \
+             (3) ADDING a new query alongside existing user SQL — pick a \
+             small anchor near the end of the buffer (e.g. the final `;` \
+             of the last query, or the trailing newline) as `search`, and \
+             set `replacement` to that same anchor followed by a blank \
+             line and your new SQL. \
+             \
+             Anti-patterns (do NOT do these): setting `search` to the \
+             entire buffer to overwrite everything; replacing the user's \
+             existing queries to make room for yours; calling write_buffer \
+             without first reading the buffer end-to-end. \
+             \
+             The user reviews and runs the SQL themselves — you do NOT \
+             execute. Never paste SQL in chat as a substitute; if a write \
+             fails, retry with a more specific snippet.",
             &[
                 (
                     "search",
                     "string",
                     "Exact substring already present in the buffer. Include \
-                     enough surrounding context to make it match exactly once.",
+                     enough surrounding context to make it match exactly once. \
+                     To append new SQL alongside existing user queries, use a \
+                     small anchor at the end of the buffer (e.g. the last `;` \
+                     plus newline) — do NOT set this to the entire buffer.",
                 ),
                 (
                     "replacement",
                     "string",
-                    "Text to substitute in place of `search`.",
+                    "Text to substitute in place of `search`. To append, set \
+                     this to the anchor + blank line + your new SQL so the \
+                     anchor is preserved and your SQL lands after it.",
                 ),
                 (
                     "start_line",

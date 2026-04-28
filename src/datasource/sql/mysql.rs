@@ -243,7 +243,7 @@ impl Datasource for MysqlDatasource {
             })?;
         self.in_flight_conn_id.store(conn_id, Ordering::SeqCst);
 
-        if super::is_row_returning(statement) {
+        if super::is_row_returning(statement, &sqlparser::dialect::MySqlDialect {}) {
             let result = sqlx::query(statement).fetch_all(&mut *conn).await;
             // Clear the conn id before checking the result so a subsequent
             // cancel doesn't try to kill a session that's already idle. On
