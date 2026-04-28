@@ -296,6 +296,19 @@ fn translate_normal_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action
     {
         return Some(action);
     }
+    // Bare `Q` (Shift+q) dismisses the inline result preview — same as
+    // `:close`. Gated on a visible preview so Q is a no-op when nothing
+    // is showing (avoids stealing Ex-mode-style chords from edtui in
+    // contexts where it might mean something else later).
+    if can_intercept_globally(app)
+        && matches!(app.screen, Screen::Normal)
+        && app.results.last().is_some()
+        && !app.preview_hidden
+        && key.code == KeyCode::Char('Q')
+        && key.modifiers == KeyModifiers::SHIFT
+    {
+        return Some(Action::DismissResult);
+    }
     match app.focus {
         Focus::Editor => Some(Action::EditorEvent(raw)),
         Focus::Schema => translate_schema_key(key),
