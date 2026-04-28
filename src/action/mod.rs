@@ -1014,6 +1014,12 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
             on_cache_failed(app, stage, error.to_string())
         }
         WorkerEvent::ChatDelta(delta) => chat::on_delta(app, delta),
+        WorkerEvent::ChatToolRequest {
+            call_id,
+            name,
+            args_json,
+            reply,
+        } => chat::on_tool_request(app, call_id, name, args_json, reply),
     }
 }
 

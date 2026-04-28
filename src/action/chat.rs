@@ -6,11 +6,14 @@
 //! so the loop is exercisable end-to-end without a real provider. Phase 3
 //! replaces `submit` with a tokio task that streams from the `llm` crate.
 
+use tokio::sync::oneshot;
+
 use crate::action::{ChatAction, copy_from, cut_from, paste_into};
 use crate::app::App;
 use crate::llm::prompt::build_system_prompt;
 use crate::llm::provider::build_client;
-use crate::llm::worker::{ChatDelta, spawn_chat_turn};
+use crate::llm::tools;
+use crate::llm::worker::{ChatDelta, ChatTurn, ToolReply, spawn_chat_turn};
 use crate::state::chat::ChatMessage;
 use crate::state::focus::Focus;
 use crate::state::right_panel::RightPanelMode;
@@ -96,10 +99,43 @@ fn submit(app: &mut App) {
     let history = app.chat.messages.clone();
     let evt_tx = app.evt_tx.clone();
     // Dropping the JoinHandle here doesn't cancel the task — tokio
-    // detaches it. We don't need to track it yet; phase-3 cancellation
+    // detaches it. We don't need to track it yet; cancellation
     // (`Action::Chat(Cancel)`) will plumb it through `app.chat` later.
-    let _handle = spawn_chat_turn(client, history, evt_tx);
+    let _handle = spawn_chat_turn(ChatTurn {
+        client,
+        history,
+        evt_tx,
+    });
     app.chat.streaming = true;
+}
+
+/// Handle a tool-execution request from the worker. Paints a tool-call
+/// block into the live chat panel, dispatches the tool against `app`,
+/// paints the result block, and replies on the oneshot so the worker can
+/// resume the stream.
+pub fn on_tool_request(
+    app: &mut App,
+    call_id: String,
+    name: String,
+    args_json: String,
+    reply: oneshot::Sender<ToolReply>,
+) {
+    app.chat
+        .append_tool_call(call_id.clone(), name.clone(), args_json.clone());
+
+    let result = tools::dispatch(app, &name, &args_json);
+    let error = result
+        .as_object()
+        .and_then(|m| m.get("error"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let display = serde_json::to_string(&result).unwrap_or_else(|_| "{}".into());
+
+    app.chat
+        .append_tool_result(call_id, name, display.clone(), error);
+
+    // Receiver might have been dropped (worker aborted) — log but ignore.
+    let _ = reply.send(ToolReply { result, display });
 }
 
 /// Fold a streaming delta into the chat panel. Called from

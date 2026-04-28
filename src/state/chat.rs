@@ -120,23 +120,64 @@ impl ChatPanel {
         self.messages.push(msg);
     }
 
-    #[allow(dead_code)] // streaming-delta sink, wired in phase 3.
-    pub fn append_assistant_text(&mut self, delta: &str) {
-        // Streaming deltas append to the most recent assistant Text block;
-        // if the last message isn't an assistant turn we open a fresh one.
-        match self.messages.last_mut() {
-            Some(m)
-                if m.role == ChatRole::Assistant
-                    && matches!(m.blocks.last(), Some(ChatBlock::Text(_))) =>
-            {
-                if let Some(ChatBlock::Text(s)) = m.blocks.last_mut() {
-                    s.push_str(delta);
-                }
-            }
-            _ => self
-                .messages
-                .push(ChatMessage::assistant_text(delta.to_string())),
+    /// Make sure the most recent message is an assistant turn we can append
+    /// blocks to. Used by the streaming + tool-call paths so a single
+    /// assistant turn can carry interleaved text / tool-call / tool-result
+    /// blocks without splitting into multiple message bubbles.
+    fn ensure_assistant_message(&mut self) {
+        let needs_new = !matches!(
+            self.messages.last(),
+            Some(m) if m.role == ChatRole::Assistant
+        );
+        if needs_new {
+            self.messages.push(ChatMessage {
+                role: ChatRole::Assistant,
+                blocks: Vec::new(),
+                timestamp: Utc::now(),
+            });
         }
+    }
+
+    pub fn append_assistant_text(&mut self, delta: &str) {
+        self.ensure_assistant_message();
+        let last = self.messages.last_mut().expect("ensure_assistant_message");
+        match last.blocks.last_mut() {
+            Some(ChatBlock::Text(s)) => s.push_str(delta),
+            _ => last.blocks.push(ChatBlock::Text(delta.to_string())),
+        }
+    }
+
+    pub fn append_tool_call(&mut self, id: String, name: String, args_json: String) {
+        self.ensure_assistant_message();
+        self.messages
+            .last_mut()
+            .expect("ensure_assistant_message")
+            .blocks
+            .push(ChatBlock::ToolCall {
+                id,
+                name,
+                args_json,
+            });
+    }
+
+    pub fn append_tool_result(
+        &mut self,
+        call_id: String,
+        name: String,
+        output: String,
+        error: Option<String>,
+    ) {
+        self.ensure_assistant_message();
+        self.messages
+            .last_mut()
+            .expect("ensure_assistant_message")
+            .blocks
+            .push(ChatBlock::ToolResult {
+                call_id,
+                name,
+                output,
+                error,
+            });
     }
 
     pub fn clear(&mut self) {
@@ -209,6 +250,36 @@ mod tests {
         assert_eq!(chat.messages.len(), 4);
         assert_eq!(chat.messages[1].role, ChatRole::Assistant);
         assert_eq!(chat.messages[3].role, ChatRole::Assistant);
+    }
+
+    #[test]
+    fn tool_call_and_result_attach_to_current_assistant_turn() {
+        let mut chat = ChatPanel::new();
+        chat.push_message(ChatMessage::user_text("describe the users table"));
+        chat.append_assistant_text("Let me check.");
+        chat.append_tool_call("c1".into(), "describe_table".into(), "{}".into());
+        chat.append_tool_result("c1".into(), "describe_table".into(), "{}".into(), None);
+        chat.append_assistant_text("Here it is.");
+        assert_eq!(chat.messages.len(), 2);
+        let assistant = &chat.messages[1];
+        assert_eq!(assistant.blocks.len(), 4);
+        assert!(matches!(&assistant.blocks[0], ChatBlock::Text(s) if s == "Let me check."));
+        assert!(matches!(&assistant.blocks[1], ChatBlock::ToolCall { .. }));
+        assert!(matches!(&assistant.blocks[2], ChatBlock::ToolResult { .. }));
+        assert!(matches!(&assistant.blocks[3], ChatBlock::Text(s) if s == "Here it is."));
+    }
+
+    #[test]
+    fn tool_call_without_prior_text_creates_assistant_message() {
+        let mut chat = ChatPanel::new();
+        chat.push_message(ChatMessage::user_text("query"));
+        chat.append_tool_call("c1".into(), "list_tables".into(), "{}".into());
+        assert_eq!(chat.messages.len(), 2);
+        assert_eq!(chat.messages[1].role, ChatRole::Assistant);
+        assert!(matches!(
+            &chat.messages[1].blocks[0],
+            ChatBlock::ToolCall { .. }
+        ));
     }
 
     #[test]
