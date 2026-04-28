@@ -114,6 +114,10 @@ doesn't exist. It holds:
   the next connect. Connection names are sanitised for path safety, so
   two names that differ only in path-unsafe characters share a session
   for now.
+- `chats/<connection-name>/session.jsonl` — the LLM chat history for
+  each saved connection. Append-only JSONL; one `ChatMessage` per line.
+  System messages are filtered out on append so we don't persist tool
+  prompts. Wiped by `:chat clear`.
 
 ## Connection strings
 
@@ -181,6 +185,28 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
     types decode to their variant string.
   - **MySQL / MariaDB** — schema via `information_schema`, `column_type` for
     declared types (preserves `unsigned`, display widths, etc.).
+- **LLM chat companion** in the right panel — multi-provider (OpenAI,
+  Anthropic, Ollama, Google, DeepSeek, OpenRouter via OpenAI-compat),
+  streaming, with first-class tools for the schema and editor buffer:
+  - **Schema tools** (`list_catalogs` / `list_schemas` / `list_tables` /
+    `describe_table`) auto-load on first use against the live connection,
+    so the model can answer "describe `users`" without you expanding the
+    panel by hand.
+  - **Buffer tools** — `read_buffer` (paginated by line) lets the model
+    ground answers in the actual SQL you have; `write_buffer` is a
+    precise find/replace that errors when the search snippet matches
+    zero or multiple times, so the model can't accidentally clobber the
+    buffer.
+  - **No execute-SQL tool** by design — drafts land in the editor and you
+    review/run them yourself.
+  - **Modal chat panel** — Normal mode (scrolling, globals work) and
+    Insert mode (composer focused). Press `i` to type, `Esc` to scroll;
+    `Esc` again returns focus to the editor without flipping the panel.
+  - **Per-connection session persistence** — chat history saves to
+    `./.rowdy/chats/<connection>/session.jsonl` and reloads on the next
+    connect. `:chat clear` wipes it.
+  - **Encrypted API keys** — the LLM keystore shares the same crypto
+    block as saved connections, so one password unlocks both.
 - **Two themes** (Dark / Light) switchable at runtime, both tuned for high
   text contrast. Theme + schema-panel width persist to `./.rowdy/config.toml`.
 - **Saved connections** in `./.rowdy/config.toml`, optionally encrypted with a
@@ -205,15 +231,18 @@ mode (Normal / Insert / Visual / Search).
 
 ### Global
 
-Available wherever the editor is in vim Normal or Visual mode (or the schema
-panel is focused).
+Available wherever the editor is in vim Normal or Visual mode, or the
+schema/chat panel is focused in its own Normal mode — i.e. **everywhere
+except a text-input mode** (editor Insert, chat composer, modal forms).
+In an insert mode, press `Esc` first.
 
-| Keys                  | Action                                                |
-|-----------------------|-------------------------------------------------------|
-| `:`                   | Open command prompt                                   |
-| `Ctrl+W` then `h`/`l` | Focus editor / schema                                 |
-| `Ctrl+W` then `<`/`>` | Grow / shrink schema panel width                      |
-| `Ctrl+C`              | Panic exit (use `:q` for a clean quit)                |
+| Keys                  | Action                                                  |
+|-----------------------|---------------------------------------------------------|
+| `:`                   | Open command prompt                                     |
+| `Esc` (Schema/Chat)   | Focus editor (right panel keeps painting whatever it had) |
+| `Ctrl+W` then `h`/`l` | Focus editor / right panel (schema or chat)             |
+| `Ctrl+W` then `<`/`>` | Grow / shrink schema panel width                        |
+| `Ctrl+C`              | Panic exit (use `:q` for a clean quit)                  |
 
 ### Clipboard
 
@@ -235,20 +264,23 @@ In the SQL editor, edtui's vim bindings drive the clipboard: `y` yanks,
 (via `arboard`), so you can yank in rowdy and paste into another app, or
 vice versa.
 
-### Editor — leader chord (Space)
+### Leader chord (Space)
 
-Triggered when the editor is in vim Normal or Visual mode.
+App-wide — fires from editor Normal/Visual, the schema panel, or chat
+normal mode. Not in any insert mode (Esc out first).
 
-| Keys        | Action                                                          |
-|-------------|-----------------------------------------------------------------|
-| `<Space> r` | (Normal) Highlight the statement under the cursor, prompt to run |
-| `<Space> r` | (Visual) Run the current selection — no prompt                  |
-| `<Space> R` | Run the statement under the cursor immediately — no prompt      |
-| `<Space> e` | Expand the latest result to full view                           |
-| `<Space> c` | Cancel the in-flight query                                      |
-| `<Space> t` | Toggle Dark / Light theme                                       |
-| `=`         | Format SQL (Visual: selection; Normal: whole buffer)            |
-| `Ctrl+Space`| Open SQL autocomplete popover (works in any editor mode)        |
+| Keys        | Action                                                           |
+|-------------|------------------------------------------------------------------|
+| `<Space> r` | (Editor Normal) Highlight the statement under the cursor, prompt to run |
+| `<Space> r` | (Editor Visual) Run the current selection — no prompt            |
+| `<Space> R` | Run the statement under the cursor immediately — no prompt       |
+| `<Space> e` | Expand the latest result to full view                            |
+| `<Space> c` | Cancel the in-flight query                                       |
+| `<Space> t` | Toggle Dark / Light theme                                        |
+| `<Space> S` | Switch right panel to schema (and focus it)                      |
+| `<Space> C` | Switch right panel to chat (and focus it, in normal mode)        |
+| `=`         | Format SQL (Visual: selection; Normal: whole buffer)             |
+| `Ctrl+Space`| Open SQL autocomplete popover (works in any editor mode)         |
 
 The editor itself is a full vim implementation — `i`, `Esc`, `hjkl`, `w`,
 `b`, `dd`, `yy`, `p`, `u`, `Ctrl+R`, visual mode, search, etc. See
@@ -285,6 +317,69 @@ When focused (`Ctrl+W l`).
 Nodes show their load state inline:
 - `(loading…)` while a request is in flight
 - `(error: …)` and a red label on a failed load — press `l`/`Enter` to retry
+
+### Chat panel
+
+Toggle the right panel to chat with `:chat` or `<Space> C`. The panel is
+**modal**, like edtui: it opens in **Normal mode** (composer dormant,
+keystrokes scroll the log) and you press `i` to enter **Insert mode**
+(composer focused, type your message). Globals (`:`, leader, `Ctrl+W`)
+fire from Normal but not from Insert — `Esc` drops you back.
+
+#### Normal mode (composer dormant)
+
+| Keys              | Action                                                     |
+|-------------------|------------------------------------------------------------|
+| `i` / `I`         | Enter Insert mode (focus the composer)                     |
+| `↑` / `k` / `h`   | Scroll the message log up by one line                      |
+| `↓` / `j` / `l`   | Scroll the message log down by one line                    |
+| `PgUp` / `PgDn`   | Scroll by a page                                           |
+| `gg` / `G`        | Jump to the top / bottom of the log (G re-engages auto-follow) |
+| `Home` / `End`    | Jump to the top / bottom of the log                        |
+| `Esc`             | Focus editor (right panel keeps painting chat)             |
+
+#### Insert mode (composer focused)
+
+| Keys              | Action                                                     |
+|-------------------|------------------------------------------------------------|
+| `Enter`           | Submit the composer · `Shift+Enter` inserts a newline      |
+| `Esc`             | Drop back to chat Normal (composer keeps its contents)     |
+| `Ctrl+U`          | Clear the composer (message log untouched)                 |
+| `Ctrl+W` then `h` | Hop directly to the editor without leaving Insert first    |
+| `PgUp` / `PgDn`   | Scroll the message log by a page                           |
+| `Ctrl+↑` / `Ctrl+↓` | Scroll the message log line by line (plain `↑`/`↓` move the composer cursor) |
+| `Ctrl+Home` / `Ctrl+End` | Jump to top / bottom of the log                     |
+
+The log **auto-follows** new content while you're at the bottom. Scrolling
+up disengages auto-follow so streaming tokens don't yank you away from
+history; scrolling back to the bottom (or `G` / `Ctrl+End`) re-engages it.
+
+#### Tools the model uses
+
+The chat panel registers six tools the model can call. They all run on
+the UI thread against the live app state — no separate worker.
+
+| Tool             | Purpose                                                      |
+|------------------|--------------------------------------------------------------|
+| `list_catalogs`  | List databases on the active connection                      |
+| `list_schemas`   | List schemas inside a catalog                                |
+| `list_tables`    | List tables / views inside a (catalog, schema)               |
+| `describe_table` | Columns + types for a table or view; auto-loads on first use |
+| `read_buffer`    | Read the editor buffer with line pagination (`start_line`, `limit`) |
+| `write_buffer`   | Find/replace in the editor buffer — `search` must match exactly once (`start_line` constrains scope); zero or multiple matches return an error so the model extends the snippet |
+
+Schema tools auto-trigger introspection on cache miss, so the model can
+ask about a table you haven't expanded yet. `write_buffer` parks the
+cursor at the modified line so the change is immediately visible.
+
+#### Provider configuration
+
+Open the settings modal with `:chat settings`. Pick a backend, enter a
+model id and an API key. Keys are encrypted with the same `argon2id +
+chacha20-poly1305` block used for connection passwords, so unlocking the
+store at startup unlocks both. Backends ship as Cargo features
+(`openai`, `anthropic`, `ollama`, `google`, `deepseek`); OpenRouter is
+served via the OpenAI-compatible base URL.
 
 ### Expanded result view
 
@@ -471,6 +566,9 @@ After pressing `:`.
 | `:conn edit <name>`          | Open the form pre-filled with `<name>`'s URL (overwrite on save) |
 | `:conn delete <name>`        | Remove `<name>` (refuses if it's the active connection)         |
 | `:conn use <name>`           | Switch the active connection live                               |
+| `:chat`                      | Toggle the right panel between schema and chat (focus follows) |
+| `:chat clear`                | Wipe the chat log and the persisted session for this connection |
+| `:chat settings`, `:chat config` | Open the LLM provider modal (backend / model / API key)     |
 
 ### Connection list
 
