@@ -377,6 +377,16 @@ fn translate_global(key: KeyEvent) -> Option<Action> {
     if key.code == KeyCode::Char('=') && key.modifiers.is_empty() {
         return Some(Action::FormatEditor(FormatScope::Cursor));
     }
+    // Panel resize is global so the user doesn't have to chase focus
+    // into the schema pane (or remember the Ctrl+W chord) just to widen
+    // the right column. Bare `<` grows, `>` shrinks; the Ctrl+W variants
+    // remain in `translate_window_chord` for muscle memory.
+    if key.code == KeyCode::Char('<') && key.modifiers.is_empty() {
+        return Some(Action::ResizeSchema(2));
+    }
+    if key.code == KeyCode::Char('>') && key.modifiers.is_empty() {
+        return Some(Action::ResizeSchema(-2));
+    }
     None
 }
 
@@ -489,8 +499,6 @@ fn translate_schema_key(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('g'), m) if m.is_empty() => {
             return Some(Action::SetPendingChord(PendingChord::GG));
         }
-        (KeyCode::Char('<'), _) => return Some(Action::ResizeSchema(2)),
-        (KeyCode::Char('>'), _) => return Some(Action::ResizeSchema(-2)),
         // Esc returns focus to the editor without flipping the right
         // panel back to chat — same gesture as `Ctrl+W h`, just shorter.
         (KeyCode::Esc, m) if m.is_empty() => return Some(Action::FocusPanel(Focus::Editor)),
@@ -534,11 +542,16 @@ fn translate_llm_settings_key(state: &LlmSettingsState, key: KeyEvent) -> Option
         (KeyCode::Tab, _) => Some(Action::LlmSettings(LlmSettingsAction::CycleField)),
         (KeyCode::BackTab, _) => Some(Action::LlmSettings(LlmSettingsAction::CycleFieldBack)),
         // Backend cycling — only fires when the Backend field is active so
-        // the user can use ← / → / `[` / `]` normally inside text fields.
-        (KeyCode::Left, true) | (KeyCode::Char('['), true) if on_backend => {
+        // the user can use ← / → / `[` / `]` / h / l normally inside text
+        // fields.
+        (KeyCode::Left, true) | (KeyCode::Char('['), true) | (KeyCode::Char('h'), true)
+            if on_backend =>
+        {
             Some(Action::LlmSettings(LlmSettingsAction::CycleBackend(-1)))
         }
-        (KeyCode::Right, true) | (KeyCode::Char(']'), true) if on_backend => {
+        (KeyCode::Right, true) | (KeyCode::Char(']'), true) | (KeyCode::Char('l'), true)
+            if on_backend =>
+        {
             Some(Action::LlmSettings(LlmSettingsAction::CycleBackend(1)))
         }
         _ => Some(Action::LlmSettings(LlmSettingsAction::Input(Input::from(
@@ -1271,6 +1284,16 @@ mod tests {
             translate_global(key(KeyCode::Char('='))),
             Some(Action::FormatEditor(FormatScope::Cursor))
         ));
+        // Bare `<` / `>` resize the schema panel from any global-
+        // intercept context (Editor Normal/Visual, Schema, Chat normal).
+        assert!(matches!(
+            translate_global(key(KeyCode::Char('<'))),
+            Some(Action::ResizeSchema(2))
+        ));
+        assert!(matches!(
+            translate_global(key(KeyCode::Char('>'))),
+            Some(Action::ResizeSchema(-2))
+        ));
         assert!(translate_global(key(KeyCode::Char('a'))).is_none());
     }
 
@@ -1295,11 +1318,10 @@ mod tests {
             translate_schema_key(key(KeyCode::Char('g'))),
             Some(Action::SetPendingChord(PendingChord::GG))
         ));
-        // `<` / `>` resize the panel.
-        assert!(matches!(
-            translate_schema_key(key(KeyCode::Char('<'))),
-            Some(Action::ResizeSchema(2))
-        ));
+        // `<` / `>` no longer live here — they're global (see
+        // `global_keys_recognised`).
+        assert!(translate_schema_key(key(KeyCode::Char('<'))).is_none());
+        assert!(translate_schema_key(key(KeyCode::Char('>'))).is_none());
         assert!(translate_schema_key(key(KeyCode::Char('z'))).is_none());
     }
 
@@ -1442,10 +1464,28 @@ mod tests {
             &translate_llm_settings_key(&state, key(KeyCode::Char('['))),
             "Input"
         ));
+        // h/l also passthrough on non-Backend fields so users can type
+        // them into the Model / API key textareas.
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Char('h'))),
+            "Input"
+        ));
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Char('l'))),
+            "Input"
+        ));
         state.focus = LlmSettingsField::Backend;
         assert!(matches_action(
             &translate_llm_settings_key(&state, key(KeyCode::Char('['))),
             "CycleBackend(-1)"
+        ));
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Char('h'))),
+            "CycleBackend(-1)"
+        ));
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Char('l'))),
+            "CycleBackend(1)"
         ));
     }
 
