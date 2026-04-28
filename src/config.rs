@@ -14,30 +14,20 @@ pub const FILE_NAME: &str = "config.toml";
 /// The crypto block is present iff the store is in encrypted mode. Connection
 /// entries carry either a plaintext `url` (plaintext store) or `nonce` +
 /// `ciphertext` (encrypted store) — never both.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_theme")]
-    pub theme: ThemeKind,
-    #[serde(default = "default_schema_width")]
-    pub schema_width: u16,
+    /// `None` when the field is not pinned by the project config —
+    /// defaults to user config (then compiled default) at App seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ThemeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_width: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crypto: Option<CryptoBlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connections: Vec<ConnectionEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub llm_providers: Vec<LlmProviderEntry>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            theme: default_theme(),
-            schema_width: default_schema_width(),
-            crypto: None,
-            connections: Vec::new(),
-            llm_providers: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,12 +87,6 @@ pub struct LlmProviderEntry {
     pub ciphertext: Option<String>,
 }
 
-fn default_theme() -> ThemeKind {
-    ThemeKind::Dark
-}
-fn default_schema_width() -> u16 {
-    crate::app::DEFAULT_SCHEMA_WIDTH
-}
 fn default_m_cost() -> u32 {
     crate::crypto::KdfParams::default().m_cost
 }
@@ -187,18 +171,18 @@ impl ConfigStore {
     }
 
     pub fn set_theme(&mut self, theme: ThemeKind) -> io::Result<()> {
-        if self.state.theme == theme {
+        if self.state.theme == Some(theme) {
             return Ok(());
         }
-        self.state.theme = theme;
+        self.state.theme = Some(theme);
         self.flush()
     }
 
     pub fn set_schema_width(&mut self, width: u16) -> io::Result<()> {
-        if self.state.schema_width == width {
+        if self.state.schema_width == Some(width) {
             return Ok(());
         }
-        self.state.schema_width = width;
+        self.state.schema_width = Some(width);
         self.flush()
     }
 
@@ -317,8 +301,8 @@ mod tests {
     #[test]
     fn config_with_crypto_and_connections_round_trips() {
         let cfg = Config {
-            theme: ThemeKind::Light,
-            schema_width: 50,
+            theme: Some(ThemeKind::Light),
+            schema_width: Some(50),
             crypto: Some(CryptoBlock {
                 salt: "AAAA".into(),
                 verifier_nonce: "BBBB".into(),
@@ -419,8 +403,8 @@ mod tests {
     fn missing_optional_blocks_deserialize_to_none_and_empty() {
         let text = "theme = \"dark\"\nschema_width = 36\n";
         let cfg: Config = toml::from_str(text).unwrap();
-        assert_eq!(cfg.theme, ThemeKind::Dark);
-        assert_eq!(cfg.schema_width, 36);
+        assert_eq!(cfg.theme, Some(ThemeKind::Dark));
+        assert_eq!(cfg.schema_width, Some(36));
         assert!(cfg.crypto.is_none());
         assert!(cfg.connections.is_empty());
     }
