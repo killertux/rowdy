@@ -273,60 +273,126 @@ impl ChatPanel {
         }
     }
 
-    /// Estimated total rendered height of the message log given a
-    /// wrapping width. Mirrors the line-building logic in
-    /// `ui/chat_view.rs::build_log_lines` plus a `ceil(chars/width)`
-    /// estimate for word wrap. Mild inaccuracy is acceptable — a
-    /// slightly-off scroll max just means the user might need one more
-    /// PgDn keystroke to truly reach the bottom.
+    /// Total rendered height of the message log at this width. Exact —
+    /// it walks the same visual-line layout the renderer uses, so
+    /// `clamp_scroll` snaps to a max where the bottom slice truly ends
+    /// on the last visual line. (The previous `ceil(chars/width)`
+    /// estimator drifted from `Paragraph::wrap`'s word-aware behaviour,
+    /// causing the tail to render below the viewport — which the user
+    /// saw as text "behind" the composer.)
     pub fn content_height(&self, width: u16) -> u16 {
         if self.messages.is_empty() {
             return 1; // placeholder line "No messages yet…"
         }
-        let w = width.max(1);
         let mut total: u16 = 0;
         for (idx, msg) in self.messages.iter().enumerate() {
             if idx > 0 {
                 total = total.saturating_add(1); // separator
             }
-            // Role header line (always 1 visual line in practice).
+            // Role header is short ("▌ rowdy"); treat as 1 visual line.
             total = total.saturating_add(1);
             for block in &msg.blocks {
-                match block {
-                    ChatBlock::Text(s) => {
-                        for line in s.split('\n') {
-                            total = total.saturating_add(line_wrap_count(line, w));
-                        }
-                    }
-                    ChatBlock::ToolCall {
-                        name, args_json, ..
-                    } => {
-                        let approx = name.chars().count() + args_json.chars().count() + 12;
-                        total = total.saturating_add(line_wrap_count_hint(approx as u32, w));
-                    }
-                    ChatBlock::ToolResult { name, .. } => {
-                        let approx = name.chars().count() + 12;
-                        total = total.saturating_add(line_wrap_count_hint(approx as u32, w));
-                    }
-                }
+                total = total.saturating_add(block_visual_lines(block, width));
             }
         }
         total
     }
 }
 
-fn line_wrap_count(text: &str, width: u16) -> u16 {
-    let chars = text.chars().count() as u32;
-    line_wrap_count_hint(chars, width)
+fn block_visual_lines(block: &ChatBlock, width: u16) -> u16 {
+    match block {
+        ChatBlock::Text(s) => {
+            let mut total: u16 = 0;
+            for raw_line in s.split('\n') {
+                total = total.saturating_add(wrap_visual_count(raw_line, width));
+            }
+            total
+        }
+        ChatBlock::ToolCall {
+            name, args_json, ..
+        } => {
+            let raw = format!("◆ tool: {name}({args_json})");
+            wrap_visual_count(&raw, width)
+        }
+        ChatBlock::ToolResult { name, error, .. } => {
+            let prefix = if error.is_some() {
+                "✗ result"
+            } else {
+                "✓ result"
+            };
+            let raw = format!("{prefix}: {name}");
+            wrap_visual_count(&raw, width)
+        }
+    }
 }
 
-fn line_wrap_count_hint(chars: u32, width: u16) -> u16 {
-    if chars == 0 {
-        return 1;
+fn wrap_visual_count(text: &str, width: u16) -> u16 {
+    let n = wrap_text(text, width).len();
+    n.min(u16::MAX as usize) as u16
+}
+
+/// Word-aware greedy wrap. Whitespace runs are absorbed at line breaks;
+/// non-whitespace runs longer than `width` are hard-wrapped by chars.
+/// Empty input returns one empty line so a blank message still occupies
+/// a visual row.
+pub fn wrap_text(text: &str, width: u16) -> Vec<String> {
+    let w = width.max(1) as usize;
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
     }
-    let w = width.max(1) as u32;
-    let n = chars.div_ceil(w);
-    n.min(u16::MAX as u32) as u16
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    let mut i = 0;
+    while i < chars.len() {
+        let start = i;
+        let is_ws = chars[i].is_whitespace();
+        while i < chars.len() && chars[i].is_whitespace() == is_ws {
+            i += 1;
+        }
+        let token: String = chars[start..i].iter().collect();
+        let token_w = i - start;
+        if current_w + token_w <= w {
+            current.push_str(&token);
+            current_w += token_w;
+            continue;
+        }
+        // Doesn't fit on the current line.
+        if is_ws {
+            // Whitespace at a wrap boundary is dropped — start a new line.
+            lines.push(std::mem::take(&mut current));
+            current_w = 0;
+            continue;
+        }
+        // Non-whitespace token. Flush whatever's on the current line —
+        // current_w is always overwritten in the branches below.
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        if token_w > w {
+            // Token longer than the panel — hard-wrap by char count.
+            let mut buf = String::new();
+            let mut buf_w = 0usize;
+            for ch in token.chars() {
+                buf.push(ch);
+                buf_w += 1;
+                if buf_w == w {
+                    lines.push(std::mem::take(&mut buf));
+                    buf_w = 0;
+                }
+            }
+            current = buf;
+            current_w = buf_w;
+        } else {
+            current.push_str(&token);
+            current_w = token_w;
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 fn build_composer() -> TextArea<'static> {
@@ -490,7 +556,62 @@ mod tests {
         assert_eq!(chat.content_height(40), 1);
 
         chat.push_message(ChatMessage::user_text("a".repeat(45)));
-        // Width 20 → message wraps into ceil(45/20) = 3 lines + 1 header.
+        // Width 20 → message wraps into 3 lines (one 45-char word
+        // hard-wraps: 20 + 20 + 5) + 1 header.
         assert_eq!(chat.content_height(20), 4);
+    }
+
+    #[test]
+    fn wrap_text_breaks_on_word_boundaries() {
+        let lines = wrap_text("the quick brown fox", 10);
+        // "the quick " is 10 chars (fits), "brown fox" wraps after.
+        assert!(lines.iter().all(|l| l.chars().count() <= 10));
+        // No partial words across lines (each line is a complete prefix).
+        let recombined: String = lines.join("");
+        // Whitespace at wrap boundaries is dropped, so recombined may
+        // omit one separator space — assert that we kept all the
+        // non-whitespace content.
+        let nws: String = recombined.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(nws, "thequickbrownfox");
+    }
+
+    #[test]
+    fn wrap_text_hard_wraps_oversize_words() {
+        // 25 a's at width 10 → 10 + 10 + 5.
+        let lines = wrap_text(&"a".repeat(25), 10);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].chars().count(), 10);
+        assert_eq!(lines[1].chars().count(), 10);
+        assert_eq!(lines[2].chars().count(), 5);
+    }
+
+    #[test]
+    fn wrap_text_empty_returns_one_blank_line() {
+        // A blank line still occupies one row in the rendered log so
+        // separators don't collapse on the way to the bottom.
+        assert_eq!(wrap_text("", 20), vec![String::new()]);
+    }
+
+    #[test]
+    fn content_height_matches_renderer_visual_lines() {
+        // Regression for the "tail behind composer" bug: clamp_scroll
+        // must use the same line count as the renderer would emit.
+        let mut chat = ChatPanel::new();
+        chat.push_message(ChatMessage::user_text(
+            "hi there friend, this is a longish message that will wrap",
+        ));
+        chat.append_assistant_text("answering with several short words here");
+        // Compute expected = sum of role-header (1 each) + separator (1)
+        // + wrapped lines per text block.
+        let width = 20;
+        let user_lines = wrap_text(
+            "hi there friend, this is a longish message that will wrap",
+            width,
+        )
+        .len() as u16;
+        let asst_lines = wrap_text("answering with several short words here", width).len() as u16;
+        let expected =
+            1 /* user header */ + user_lines + 1 /* sep */ + 1 /* asst header */ + asst_lines;
+        assert_eq!(chat.content_height(width), expected);
     }
 }

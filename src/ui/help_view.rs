@@ -196,8 +196,8 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 desc: "Focus editor / right panel (right panel = schema or chat)",
             },
             HelpEntry {
-                keys: "Ctrl+W < / >",
-                desc: "Grow / shrink schema panel",
+                keys: "< / >",
+                desc: "Grow / shrink schema panel (also Ctrl+W < / >)",
             },
             HelpEntry {
                 keys: "Ctrl+C",
@@ -284,10 +284,6 @@ const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 keys: "gg / G",
                 desc: "Top / bottom",
-            },
-            HelpEntry {
-                keys: "< / >",
-                desc: "Grow / shrink the panel width",
             },
             HelpEntry {
                 keys: "Esc",

@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
 use crate::app::App;
-use crate::state::chat::{ChatBlock, ChatMessage, ChatPanel, ChatRole};
+use crate::state::chat::{ChatBlock, ChatMessage, ChatPanel, ChatRole, wrap_text};
 use crate::state::focus::Focus;
 use crate::state::layout::ChatLayout;
 use crate::ui::theme::Theme;
@@ -129,16 +129,20 @@ fn render_log(chat: &ChatPanel, theme: &Theme, area: Rect, buf: &mut Buffer) {
         return;
     }
 
-    let lines = build_log_lines(chat, theme);
-    let scroll = chat.scroll;
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0))
+    // Pre-wrap to visual lines so the slice we render exactly matches
+    // what `state::chat::content_height` counts. Without this, the
+    // tail of the log used to spill below the viewport when scrolled
+    // to the bottom (the "behind the composer" bug).
+    let visual = build_visual_lines(chat, theme, area.width);
+    let scroll = chat.scroll as usize;
+    let h = area.height as usize;
+    let visible: Vec<Line<'_>> = visual.into_iter().skip(scroll).take(h).collect();
+    Paragraph::new(visible)
         .style(Style::default().fg(theme.fg).bg(theme.bg))
         .render(area, buf);
 }
 
-fn build_log_lines<'a>(chat: &'a ChatPanel, theme: &'a Theme) -> Vec<Line<'a>> {
+fn build_visual_lines<'a>(chat: &'a ChatPanel, theme: &'a Theme, width: u16) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
     for (idx, msg) in chat.messages.iter().enumerate() {
         if idx > 0 {
@@ -146,7 +150,7 @@ fn build_log_lines<'a>(chat: &'a ChatPanel, theme: &'a Theme) -> Vec<Line<'a>> {
         }
         lines.push(role_header_line(msg, theme));
         for block in &msg.blocks {
-            push_block_lines(block, msg, theme, &mut lines);
+            push_block_visual_lines(block, msg, theme, width, &mut lines);
         }
     }
     lines
@@ -167,38 +171,40 @@ fn role_header_line<'a>(msg: &ChatMessage, theme: &'a Theme) -> Line<'a> {
     ))
 }
 
-fn push_block_lines<'a>(
+fn push_block_visual_lines<'a>(
     block: &'a ChatBlock,
     msg: &ChatMessage,
     theme: &'a Theme,
+    width: u16,
     out: &mut Vec<Line<'a>>,
 ) {
+    let push_wrapped = |raw: &str, style: Style, out: &mut Vec<Line<'a>>| {
+        for visual in wrap_text(raw, width) {
+            out.push(Line::from(Span::styled(visual, style)));
+        }
+    };
     match block {
         ChatBlock::Text(s) => {
-            for line in s.split('\n') {
-                out.push(Line::from(Span::styled(
-                    line.to_string(),
-                    text_style(msg.role, theme),
-                )));
+            let style = text_style(msg.role, theme);
+            for raw_line in s.split('\n') {
+                push_wrapped(raw_line, style, out);
             }
         }
         ChatBlock::ToolCall {
             name, args_json, ..
         } => {
-            out.push(Line::from(Span::styled(
-                format!("◆ tool: {name}({args_json})"),
-                Style::default().fg(theme.fg_dim).bg(theme.bg),
-            )));
+            let style = Style::default().fg(theme.fg_dim).bg(theme.bg);
+            let raw = format!("◆ tool: {name}({args_json})");
+            push_wrapped(&raw, style, out);
         }
         ChatBlock::ToolResult { name, error, .. } => {
             let (prefix, color) = match error {
                 Some(_) => ("✗ result", theme.status_error),
                 None => ("✓ result", theme.fg_dim),
             };
-            out.push(Line::from(Span::styled(
-                format!("{prefix}: {name}"),
-                Style::default().fg(color).bg(theme.bg),
-            )));
+            let style = Style::default().fg(color).bg(theme.bg);
+            let raw = format!("{prefix}: {name}");
+            push_wrapped(&raw, style, out);
         }
     }
 }

@@ -229,6 +229,19 @@ fn cursor_to_offset(state: &EditorState) -> usize {
 
 fn segment_bounds(chars: &[char], cursor: usize) -> (usize, usize) {
     let cursor = cursor.min(chars.len());
+    // edtui Normal-mode cursors at end-of-line sit at `col == row.len`,
+    // which flattens to a newline (or end-of-buffer) — one past the
+    // statement-terminating ';'. Without this bias the forward search
+    // skips over the ';' and picks the *next* statement, contradicting
+    // the user's "run the query I'm in" expectation.
+    let cursor = if cursor > 0
+        && matches!(chars.get(cursor), None | Some(&'\n'))
+        && chars.get(cursor - 1) == Some(&';')
+    {
+        cursor - 1
+    } else {
+        cursor
+    };
     let start = chars[..cursor]
         .iter()
         .rposition(|c| *c == ';')
@@ -346,6 +359,65 @@ mod tests {
             let idx = offset_to_index(&chars, offset);
             assert_eq!(index_to_offset(&chars, idx), offset, "offset {offset}");
         }
+    }
+
+    #[test]
+    fn cursor_on_semicolon_returns_preceding_statement_singleline() {
+        let state = state_with("SELECT 1; SELECT 2;", 0, 8); // on first ';'
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "SELECT 1");
+    }
+
+    #[test]
+    fn cursor_on_semicolon_returns_preceding_statement_multiline() {
+        let state = state_with("SELECT 1;\nSELECT 2;", 0, 8); // on first ';'
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "SELECT 1");
+    }
+
+    #[test]
+    fn cursor_after_semicolon_returns_following_statement() {
+        let state = state_with("SELECT 1; SELECT 2;", 0, 9); // on space after ';'
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "SELECT 2");
+    }
+
+    #[test]
+    fn cursor_on_first_letter_after_semicolon_returns_following_statement() {
+        let state = state_with("SELECT 1;SELECT 2;", 0, 9); // on 'S' of SELECT 2
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "SELECT 2");
+    }
+
+    #[test]
+    fn cursor_on_terminal_semicolon_returns_only_statement() {
+        let state = state_with("SELECT 1;", 0, 8); // on ';' at end
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "SELECT 1");
+    }
+
+    #[test]
+    fn cursor_one_past_semicolon_at_end_of_line_returns_preceding() {
+        // edtui Normal mode often parks the cursor at row.len (the
+        // newline) rather than row.len-1 (on the last char). Without the
+        // bias in `segment_bounds`, this would pick the next statement.
+        let state = state_with("SELECT 1;\nSELECT 2;", 0, 9);
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "SELECT 1");
+    }
+
+    #[test]
+    fn cursor_one_past_semicolon_at_end_of_buffer_returns_only_statement() {
+        // Same edge case, but the trailing ';' is also EOB.
+        let state = state_with("SELECT 1;", 0, 9);
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "SELECT 1");
+    }
+
+    fn state_with(buffer: &str, row: usize, col: usize) -> EditorState {
+        let mut state = EditorState::new(Lines::from(buffer));
+        state.cursor = Index2::new(row, col);
+        state
     }
 
     #[test]

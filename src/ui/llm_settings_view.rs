@@ -103,7 +103,7 @@ impl Widget for LlmSettingsForm<'_> {
             .render(chunks[5], buf);
 
         Paragraph::new(Line::from(Span::styled(
-            "Tab cycles · ←/→ change provider · Enter saves · Esc cancels",
+            "Tab cycles · ←/→ or h/l change provider · Enter saves · Esc cancels",
             Style::default().fg(self.theme.fg_dim).bg(self.theme.bg),
         )))
         .wrap(Wrap { trim: true })
