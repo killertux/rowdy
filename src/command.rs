@@ -34,6 +34,17 @@ pub enum Command {
     Format(FormatScope),
     Reload,
     Conn(ConnSubcommand),
+    Chat(ChatSubcommand),
+}
+
+/// `:chat` subcommands. Bare `:chat` toggles the right panel between
+/// schema and chat; `:chat clear` wipes the message log; `:chat settings`
+/// (phase 3) opens the provider/key configuration overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatSubcommand {
+    Toggle,
+    Clear,
+    Settings,
 }
 
 /// Which slice of the editor buffer `:format` should rewrite.
@@ -94,6 +105,7 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
         "format" | "fmt" => parse_format(&args)?,
         "reload" => Command::Reload,
         "conn" | "conns" => Command::Conn(parse_conn(&args)?),
+        "chat" => Command::Chat(parse_chat(&args)?),
         _ => return Err(format!("unknown command: {cmd}")),
     };
     Ok(Some(parsed))
@@ -166,6 +178,19 @@ fn parse_target(rest: &[&str]) -> Result<ParsedTarget, String> {
         Some(">") if rest.len() == 1 => return Err("missing path after `>`".into()),
         Some(">") => ParsedTarget::File(rest[1..].join(" ")),
         Some(_) => ParsedTarget::File(rest.join(" ")),
+    })
+}
+
+fn parse_chat(args: &[&str]) -> Result<ChatSubcommand, String> {
+    Ok(match args.first().copied() {
+        None => ChatSubcommand::Toggle,
+        Some("clear") => ChatSubcommand::Clear,
+        Some("settings") | Some("config") => ChatSubcommand::Settings,
+        Some(other) => {
+            return Err(format!(
+                "unknown :chat subcommand: {other} (use clear/settings or omit)"
+            ));
+        }
     })
 }
 
@@ -456,6 +481,38 @@ mod tests {
         assert!(matches!(
             parse("conn yikes"),
             Err(msg) if msg.contains("unknown :conn subcommand")
+        ));
+    }
+
+    #[test]
+    fn chat_bare_is_toggle() {
+        assert_eq!(
+            parse("chat"),
+            Ok(Some(Command::Chat(ChatSubcommand::Toggle)))
+        );
+    }
+
+    #[test]
+    fn chat_subcommands() {
+        assert_eq!(
+            parse("chat clear"),
+            Ok(Some(Command::Chat(ChatSubcommand::Clear)))
+        );
+        assert_eq!(
+            parse("chat settings"),
+            Ok(Some(Command::Chat(ChatSubcommand::Settings)))
+        );
+        assert_eq!(
+            parse("chat config"),
+            Ok(Some(Command::Chat(ChatSubcommand::Settings)))
+        );
+    }
+
+    #[test]
+    fn chat_unknown_subcommand() {
+        assert!(matches!(
+            parse("chat yikes"),
+            Err(msg) if msg.contains("unknown :chat subcommand")
         ));
     }
 }

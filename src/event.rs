@@ -6,8 +6,8 @@ use ratatui::crossterm::event::{
 use ratatui_textarea::Input;
 
 use crate::action::{
-    Action, AuthAction, CommandAction, CompletionAction, ConnFormAction, ConnListAction, HelpAxis,
-    HelpScrollDelta, MouseTarget, ResultNavAction, SchemaAction,
+    Action, AuthAction, ChatAction, CommandAction, CompletionAction, ConnFormAction,
+    ConnListAction, HelpAxis, HelpScrollDelta, MouseTarget, ResultNavAction, SchemaAction,
 };
 use crate::app::App;
 use crate::command::FormatScope;
@@ -16,6 +16,7 @@ use crate::state::focus::{Focus, PendingChord};
 use crate::state::layout::{DragState, rect_contains};
 use crate::state::overlay::Overlay;
 use crate::state::results::ResultViewMode;
+use crate::state::right_panel::RightPanelMode;
 use crate::state::schema::NodeId;
 use crate::state::screen::Screen;
 
@@ -273,6 +274,7 @@ fn translate_normal_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action
     match app.focus {
         Focus::Editor => Some(Action::EditorEvent(raw)),
         Focus::Schema => translate_schema_key(key),
+        Focus::Chat => translate_chat_key(key),
     }
 }
 
@@ -301,7 +303,7 @@ fn translate_completion_popover_key(key: KeyEvent) -> Option<Action> {
 
 fn translate_pending_chord(app: &App, key: KeyEvent) -> Option<Action> {
     match app.pending {
-        PendingChord::Window => translate_window_chord(key),
+        PendingChord::Window => translate_window_chord(app.right_panel, key),
         PendingChord::GG => translate_gg_chord(app, key),
         PendingChord::Leader => translate_leader_chord(app, key),
         PendingChord::None => None,
@@ -315,6 +317,10 @@ fn can_intercept_globally(app: &App) -> bool {
             EditorMode::Normal | EditorMode::Visual
         ),
         Focus::Schema => true,
+        // The chat composer is always in "insert mode" — keystrokes flow
+        // into the TextArea. Globals like `:` and `Ctrl+W` are routed
+        // explicitly inside `translate_chat_key`.
+        Focus::Chat => false,
     }
 }
 
@@ -412,10 +418,16 @@ fn translate_expanded_key(key: KeyEvent, view: &ResultViewMode) -> Option<Action
     Some(Action::ResultNav(action))
 }
 
-fn translate_window_chord(key: KeyEvent) -> Option<Action> {
+fn translate_window_chord(right: RightPanelMode, key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char('h') => Some(Action::FocusPanel(Focus::Editor)),
-        KeyCode::Char('l') => Some(Action::FocusPanel(Focus::Schema)),
+        // Ctrl+W l targets whichever pane is currently painted on the
+        // right — Schema by default, Chat once the user has toggled.
+        KeyCode::Char('l') => Some(Action::FocusPanel(if right.is_chat() {
+            Focus::Chat
+        } else {
+            Focus::Schema
+        })),
         KeyCode::Char('<') => Some(Action::ResizeSchema(2)),
         KeyCode::Char('>') => Some(Action::ResizeSchema(-2)),
         // No vertical neighbours yet; chord is consumed by the loop regardless.
@@ -452,6 +464,44 @@ fn translate_gg_chord(app: &App, key: KeyEvent) -> Option<Action> {
         (Screen::Normal, Focus::Schema) => Some(Action::Schema(SchemaAction::Top)),
         _ => None,
     }
+}
+
+fn translate_chat_key(key: KeyEvent) -> Option<Action> {
+    if let Some(act) = clipboard_arm(
+        key,
+        ChatAction::Paste(None),
+        ChatAction::Copy,
+        ChatAction::Cut,
+    ) {
+        return Some(Action::Chat(act));
+    }
+    let mods = key.modifiers;
+    let bare = mods.is_empty();
+    let shift_only = mods == KeyModifiers::SHIFT;
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+
+    // Ctrl+W routes back through the window-chord layer so the user can
+    // hop to the editor without leaving chat focus first.
+    if key.code == KeyCode::Char('w') && ctrl {
+        return Some(Action::SetPendingChord(PendingChord::Window));
+    }
+    // Esc bounces to schema — the chat panel doesn't survive Esc.
+    if key.code == KeyCode::Esc && bare {
+        return Some(Action::ToggleRightPanel);
+    }
+    // Plain Enter submits; Shift+Enter falls through to the TextArea
+    // (insert newline). The composer is multi-line by design.
+    if key.code == KeyCode::Enter && bare {
+        return Some(Action::Chat(ChatAction::Submit));
+    }
+    if (key.code == KeyCode::PageUp) && bare {
+        return Some(Action::Chat(ChatAction::ScrollUp(8)));
+    }
+    if (key.code == KeyCode::PageDown) && bare {
+        return Some(Action::Chat(ChatAction::ScrollDown(8)));
+    }
+    let _ = shift_only;
+    Some(Action::Chat(ChatAction::Input(Input::from(key))))
 }
 
 // ============================================================================
@@ -563,9 +613,14 @@ fn translate_mouse_expanded(app: &App, ev: MouseEvent) -> Option<Action> {
 }
 
 fn translate_mouse_workspace(app: &App, ev: MouseEvent) -> Option<Action> {
-    // Order: schema → editor → inline-result. Each is a thin wrapper that
-    // hit-tests against `app.layout` and emits an action if the click lands.
+    // Order: schema → chat → editor → inline-result. Each is a thin wrapper
+    // that hit-tests against `app.layout` and emits an action if the click
+    // lands. Schema and chat are mutually exclusive (only one populates its
+    // layout slot per frame) so order between them doesn't matter.
     if let Some(action) = translate_mouse_schema(app, ev) {
+        return Some(action);
+    }
+    if let Some(action) = translate_mouse_chat(app, ev) {
         return Some(action);
     }
     if let Some(action) = translate_mouse_inline(app, ev) {
@@ -575,6 +630,25 @@ fn translate_mouse_workspace(app: &App, ev: MouseEvent) -> Option<Action> {
         return Some(action);
     }
     None
+}
+
+fn translate_mouse_chat(app: &App, ev: MouseEvent) -> Option<Action> {
+    let layout = app.layout.chat.as_ref()?;
+    if !rect_contains(layout.area, ev.column, ev.row) {
+        return None;
+    }
+    match ev.kind {
+        MouseEventKind::ScrollDown => Some(Action::Chat(ChatAction::ScrollDown(3))),
+        MouseEventKind::ScrollUp => Some(Action::Chat(ChatAction::ScrollUp(3))),
+        MouseEventKind::Down(MouseButton::Left) => {
+            // A click anywhere inside the chat panel focuses it. We don't
+            // attempt to position the composer cursor — TextArea doesn't
+            // expose a "click → cursor" hook, and the focus change alone
+            // is what the user is usually after.
+            Some(Action::FocusPanel(Focus::Chat))
+        }
+        _ => None,
+    }
 }
 
 fn translate_mouse_schema(app: &App, ev: MouseEvent) -> Option<Action> {
@@ -983,24 +1057,34 @@ mod tests {
 
     #[test]
     fn window_chord_focus_and_resize() {
+        let m = RightPanelMode::Schema;
         assert!(matches!(
-            translate_window_chord(key(KeyCode::Char('h'))),
+            translate_window_chord(m, key(KeyCode::Char('h'))),
             Some(Action::FocusPanel(Focus::Editor))
         ));
         assert!(matches!(
-            translate_window_chord(key(KeyCode::Char('l'))),
+            translate_window_chord(m, key(KeyCode::Char('l'))),
             Some(Action::FocusPanel(Focus::Schema))
         ));
         // `<` grows the schema panel, `>` shrinks it.
         assert!(matches!(
-            translate_window_chord(key(KeyCode::Char('<'))),
+            translate_window_chord(m, key(KeyCode::Char('<'))),
             Some(Action::ResizeSchema(2))
         ));
         assert!(matches!(
-            translate_window_chord(key(KeyCode::Char('>'))),
+            translate_window_chord(m, key(KeyCode::Char('>'))),
             Some(Action::ResizeSchema(-2))
         ));
-        assert!(translate_window_chord(key(KeyCode::Char('z'))).is_none());
+        assert!(translate_window_chord(m, key(KeyCode::Char('z'))).is_none());
+    }
+
+    #[test]
+    fn window_chord_l_targets_chat_when_right_panel_is_chat() {
+        // Same chord, different right-panel mode → focus follows the painted pane.
+        assert!(matches!(
+            translate_window_chord(RightPanelMode::Chat, key(KeyCode::Char('l'))),
+            Some(Action::FocusPanel(Focus::Chat))
+        ));
     }
 
     #[test]

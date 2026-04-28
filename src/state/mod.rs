@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod chat;
 pub mod command;
 pub mod completion;
 pub mod conn_form;
@@ -8,6 +9,7 @@ pub mod focus;
 pub mod layout;
 pub mod overlay;
 pub mod results;
+pub mod right_panel;
 pub mod schema;
 pub mod screen;
 pub mod status;

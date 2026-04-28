@@ -2,6 +2,7 @@
 pub enum Focus {
     Editor,
     Schema,
+    Chat,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

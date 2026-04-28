@@ -9,12 +9,14 @@ use crate::connections::ConnectionStore;
 use crate::datasource::DriverKind;
 use crate::llm::keystore::LlmKeyStore;
 use crate::log::Logger;
+use crate::state::chat::ChatPanel;
 use crate::state::completion::CompletionState;
 use crate::state::editor::EditorPanel;
 use crate::state::focus::{Focus, PendingChord};
 use crate::state::layout::LayoutCache;
 use crate::state::overlay::Overlay;
 use crate::state::results::ResultBlock;
+use crate::state::right_panel::RightPanelMode;
 use crate::state::schema::SchemaPanel;
 use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
@@ -34,6 +36,10 @@ pub struct InFlightQuery {
 pub struct App {
     pub editor: EditorPanel,
     pub schema: SchemaPanel,
+    pub chat: ChatPanel,
+    /// Which panel the right side of the workspace shows. Toggles between
+    /// schema and chat; defaults to schema so existing UX is preserved.
+    pub right_panel: RightPanelMode,
     pub status: QueryStatus,
     pub results: Vec<ResultBlock>,
     pub focus: Focus,
@@ -115,6 +121,8 @@ impl App {
         Self {
             editor: EditorPanel::new(),
             schema,
+            chat: ChatPanel::new(),
+            right_panel: RightPanelMode::default(),
             status: QueryStatus::Idle,
             results: Vec::new(),
             focus: Focus::Editor,

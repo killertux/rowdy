@@ -281,6 +281,35 @@ const HELP_SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
+        title: "LLM chat (right panel)",
+        entries: &[
+            HelpEntry {
+                keys: ":chat",
+                desc: "Toggle right panel between schema and chat (focus follows)",
+            },
+            HelpEntry {
+                keys: ":chat clear",
+                desc: "Wipe the message log",
+            },
+            HelpEntry {
+                keys: ":chat settings",
+                desc: "Configure provider / API key (lands in phase 3)",
+            },
+            HelpEntry {
+                keys: "Enter",
+                desc: "Submit composer · Shift+Enter inserts a newline",
+            },
+            HelpEntry {
+                keys: "PgUp / PgDn",
+                desc: "Scroll the message log",
+            },
+            HelpEntry {
+                keys: "Esc",
+                desc: "Bounce back to the schema panel",
+            },
+        ],
+    },
+    HelpSection {
         title: "Expanded result view",
         entries: &[
             HelpEntry {

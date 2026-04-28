@@ -5,13 +5,16 @@ use ratatui::crossterm::event::Event as CtEvent;
 use ratatui_textarea::{Input, TextArea};
 
 mod auth;
+mod chat;
 mod completion;
 mod conn_form;
 mod conn_list;
 
 use crate::app::{App, MAX_SCHEMA_WIDTH, MIN_SCHEMA_WIDTH};
 use crate::clipboard;
-use crate::command::{self, ConnSubcommand, FormatScope, ParsedTarget, ThemeChoice};
+use crate::command::{
+    self, ChatSubcommand, ConnSubcommand, FormatScope, ParsedTarget, ThemeChoice,
+};
 use crate::datasource::{Cell, Column, QueryResult};
 use crate::export::{self, ExportFormat};
 use crate::session;
@@ -90,6 +93,11 @@ pub enum Action {
     ReloadSchemaCache,
     /// Mouse-driven action with a panel-specific target. See [`MouseTarget`].
     Mouse(MouseTarget),
+    /// Per-keystroke or scroll input directed at the chat panel.
+    Chat(ChatAction),
+    /// Flip the right panel between schema and chat. Also moves focus into
+    /// the new right pane so the user can immediately type / navigate.
+    ToggleRightPanel,
 }
 
 /// What a click or scroll-wheel was aimed at. Translated from
@@ -197,6 +205,29 @@ pub enum ConnListAction {
     ConfirmDelete,
     CancelDelete,
     Close,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // `Cancel` lights up in phase 3 once streaming exists.
+pub enum ChatAction {
+    /// Composer keystroke. Routed straight into the `TextArea`.
+    Input(Input),
+    /// `None` reads the system clipboard; `Some(text)` carries the
+    /// terminal's bracketed-paste payload.
+    Paste(Option<String>),
+    Copy,
+    Cut,
+    /// Enter (no modifiers) — submits the composer's contents as a user
+    /// message. Phase 2 stub appends a placeholder assistant reply; phase
+    /// 3 dispatches a real LLM turn.
+    Submit,
+    /// Cancel an in-flight stream (no-op in phase 2; meaningful from
+    /// phase 3 onward).
+    Cancel,
+    /// Wipe the message log and reset the composer.
+    Clear,
+    ScrollUp(u16),
+    ScrollDown(u16),
 }
 
 #[derive(Debug)]
@@ -310,6 +341,8 @@ pub fn apply(app: &mut App, action: Action) {
         Action::Completion(c) => completion::apply(app, c),
         Action::ReloadSchemaCache => reload_schema_cache(app),
         Action::Mouse(target) => apply_mouse(app, target),
+        Action::Chat(a) => chat::apply(app, a),
+        Action::ToggleRightPanel => chat::toggle_right_panel(app),
     }
 }
 
@@ -577,6 +610,21 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         C::Format(scope) => apply(app, Action::FormatEditor(scope)),
         C::Reload => apply(app, Action::ReloadSchemaCache),
         C::Conn(sub) => dispatch_conn(app, sub),
+        C::Chat(sub) => dispatch_chat(app, sub),
+    }
+}
+
+fn dispatch_chat(app: &mut App, sub: ChatSubcommand) {
+    match sub {
+        ChatSubcommand::Toggle => apply(app, Action::ToggleRightPanel),
+        ChatSubcommand::Clear => apply(app, Action::Chat(ChatAction::Clear)),
+        ChatSubcommand::Settings => {
+            // Phase 3 ships the settings overlay; for now surface a clear
+            // hint in the status bar so users know what's coming.
+            app.status = QueryStatus::Failed {
+                error: ":chat settings lands in phase 3".into(),
+            };
+        }
     }
 }
 
