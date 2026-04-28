@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::app::App;
 use crate::state::focus::Focus;
+use crate::state::layout::SchemaLayout;
 use crate::state::schema::{LoadState, NodeKind, SchemaPanel, VisibleRow};
 use crate::ui::theme::Theme;
 
@@ -41,6 +42,35 @@ impl Widget for SchemaPane<'_> {
             .block(block)
             .style(Style::default().fg(theme.fg).bg(theme.bg))
             .render(area, buf);
+    }
+}
+
+/// Compute the same visible-row mapping that `SchemaPane::render` will use,
+/// without painting. Lets the mouse handler resolve a click row to the
+/// `NodeId` rendered there.
+pub fn layout_for(schema: &SchemaPanel, area: Rect) -> SchemaLayout {
+    // The widget paints inside a 1-cell border, so the visible rows occupy
+    // `area.inner(margin = 1)`.
+    let rows_area = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let viewport = rows_area.height as usize;
+    let visible_rows = schema.visible_rows();
+    let total = visible_rows.len();
+    let offset = schema.scroll_offset.min(total.saturating_sub(1));
+    let end = (offset + viewport).min(total);
+    let rows = if total == 0 {
+        Vec::new()
+    } else {
+        visible_rows[offset..end].iter().map(|r| r.id).collect()
+    };
+    SchemaLayout {
+        area,
+        rows_area,
+        rows,
     }
 }
 
@@ -154,4 +184,44 @@ fn themed_block<'a>(theme: &Theme, focused: bool, scroll: Option<String>) -> Blo
         .title(title)
         .title_style(Style::default().fg(theme.fg).bg(theme.bg))
         .style(Style::default().bg(theme.bg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datasource::CatalogInfo;
+
+    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn layout_for_maps_visible_rows_to_node_ids() {
+        let mut panel = SchemaPanel::new(32);
+        panel.populate_catalogs(vec![
+            CatalogInfo { name: "a".into() },
+            CatalogInfo { name: "b".into() },
+            CatalogInfo { name: "c".into() },
+        ]);
+        // 5 rows tall total, with 1-cell border at top and bottom → 3 row slots.
+        let layout = layout_for(&panel, rect(0, 0, 20, 5));
+        assert_eq!(layout.area, rect(0, 0, 20, 5));
+        assert_eq!(layout.rows_area, rect(1, 1, 18, 3));
+        assert_eq!(layout.rows.len(), 3);
+        // First visible row is the first catalog.
+        assert_eq!(layout.rows[0], panel.roots[0]);
+        assert_eq!(layout.rows[2], panel.roots[2]);
+    }
+
+    #[test]
+    fn layout_for_returns_empty_rows_when_panel_is_empty() {
+        let panel = SchemaPanel::new(32);
+        let layout = layout_for(&panel, rect(0, 0, 20, 5));
+        assert!(layout.rows.is_empty());
+    }
 }

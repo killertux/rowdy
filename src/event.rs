@@ -1,17 +1,22 @@
 use edtui::EditorMode;
-use ratatui::crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use ratatui_textarea::Input;
 
 use crate::action::{
     Action, AuthAction, CommandAction, CompletionAction, ConnFormAction, ConnListAction, HelpAxis,
-    HelpScrollDelta, ResultNavAction, SchemaAction,
+    HelpScrollDelta, MouseTarget, ResultNavAction, SchemaAction,
 };
 use crate::app::App;
 use crate::command::FormatScope;
 use crate::export::ExportFormat;
 use crate::state::focus::{Focus, PendingChord};
+use crate::state::layout::{DragState, rect_contains};
 use crate::state::overlay::Overlay;
 use crate::state::results::ResultViewMode;
+use crate::state::schema::NodeId;
 use crate::state::screen::Screen;
 
 pub fn translate(app: &App, event: CtEvent) -> Option<Action> {
@@ -19,16 +24,9 @@ pub fn translate(app: &App, event: CtEvent) -> Option<Action> {
         CtEvent::Key(key) if key.kind == KeyEventKind::Press => translate_key(app, key, event),
         CtEvent::Key(_) => None,
         CtEvent::Paste(_) => translate_paste(app, event),
-        _ if app.focus == Focus::Editor && is_plain_normal(app) => Some(Action::EditorEvent(event)),
+        CtEvent::Mouse(mev) => translate_mouse(app, mev),
         _ => None,
     }
-}
-
-/// `true` when there's no overlay AND the screen is `Normal` — the
-/// "user is just sitting in the editor" state where raw events are
-/// safe to forward to edtui.
-fn is_plain_normal(app: &App) -> bool {
-    app.overlay.is_none() && matches!(app.screen, Screen::Normal)
 }
 
 /// Bracketed-paste flow: many terminals (and macOS by default) handle
@@ -454,6 +452,205 @@ fn translate_gg_chord(app: &App, key: KeyEvent) -> Option<Action> {
         (Screen::Normal, Focus::Schema) => Some(Action::Schema(SchemaAction::Top)),
         _ => None,
     }
+}
+
+// ============================================================================
+// Mouse translation
+// ============================================================================
+
+/// Translate a `MouseEvent` into an `Action` based on which panel the click
+/// landed in. Reads `app.layout` (populated by the previous frame's render)
+/// for hit-testing. Returns `None` for clicks that miss every interactive
+/// surface — most quietly, hover/move events that we don't care about.
+fn translate_mouse(app: &App, ev: MouseEvent) -> Option<Action> {
+    // Always ignore Moved — they fire constantly and we have no use for them.
+    if matches!(ev.kind, MouseEventKind::Moved) {
+        return None;
+    }
+    // Help overlay preempts everything — its own translator handles the
+    // narrow set of mouse interactions (wheel, click-outside-to-close).
+    if let Some(Overlay::Help { .. }) = &app.overlay {
+        return translate_mouse_help(app, ev);
+    }
+    // Other text-input overlays/screens (Auth, EditConnection, ConnList)
+    // capture clicks on their dialog area but otherwise let outside clicks
+    // dismiss them where it's safe.
+    if let Some(target) = translate_mouse_modal(app, ev) {
+        return Some(target);
+    }
+    // Drag-extend doesn't need a fresh hit-test — once a drag is in flight,
+    // drags clamp to the result table and we keep extending the rectangle.
+    if let MouseEventKind::Drag(MouseButton::Left) = ev.kind
+        && matches!(app.layout.drag, Some(DragState::ResultSelect))
+    {
+        let table = app.layout.expanded_result.as_ref()?;
+        let (row, col) = clamp_to_table(table, ev.column, ev.row);
+        return Some(Action::Mouse(MouseTarget::ResultDragTo { row, col }));
+    }
+    if let MouseEventKind::Up(MouseButton::Left) = ev.kind
+        && matches!(app.layout.drag, Some(DragState::ResultSelect))
+    {
+        return Some(Action::Mouse(MouseTarget::ResultDragEnd));
+    }
+    // Expanded result has its own dispatch (the editor isn't on screen).
+    if matches!(app.screen, Screen::ResultExpanded { .. }) {
+        return translate_mouse_expanded(app, ev);
+    }
+    translate_mouse_workspace(app, ev)
+}
+
+/// Hit-test against the help overlay: wheel scrolls, click outside closes.
+fn translate_mouse_help(app: &App, ev: MouseEvent) -> Option<Action> {
+    let area = app.layout.overlay.as_ref()?.area();
+    let inside = rect_contains(area, ev.column, ev.row);
+    match ev.kind {
+        MouseEventKind::ScrollDown if inside => Some(Action::HelpScroll(
+            HelpAxis::Vertical,
+            HelpScrollDelta::By(3),
+        )),
+        MouseEventKind::ScrollUp if inside => Some(Action::HelpScroll(
+            HelpAxis::Vertical,
+            HelpScrollDelta::By(-3),
+        )),
+        MouseEventKind::Down(MouseButton::Left) if !inside => {
+            Some(Action::Mouse(MouseTarget::OverlayDismiss))
+        }
+        _ => None,
+    }
+}
+
+/// Click-handling for modal screens (Auth, ConnList, EditConnection) and
+/// the Command overlay. For now: outside-click dismisses where safe; clicks
+/// inside the modal area are inert (per-row hit-testing comes in a later
+/// pass).
+fn translate_mouse_modal(app: &App, ev: MouseEvent) -> Option<Action> {
+    let dismissible_overlay = matches!(&app.overlay, Some(Overlay::Command(_)));
+    let dismissible_screen = matches!(app.screen, Screen::ConnectionList(_));
+    if !dismissible_overlay && !dismissible_screen {
+        return None;
+    }
+    let MouseEventKind::Down(MouseButton::Left) = ev.kind else {
+        return None;
+    };
+    if let Some(layout) = &app.layout.overlay {
+        if rect_contains(layout.area(), ev.column, ev.row) {
+            return None;
+        }
+    } else if let Some(bottom) = app.layout.bottom_bar
+        && rect_contains(bottom, ev.column, ev.row)
+    {
+        // The command bar lives on the bottom row; clicks there shouldn't
+        // dismiss the overlay (the user is just typing).
+        return None;
+    }
+    Some(Action::Mouse(MouseTarget::OverlayDismiss))
+}
+
+fn translate_mouse_expanded(app: &App, ev: MouseEvent) -> Option<Action> {
+    let table = app.layout.expanded_result.as_ref()?;
+    if !rect_contains(table.area, ev.column, ev.row) {
+        return None;
+    }
+    match ev.kind {
+        MouseEventKind::ScrollDown => Some(Action::Mouse(MouseTarget::ResultScroll(3))),
+        MouseEventKind::ScrollUp => Some(Action::Mouse(MouseTarget::ResultScroll(-3))),
+        MouseEventKind::Down(MouseButton::Left) => {
+            let (row, col) = table.cell_at(ev.column, ev.row)?;
+            Some(Action::Mouse(MouseTarget::ResultDragStart { row, col }))
+        }
+        _ => None,
+    }
+}
+
+fn translate_mouse_workspace(app: &App, ev: MouseEvent) -> Option<Action> {
+    // Order: schema → editor → inline-result. Each is a thin wrapper that
+    // hit-tests against `app.layout` and emits an action if the click lands.
+    if let Some(action) = translate_mouse_schema(app, ev) {
+        return Some(action);
+    }
+    if let Some(action) = translate_mouse_inline(app, ev) {
+        return Some(action);
+    }
+    if let Some(action) = translate_mouse_editor(app, ev) {
+        return Some(action);
+    }
+    None
+}
+
+fn translate_mouse_schema(app: &App, ev: MouseEvent) -> Option<Action> {
+    let layout = app.layout.schema.as_ref()?;
+    if !rect_contains(layout.area, ev.column, ev.row) {
+        return None;
+    }
+    match ev.kind {
+        MouseEventKind::ScrollDown => Some(Action::Mouse(MouseTarget::SchemaScroll(3))),
+        MouseEventKind::ScrollUp => Some(Action::Mouse(MouseTarget::SchemaScroll(-3))),
+        MouseEventKind::Down(MouseButton::Left) => {
+            let row_idx = (ev.row.checked_sub(layout.rows_area.y))? as usize;
+            let id: NodeId = *layout.rows.get(row_idx)?;
+            // Clicks on the leading indent + chevron column toggle expand/collapse;
+            // anywhere else just selects. We don't currently track depth in
+            // `SchemaLayout`, so use the leftmost few columns as a pragmatic
+            // chevron hit-zone — far enough that the user landing on the
+            // glyph counts, narrow enough that clicking on a label still
+            // means "select this row".
+            let col_local = ev.column.saturating_sub(layout.rows_area.x);
+            if col_local <= 1 {
+                Some(Action::Mouse(MouseTarget::SchemaToggle(id)))
+            } else {
+                Some(Action::Mouse(MouseTarget::SchemaRow(id)))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn translate_mouse_inline(app: &App, ev: MouseEvent) -> Option<Action> {
+    let layout = app.layout.inline_result.as_ref()?;
+    if !rect_contains(layout.area, ev.column, ev.row) {
+        return None;
+    }
+    if let MouseEventKind::Down(MouseButton::Left) = ev.kind
+        && let Some((row, col)) = layout.cell_at(ev.column, ev.row)
+    {
+        return Some(Action::Mouse(MouseTarget::InlineResultJump { row, col }));
+    }
+    None
+}
+
+fn translate_mouse_editor(app: &App, ev: MouseEvent) -> Option<Action> {
+    let area = app.layout.editor?;
+    if !rect_contains(area, ev.column, ev.row) {
+        return None;
+    }
+    // Forward only the gestures edtui understands; ignore wheel etc. for now
+    // (edtui doesn't scroll on its own anyway).
+    match ev.kind {
+        MouseEventKind::Down(MouseButton::Left)
+        | MouseEventKind::Drag(MouseButton::Left)
+        | MouseEventKind::Up(MouseButton::Left) => {
+            Some(Action::Mouse(MouseTarget::Editor(CtEvent::Mouse(ev))))
+        }
+        _ => None,
+    }
+}
+
+/// Clamp `(x, y)` to the body of `table`, returning the (row, col) under
+/// the clamped position. Used while drag-extending — the user can drag
+/// beyond the table without losing the selection.
+fn clamp_to_table(table: &crate::state::layout::TableLayout, x: u16, y: u16) -> (usize, usize) {
+    let body_bottom = table
+        .body_top_y
+        .saturating_add(table.body_rows.saturating_sub(1));
+    let cy = y.clamp(table.body_top_y, body_bottom);
+    let cx = if let (Some(&first), Some(&last)) = (table.col_x.first(), table.col_x.last()) {
+        x.clamp(first, last.saturating_sub(1))
+    } else {
+        x
+    };
+    table
+        .cell_at(cx, cy)
+        .unwrap_or((table.row_offset, table.col_offset))
 }
 
 #[cfg(test)]

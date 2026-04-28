@@ -98,7 +98,7 @@ fn max_line_chars(lines: &[Line<'_>]) -> usize {
 /// Centered popover. Fixed cap on width so the two-column layout doesn't
 /// stretch into uselessness on a wide terminal; height takes most of the
 /// available area so the body has room to scroll naturally.
-fn inner_box(area: Rect) -> Option<Rect> {
+pub fn inner_box(area: Rect) -> Option<Rect> {
     let width = area.width.min(80);
     let height = area.height.saturating_sub(2);
     if width < 50 || height < 12 {
@@ -369,6 +369,39 @@ const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 keys: "Esc",
                 desc: "Cancel",
+            },
+        ],
+    },
+    HelpSection {
+        title: "Mouse",
+        entries: &[
+            HelpEntry {
+                keys: "Click",
+                desc: "Focus pane / select schema row / position cursor",
+            },
+            HelpEntry {
+                keys: "Click chevron",
+                desc: "Expand or collapse a schema node",
+            },
+            HelpEntry {
+                keys: "Click cell",
+                desc: "Select a cell in the expanded result grid",
+            },
+            HelpEntry {
+                keys: "Click + drag",
+                desc: "Multi-select cells (visual mode)",
+            },
+            HelpEntry {
+                keys: "Click inline result",
+                desc: "Open expanded view at the clicked cell",
+            },
+            HelpEntry {
+                keys: "Wheel",
+                desc: "Scroll schema / results / help by 3 rows",
+            },
+            HelpEntry {
+                keys: "Click outside",
+                desc: "Dismiss help / connection picker / command bar",
             },
         ],
     },

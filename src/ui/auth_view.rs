@@ -118,7 +118,7 @@ fn help_text(kind: &AuthKind) -> String {
     }
 }
 
-fn inner_box(area: Rect) -> Option<Rect> {
+pub fn inner_box(area: Rect) -> Option<Rect> {
     let width = area.width.min(64);
     let height = 14.min(area.height);
     if width < 36 || height < 12 {

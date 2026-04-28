@@ -11,6 +11,7 @@ use crate::log::Logger;
 use crate::state::completion::CompletionState;
 use crate::state::editor::EditorPanel;
 use crate::state::focus::{Focus, PendingChord};
+use crate::state::layout::LayoutCache;
 use crate::state::overlay::Overlay;
 use crate::state::results::ResultBlock;
 use crate::state::schema::SchemaPanel;
@@ -89,6 +90,10 @@ pub struct App {
     /// start (char offset in flattened buffer), don't auto-reopen at
     /// the same position. Cleared when the partial start moves.
     pub completion_snoozed_at: Option<usize>,
+    /// Render-time layout cache used by the mouse handler. Populated as a
+    /// side-effect of `ui::render`; consumed by the next `CtEvent::Mouse`
+    /// to map (column, row) back to the panel that was clicked.
+    pub layout: LayoutCache,
 }
 
 impl App {
@@ -128,6 +133,7 @@ impl App {
             schema_cache,
             completion: None,
             completion_snoozed_at: None,
+            layout: LayoutCache::default(),
         }
     }
 }

@@ -1,5 +1,5 @@
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -7,6 +7,7 @@ use ratatui::widgets::{
 };
 
 use crate::datasource::Cell;
+use crate::state::layout::TableLayout;
 use crate::state::results::{ResultBlock, ResultCursor, SelectionRect, fit_columns};
 use crate::ui::theme::Theme;
 
@@ -280,6 +281,89 @@ fn column_widths(n: usize) -> Vec<Constraint> {
     (0..n).map(|_| Constraint::Min(8)).collect()
 }
 
+/// Distribute the inner area across `n` columns the same way ratatui's
+/// `Table` widget will, given `column_widths(n)` constraints and the
+/// default 1-cell column spacing. Returns the cumulative X coordinates
+/// where each visible column starts, plus a sentinel at the right edge —
+/// i.e. a `Vec<u16>` of length `n + 1` such that column `i` spans
+/// `[col_x[i], col_x[i+1])`. Hit-testing simply binary-searches into this.
+fn distribute_columns(inner: Rect, n: usize) -> Vec<u16> {
+    if n == 0 || inner.width == 0 {
+        return Vec::new();
+    }
+    let constraints = column_widths(n);
+    // ratatui's Table inserts a 1-cell gap between columns (the default
+    // `column_spacing`); reproduce it via `Layout::spacing` so the boundaries
+    // match exactly. The Layout solver handles all the over/underflow
+    // arithmetic — we just read off the resulting rects.
+    let parts = Layout::horizontal(constraints).spacing(1).split(inner);
+    let mut out: Vec<u16> = parts.iter().map(|r| r.x).collect();
+    if let Some(last) = parts.last() {
+        out.push(last.x.saturating_add(last.width));
+    }
+    out
+}
+
+/// Layout for the inline preview table — the small one above the bottom
+/// bar. No header/footer subtleties; just the same Table widget paint.
+pub fn inline_layout(block: &ResultBlock, area: Rect) -> TableLayout {
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let total_cols = block.columns.len();
+    let visible_cols = fit_columns(inner.width).min(total_cols.max(1));
+    // Header takes one row, body fills the rest. There's also a footer line
+    // ("⤥ N more rows…") painted on the bottom row when the preview is
+    // truncated; we still consider that row part of the table for hit-testing
+    // since clicks on the footer should fall through to inline-click semantics.
+    let body_top_y = inner.y.saturating_add(1);
+    let body_rows = inner.height.saturating_sub(1);
+    let col_x = distribute_columns(inner, visible_cols);
+    TableLayout {
+        area,
+        body_top_y,
+        body_rows,
+        col_x,
+        col_offset: 0,
+        row_offset: 0,
+    }
+}
+
+/// Layout for the full-screen expanded result. `visible_cols` and
+/// `visible_rows` come from `ui::render`'s clamp pass.
+pub fn expanded_layout(
+    block: &ResultBlock,
+    area: Rect,
+    col_offset: usize,
+    visible_cols: usize,
+    row_offset: usize,
+    visible_rows: usize,
+) -> TableLayout {
+    let _ = block;
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    // Header takes one row at top, the cell-value badge takes one row at
+    // bottom (when inner.height >= 2). Body fills the rest.
+    let body_top_y = inner.y.saturating_add(1);
+    let body_rows = (visible_rows as u16).min(inner.height.saturating_sub(2).max(1));
+    let col_x = distribute_columns(inner, visible_cols);
+    TableLayout {
+        area,
+        body_top_y,
+        body_rows,
+        col_x,
+        col_offset,
+        row_offset,
+    }
+}
+
 fn inline_title(
     block: &ResultBlock,
     max_preview_rows: usize,
@@ -359,4 +443,41 @@ fn themed_block<'a>(theme: &Theme, title: String, focused: bool) -> Block<'a> {
         .title(title)
         .title_style(Style::default().fg(theme.fg).bg(theme.bg))
         .style(Style::default().bg(theme.bg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: u16, w: u16) -> Rect {
+        Rect {
+            x,
+            y: 0,
+            width: w,
+            height: 1,
+        }
+    }
+
+    #[test]
+    fn distribute_columns_returns_n_plus_one_xs() {
+        let xs = distribute_columns(rect(0, 30), 3);
+        assert_eq!(xs.len(), 4);
+        // Boundaries are strictly increasing.
+        assert!(xs.windows(2).all(|w| w[1] > w[0]));
+        // Right edge equals inner.x + inner.width.
+        assert_eq!(*xs.last().unwrap(), 30);
+        assert_eq!(xs[0], 0);
+    }
+
+    #[test]
+    fn distribute_columns_offsets_by_inner_x() {
+        let xs = distribute_columns(rect(10, 30), 3);
+        assert_eq!(xs[0], 10);
+        assert_eq!(*xs.last().unwrap(), 40);
+    }
+
+    #[test]
+    fn distribute_columns_zero_cols_is_empty() {
+        assert!(distribute_columns(rect(0, 18), 0).is_empty());
+    }
 }

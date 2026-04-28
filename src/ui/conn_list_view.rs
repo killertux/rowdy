@@ -114,7 +114,7 @@ fn entry_line<'a>(name: &str, selected: bool, active: bool, theme: &Theme) -> Li
 
 /// Centered box sized to fit the list + footer comfortably. Footer needs 3
 /// rows (blank + 2 wrapped lines) on top of the entries; borders eat 2 more.
-fn inner_box(area: Rect, entry_count: usize) -> Option<Rect> {
+pub fn inner_box(area: Rect, entry_count: usize) -> Option<Rect> {
     let width = area.width.min(72);
     let needed_inner = (entry_count.max(1) as u16).saturating_add(3);
     let needed = needed_inner.saturating_add(2); // borders
