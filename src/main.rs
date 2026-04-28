@@ -10,6 +10,7 @@ mod crypto;
 mod datasource;
 mod event;
 mod export;
+mod llm;
 mod log;
 mod session;
 mod sql_infer;
@@ -39,6 +40,7 @@ use crate::cli::{Args, Command};
 use crate::config::ConfigStore;
 use crate::connections::ConnectionStore;
 use crate::event::translate;
+use crate::llm::keystore::LlmKeyStore;
 use crate::log::Logger;
 use crate::state::auth::{AuthKind, AuthState};
 use crate::state::conn_form::ConnFormState;
@@ -140,31 +142,55 @@ enum Decision {
     /// Need a password from the user.
     Auth(AuthState),
     /// Already have a store; let the user create their first connection.
-    CreateFirst { store: ConnectionStore },
+    CreateFirst { stores: ResolvedStores },
     /// Already have a store and a target connection — fire Connect on launch.
     AutoConnect {
-        store: ConnectionStore,
+        stores: ResolvedStores,
         name: String,
         url: String,
     },
     /// Already have a store and saved connections, but no `--connection`
     /// hint — open the picker so the user can choose.
     PickConnection {
-        store: ConnectionStore,
+        stores: ResolvedStores,
         names: Vec<String>,
     },
+}
+
+/// The two stores that share a `DerivedKey` (or both run plaintext). They're
+/// built together in `decide_startup` so the auth flow doesn't have to derive
+/// the same key twice.
+struct ResolvedStores {
+    conn: ConnectionStore,
+    llm: LlmKeyStore,
+}
+
+impl ResolvedStores {
+    fn plaintext() -> Self {
+        Self {
+            conn: ConnectionStore::plaintext(),
+            llm: LlmKeyStore::plaintext(),
+        }
+    }
+
+    fn encrypted(key: crate::crypto::DerivedKey) -> Self {
+        Self {
+            conn: ConnectionStore::encrypted(key.clone()),
+            llm: LlmKeyStore::encrypted(key),
+        }
+    }
 }
 
 fn decide_startup(config: &mut ConfigStore, args: &Args, logger: &Logger) -> Result<Decision> {
     let cli_password = args.password.as_deref().filter(|p| !p.is_empty());
 
     // Phase 1: do we already have a store unlocked?
-    let store = match (config.crypto().cloned(), cli_password) {
+    let stores = match (config.crypto().cloned(), cli_password) {
         (Some(block), Some(pw)) => {
             // CLI password short-circuits the in-TUI prompt.
             let key = connections::unlock(pw, &block).map_err(|e| anyhow!("unlock failed: {e}"))?;
             logger.info("auth", "unlocked via --password");
-            Some(ConnectionStore::encrypted(key))
+            Some(ResolvedStores::encrypted(key))
         }
         (Some(block), None) => {
             // Defer to in-TUI prompt.
@@ -176,7 +202,7 @@ fn decide_startup(config: &mut ConfigStore, args: &Args, logger: &Logger) -> Res
                 .map_err(|e| anyhow!("crypto setup failed: {e}"))?;
             config.set_crypto(block).context("save crypto block")?;
             logger.info("auth", "encrypted store initialised via --password");
-            Some(ConnectionStore::encrypted(key))
+            Some(ResolvedStores::encrypted(key))
         }
         (None, None) if config.connections().is_empty() => {
             // Empty store, no CLI password — let the user choose plaintext-vs-encrypted in the prompt.
@@ -184,30 +210,31 @@ fn decide_startup(config: &mut ConfigStore, args: &Args, logger: &Logger) -> Res
         }
         (None, None) => {
             // Existing plaintext store; skip the prompt entirely.
-            Some(ConnectionStore::plaintext())
+            Some(ResolvedStores::plaintext())
         }
     };
-    let store = store.expect("store resolved");
+    let stores = stores.expect("store resolved");
 
     // Phase 2: which connection to open?
     let names = config.connection_names();
     if names.is_empty() {
-        return Ok(Decision::CreateFirst { store });
+        return Ok(Decision::CreateFirst { stores });
     }
     if let Some(requested) = args.connection.as_deref() {
         let entry = config
             .connection(requested)
             .ok_or_else(|| anyhow!("no connection named {requested:?} (have: {names:?})"))?;
-        let url = store
+        let url = stores
+            .conn
             .lookup(entry)
             .map_err(|e| anyhow!("decrypt {requested:?} failed: {e}"))?;
         return Ok(Decision::AutoConnect {
-            store,
+            stores,
             name: requested.to_string(),
             url: url.to_string(),
         });
     }
-    Ok(Decision::PickConnection { store, names })
+    Ok(Decision::PickConnection { stores, names })
 }
 
 fn apply_decision(app: &mut App, decision: Decision) {
@@ -215,19 +242,24 @@ fn apply_decision(app: &mut App, decision: Decision) {
         Decision::Auth(state) => {
             app.screen = Screen::Auth(state);
         }
-        Decision::CreateFirst { store } => {
-            app.connection_store = Some(store);
+        Decision::CreateFirst { stores } => {
+            install_stores(app, stores);
             app.screen = Screen::EditConnection(ConnFormState::new_create());
         }
-        Decision::AutoConnect { store, name, url } => {
-            app.connection_store = Some(store);
+        Decision::AutoConnect { stores, name, url } => {
+            install_stores(app, stores);
             dispatch_connect(app, name, url);
         }
-        Decision::PickConnection { store, names } => {
-            app.connection_store = Some(store);
+        Decision::PickConnection { stores, names } => {
+            install_stores(app, stores);
             app.screen = Screen::ConnectionList(ConnListState::new(names));
         }
     }
+}
+
+fn install_stores(app: &mut App, stores: ResolvedStores) {
+    app.connection_store = Some(stores.conn);
+    app.llm_keystore = Some(stores.llm);
 }
 
 fn init_data_dir() -> std::io::Result<PathBuf> {

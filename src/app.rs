@@ -7,6 +7,7 @@ use crate::autocomplete::SchemaCache;
 use crate::config::ConfigStore;
 use crate::connections::ConnectionStore;
 use crate::datasource::DriverKind;
+use crate::llm::keystore::LlmKeyStore;
 use crate::log::Logger;
 use crate::state::completion::CompletionState;
 use crate::state::editor::EditorPanel;
@@ -60,6 +61,10 @@ pub struct App {
     /// `Some` once the store is unlocked (or known plaintext). Until then
     /// connection management actions short-circuit.
     pub connection_store: Option<ConnectionStore>,
+    /// Parallel keystore for LLM provider API keys. Populated together with
+    /// `connection_store` (same `DerivedKey`, same plaintext-vs-encrypted
+    /// mode), so a single password unlocks both.
+    pub llm_keystore: Option<LlmKeyStore>,
     /// Name of the currently active connection (set on `Connected`). `None`
     /// while the worker has no datasource.
     pub active_connection: Option<String>,
@@ -125,6 +130,7 @@ impl App {
             config,
             log,
             connection_store: None,
+            llm_keystore: None,
             active_connection: None,
             active_dialect: None,
             data_dir,

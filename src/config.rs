@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::llm::LlmBackendKind;
 use crate::ui::theme::ThemeKind;
 
 pub const FILE_NAME: &str = "config.toml";
@@ -23,6 +24,8 @@ pub struct Config {
     pub crypto: Option<CryptoBlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connections: Vec<ConnectionEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub llm_providers: Vec<LlmProviderEntry>,
 }
 
 impl Default for Config {
@@ -32,6 +35,7 @@ impl Default for Config {
             schema_width: default_schema_width(),
             crypto: None,
             connections: Vec::new(),
+            llm_providers: Vec::new(),
         }
     }
 }
@@ -59,6 +63,32 @@ pub struct ConnectionEntry {
     /// encrypted fields below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Base64 of the 12-byte nonce used for this entry's AEAD operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    /// Base64 of the AEAD ciphertext (tag included). AAD is the entry name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ciphertext: Option<String>,
+}
+
+/// On-disk LLM provider record. Mirrors [`ConnectionEntry`]'s plaintext-vs-
+/// encrypted shape: either `api_key` is set, or `nonce` + `ciphertext` are.
+/// The `crypto` block on [`Config`] gates the mode for both kinds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmProviderEntry {
+    pub name: String,
+    pub backend: LlmBackendKind,
+    /// Default model the user picked for this provider (e.g. `gpt-4.1-mini`).
+    pub model: String,
+    /// Optional base URL override. Required for OpenRouter (and useful for
+    /// any OpenAI-compatible proxy); ignored by backends that hard-code their
+    /// endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Plaintext API key (set in plaintext mode). Mutually exclusive with the
+    /// encrypted fields below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
     /// Base64 of the 12-byte nonce used for this entry's AEAD operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
@@ -131,6 +161,27 @@ impl ConfigStore {
             .collect()
     }
 
+    // LLM-provider getters/mutators are wired up in phase 1 but their first
+    // call sites land in phase 2/3 (settings overlay + chat worker).
+    #[allow(dead_code)]
+    pub fn llm_providers(&self) -> &[LlmProviderEntry] {
+        &self.state.llm_providers
+    }
+
+    #[allow(dead_code)]
+    pub fn llm_provider(&self, name: &str) -> Option<&LlmProviderEntry> {
+        self.state.llm_providers.iter().find(|p| p.name == name)
+    }
+
+    #[allow(dead_code)]
+    pub fn llm_provider_names(&self) -> Vec<String> {
+        self.state
+            .llm_providers
+            .iter()
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
     pub fn is_encrypted(&self) -> bool {
         self.state.crypto.is_some()
     }
@@ -180,6 +231,35 @@ impl ConfigStore {
         let before = self.state.connections.len();
         self.state.connections.retain(|c| c.name != name);
         let removed = self.state.connections.len() != before;
+        if removed {
+            self.flush()?;
+        }
+        Ok(removed)
+    }
+
+    /// Inserts `entry` if its name is new; otherwise overwrites the matching
+    /// entry. Mirrors [`Self::upsert_connection`] for LLM provider records.
+    #[allow(dead_code)]
+    pub fn upsert_llm_provider(&mut self, entry: LlmProviderEntry) -> io::Result<()> {
+        if let Some(existing) = self
+            .state
+            .llm_providers
+            .iter_mut()
+            .find(|p| p.name == entry.name)
+        {
+            *existing = entry;
+        } else {
+            self.state.llm_providers.push(entry);
+        }
+        self.flush()
+    }
+
+    /// Removes the named LLM provider. Returns `true` if anything was removed.
+    #[allow(dead_code)]
+    pub fn delete_llm_provider(&mut self, name: &str) -> io::Result<bool> {
+        let before = self.state.llm_providers.len();
+        self.state.llm_providers.retain(|p| p.name != name);
+        let removed = self.state.llm_providers.len() != before;
         if removed {
             self.flush()?;
         }
@@ -261,8 +341,78 @@ mod tests {
                     ciphertext: Some("EEEE".into()),
                 },
             ],
+            llm_providers: vec![
+                LlmProviderEntry {
+                    name: "gpt".into(),
+                    backend: LlmBackendKind::Openai,
+                    model: "gpt-4.1-mini".into(),
+                    base_url: None,
+                    api_key: Some("sk-PLAIN".into()),
+                    nonce: None,
+                    ciphertext: None,
+                },
+                LlmProviderEntry {
+                    name: "router".into(),
+                    backend: LlmBackendKind::Openrouter,
+                    model: "anthropic/claude-3.5-sonnet".into(),
+                    base_url: Some("https://openrouter.ai/api/v1".into()),
+                    api_key: None,
+                    nonce: Some("FFFF".into()),
+                    ciphertext: Some("GGGG".into()),
+                },
+            ],
         };
         assert_eq!(round_trip(&cfg), cfg);
+    }
+
+    #[test]
+    fn upsert_llm_provider_inserts_then_overwrites() {
+        let dir = tempdir();
+        let mut store = ConfigStore::load(&dir).unwrap();
+        store
+            .upsert_llm_provider(LlmProviderEntry {
+                name: "gpt".into(),
+                backend: LlmBackendKind::Openai,
+                model: "gpt-4.1-mini".into(),
+                base_url: None,
+                api_key: Some("sk-1".into()),
+                nonce: None,
+                ciphertext: None,
+            })
+            .unwrap();
+        assert_eq!(store.llm_providers().len(), 1);
+        store
+            .upsert_llm_provider(LlmProviderEntry {
+                name: "gpt".into(),
+                backend: LlmBackendKind::Openai,
+                model: "gpt-4.1".into(),
+                base_url: None,
+                api_key: Some("sk-2".into()),
+                nonce: None,
+                ciphertext: None,
+            })
+            .unwrap();
+        assert_eq!(store.llm_providers().len(), 1);
+        assert_eq!(store.llm_provider("gpt").unwrap().model, "gpt-4.1");
+    }
+
+    #[test]
+    fn delete_llm_provider_returns_whether_anything_was_removed() {
+        let dir = tempdir();
+        let mut store = ConfigStore::load(&dir).unwrap();
+        store
+            .upsert_llm_provider(LlmProviderEntry {
+                name: "gpt".into(),
+                backend: LlmBackendKind::Openai,
+                model: "gpt-4.1-mini".into(),
+                base_url: None,
+                api_key: Some("sk".into()),
+                nonce: None,
+                ciphertext: None,
+            })
+            .unwrap();
+        assert!(store.delete_llm_provider("gpt").unwrap());
+        assert!(!store.delete_llm_provider("gpt").unwrap());
     }
 
     #[test]
