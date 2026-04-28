@@ -58,7 +58,10 @@ fn translate_paste(app: &App, event: CtEvent) -> Option<Action> {
         Screen::Auth(_) => Some(Action::Auth(AuthAction::Paste(Some(text)))),
         Screen::EditConnection(_) => Some(Action::ConnForm(ConnFormAction::Paste(Some(text)))),
         Screen::Normal if app.focus == Focus::Editor => Some(Action::EditorEvent(event)),
-        Screen::Normal if app.focus == Focus::Chat => {
+        // Bracketed paste only goes into the chat composer when it's the
+        // active sink — not in chat *normal* mode (where the composer is
+        // dormant and a stray paste would silently disappear).
+        Screen::Normal if app.focus == Focus::ChatComposer => {
             Some(Action::Chat(ChatAction::Paste(Some(text))))
         }
         _ => None,
@@ -296,7 +299,8 @@ fn translate_normal_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action
     match app.focus {
         Focus::Editor => Some(Action::EditorEvent(raw)),
         Focus::Schema => translate_schema_key(key),
-        Focus::Chat => translate_chat_key(key),
+        Focus::Chat => translate_chat_normal_key(key),
+        Focus::ChatComposer => translate_chat_composer_key(key),
     }
 }
 
@@ -347,10 +351,13 @@ fn can_intercept_globally(app: &App) -> bool {
             EditorMode::Normal | EditorMode::Visual
         ),
         Focus::Schema => true,
-        // The chat composer is always in "insert mode" — keystrokes flow
-        // into the TextArea. Globals like `:` and `Ctrl+W` are routed
-        // explicitly inside `translate_chat_key`.
-        Focus::Chat => false,
+        // Chat *normal* mode is the modal counterpart to editor Normal —
+        // globals like `:`, leader, and `Ctrl+W` flow through naturally.
+        Focus::Chat => true,
+        // The composer is the chat's "insert mode": keystrokes belong to
+        // the TextArea. Globals are routed explicitly inside
+        // `translate_chat_composer_key`.
+        Focus::ChatComposer => false,
     }
 }
 
@@ -386,6 +393,10 @@ fn translate_leader_chord(app: &App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('c') => Some(Action::CancelQuery),
         KeyCode::Char('e') => Some(Action::ExpandLatestResult),
         KeyCode::Char('t') => Some(Action::ToggleTheme),
+        // Right-panel switchers. Uppercase to leave room for future
+        // lowercase bindings; mnemonic: Schema / Chat.
+        KeyCode::Char('S') => Some(Action::SetRightPanel(RightPanelMode::Schema)),
+        KeyCode::Char('C') => Some(Action::SetRightPanel(RightPanelMode::Chat)),
         _ => None,
     }
 }
@@ -480,6 +491,9 @@ fn translate_schema_key(key: KeyEvent) -> Option<Action> {
         }
         (KeyCode::Char('<'), _) => return Some(Action::ResizeSchema(2)),
         (KeyCode::Char('>'), _) => return Some(Action::ResizeSchema(-2)),
+        // Esc returns focus to the editor without flipping the right
+        // panel back to chat — same gesture as `Ctrl+W h`, just shorter.
+        (KeyCode::Esc, m) if m.is_empty() => return Some(Action::FocusPanel(Focus::Editor)),
         _ => return None,
     };
     Some(Action::Schema(action))
@@ -492,6 +506,7 @@ fn translate_gg_chord(app: &App, key: KeyEvent) -> Option<Action> {
     match (&app.screen, app.focus) {
         (Screen::ResultExpanded { .. }, _) => Some(Action::ResultNav(ResultNavAction::Top)),
         (Screen::Normal, Focus::Schema) => Some(Action::Schema(SchemaAction::Top)),
+        (Screen::Normal, Focus::Chat) => Some(Action::Chat(ChatAction::ScrollToTop)),
         _ => None,
     }
 }
@@ -532,7 +547,64 @@ fn translate_llm_settings_key(state: &LlmSettingsState, key: KeyEvent) -> Option
     }
 }
 
-fn translate_chat_key(key: KeyEvent) -> Option<Action> {
+/// Chat *normal* mode keymap. Mirrors edtui's Normal mode in spirit: the
+/// composer is dormant, keystrokes navigate the log, and `i` switches into
+/// insert mode (composer focused). Globals (`:`, leader, `Ctrl+W`, etc.)
+/// flow through `translate_global` because [`can_intercept_globally`]
+/// returns `true` for [`Focus::Chat`].
+fn translate_chat_normal_key(key: KeyEvent) -> Option<Action> {
+    let mods = key.modifiers;
+    let bare = mods.is_empty();
+    let shift_only = mods == KeyModifiers::SHIFT;
+    let _ = shift_only;
+
+    // `i` enters insert mode (focuses the composer). `I` is a vim-ish
+    // alias that lands in the same place — we don't model "start of line"
+    // separately because the composer is a single text buffer.
+    if matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I')) && bare {
+        return Some(Action::FocusPanel(Focus::ChatComposer));
+    }
+    // Esc returns focus to the editor without changing what the right
+    // panel paints — symmetric with `Esc` from the schema panel. The
+    // chat panel keeps its messages and the composer keeps its contents.
+    if key.code == KeyCode::Esc && bare {
+        return Some(Action::FocusPanel(Focus::Editor));
+    }
+
+    // Scrolling. The user-facing convention: ↑/h/k scroll up, ↓/l/j
+    // scroll down. h/l are unconventional (vim uses them for left/right)
+    // but the chat log is a vertical-only viewport, so the horizontal
+    // bindings are reused for vertical scroll.
+    let action = match key.code {
+        KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') if bare => {
+            Some(ChatAction::ScrollUp(1))
+        }
+        KeyCode::Down | KeyCode::Char('l') | KeyCode::Char('j') if bare => {
+            Some(ChatAction::ScrollDown(1))
+        }
+        KeyCode::PageUp if bare => Some(ChatAction::ScrollUp(8)),
+        KeyCode::PageDown if bare => Some(ChatAction::ScrollDown(8)),
+        KeyCode::Home if bare => Some(ChatAction::ScrollToTop),
+        KeyCode::End if bare => Some(ChatAction::ScrollToBottom),
+        // `G` jumps to bottom; `gg` is handled via the GG pending chord.
+        KeyCode::Char('G') => Some(ChatAction::ScrollToBottom),
+        _ => None,
+    };
+    if let Some(a) = action {
+        return Some(Action::Chat(a));
+    }
+
+    if key.code == KeyCode::Char('g') && bare {
+        return Some(Action::SetPendingChord(PendingChord::GG));
+    }
+    None
+}
+
+/// Chat composer (insert mode) keymap. Mirrors the original chat keymap;
+/// the only behavioral change is `Esc` — instead of toggling the right
+/// panel, it drops back to chat *normal* mode so the user can keep
+/// scrolling without losing the composer's contents.
+fn translate_chat_composer_key(key: KeyEvent) -> Option<Action> {
     if let Some(act) = clipboard_arm(
         key,
         ChatAction::Paste(None),
@@ -554,9 +626,10 @@ fn translate_chat_key(key: KeyEvent) -> Option<Action> {
     if key.code == KeyCode::Char('w') && ctrl {
         return Some(Action::SetPendingChord(PendingChord::Window));
     }
-    // Esc bounces to schema — the chat panel doesn't survive Esc.
+    // Esc returns to chat normal mode — composer keeps its contents,
+    // user can scroll then re-enter with `i`.
     if key.code == KeyCode::Esc && bare {
-        return Some(Action::ToggleRightPanel);
+        return Some(Action::FocusPanel(Focus::Chat));
     }
     // Plain Enter submits; Shift+Enter falls through to the TextArea
     // (insert newline). The composer is multi-line by design.
@@ -727,11 +800,18 @@ fn translate_mouse_chat(app: &App, ev: MouseEvent) -> Option<Action> {
         MouseEventKind::ScrollDown => Some(Action::Chat(ChatAction::ScrollDown(3))),
         MouseEventKind::ScrollUp => Some(Action::Chat(ChatAction::ScrollUp(3))),
         MouseEventKind::Down(MouseButton::Left) => {
-            // A click anywhere inside the chat panel focuses it. We don't
-            // attempt to position the composer cursor — TextArea doesn't
-            // expose a "click → cursor" hook, and the focus change alone
-            // is what the user is usually after.
-            Some(Action::FocusPanel(Focus::Chat))
+            // A click on the composer drops straight into insert mode
+            // (the user clearly wants to type). Anywhere else focuses the
+            // chat panel in *normal* mode for scrolling. TextArea doesn't
+            // expose a "click → cursor" hook, so we don't try to place
+            // the cursor — the focus change alone is what the user is
+            // usually after.
+            let target = if rect_contains(layout.composer_area, ev.column, ev.row) {
+                Focus::ChatComposer
+            } else {
+                Focus::Chat
+            };
+            Some(Action::FocusPanel(target))
         }
         _ => None,
     }
@@ -1395,8 +1475,93 @@ mod tests {
         ));
         // Chat composer uses ClearComposer to disambiguate from `:chat clear`.
         assert!(matches_action(
-            &translate_chat_key(ctrl(KeyCode::Char('u'))),
+            &translate_chat_composer_key(ctrl(KeyCode::Char('u'))),
             "ClearComposer"
+        ));
+    }
+
+    // ----- translate_chat_normal_key -----------------------------------
+
+    #[test]
+    fn chat_normal_i_enters_insert_mode() {
+        assert!(matches!(
+            translate_chat_normal_key(key(KeyCode::Char('i'))),
+            Some(Action::FocusPanel(Focus::ChatComposer))
+        ));
+        assert!(matches!(
+            translate_chat_normal_key(key(KeyCode::Char('I'))),
+            Some(Action::FocusPanel(Focus::ChatComposer))
+        ));
+    }
+
+    #[test]
+    fn chat_normal_esc_focuses_editor_without_flipping_panel() {
+        // Esc means "go back to the editor" — the right panel keeps
+        // painting chat; only focus changes. focus_panel() in the action
+        // layer leaves right_panel untouched when target is Editor.
+        assert!(matches!(
+            translate_chat_normal_key(key(KeyCode::Esc)),
+            Some(Action::FocusPanel(Focus::Editor))
+        ));
+    }
+
+    #[test]
+    fn schema_esc_focuses_editor() {
+        assert!(matches!(
+            translate_schema_key(key(KeyCode::Esc)),
+            Some(Action::FocusPanel(Focus::Editor))
+        ));
+    }
+
+    #[test]
+    fn chat_normal_scroll_keys() {
+        // Up alternatives.
+        for k in [KeyCode::Up, KeyCode::Char('h'), KeyCode::Char('k')] {
+            let action = translate_chat_normal_key(key(k));
+            assert!(matches_action(&action, "ScrollUp(1)"), "{k:?}");
+        }
+        // Down alternatives.
+        for k in [KeyCode::Down, KeyCode::Char('l'), KeyCode::Char('j')] {
+            let action = translate_chat_normal_key(key(k));
+            assert!(matches_action(&action, "ScrollDown(1)"), "{k:?}");
+        }
+        // Page scrolling.
+        assert!(matches_action(
+            &translate_chat_normal_key(key(KeyCode::PageUp)),
+            "ScrollUp(8)"
+        ));
+        assert!(matches_action(
+            &translate_chat_normal_key(key(KeyCode::PageDown)),
+            "ScrollDown(8)"
+        ));
+        // Jumps.
+        assert!(matches_action(
+            &translate_chat_normal_key(key(KeyCode::Home)),
+            "ScrollToTop"
+        ));
+        assert!(matches_action(
+            &translate_chat_normal_key(key(KeyCode::End)),
+            "ScrollToBottom"
+        ));
+        assert!(matches_action(
+            &translate_chat_normal_key(key(KeyCode::Char('G'))),
+            "ScrollToBottom"
+        ));
+    }
+
+    #[test]
+    fn chat_normal_g_starts_gg_chord() {
+        assert!(matches!(
+            translate_chat_normal_key(key(KeyCode::Char('g'))),
+            Some(Action::SetPendingChord(PendingChord::GG))
+        ));
+    }
+
+    #[test]
+    fn chat_composer_esc_returns_to_normal_mode() {
+        assert!(matches!(
+            translate_chat_composer_key(key(KeyCode::Esc)),
+            Some(Action::FocusPanel(Focus::Chat))
         ));
     }
 }

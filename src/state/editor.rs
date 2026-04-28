@@ -26,6 +26,19 @@ impl EditorPanel {
         self.state = EditorState::new(Lines::from(text));
     }
 
+    /// Replace the buffer with `text` and park the cursor at column 0 of
+    /// the given 0-indexed `row`. Used by the LLM `write_buffer` tool so
+    /// the user lands on the line that just changed instead of being
+    /// snapped back to (0, 0). Drops any active selection; mode is left
+    /// untouched (we don't want to kick the user out of Insert if they
+    /// were typing).
+    pub fn replace_text_at_row(&mut self, text: &str, row: usize) {
+        self.state.lines = Lines::from(text);
+        self.state.selection = None;
+        let row = row.min(self.state.lines.len().saturating_sub(1));
+        self.state.cursor = Index2::new(row, 0);
+    }
+
     /// Current buffer flattened to a String (joined with `\n`).
     pub fn text(&self) -> String {
         self.state.lines.flatten(&Some('\n')).into_iter().collect()

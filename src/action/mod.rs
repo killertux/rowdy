@@ -26,6 +26,7 @@ use crate::state::focus::{Focus, PendingChord};
 use crate::state::layout::DragState;
 use crate::state::overlay::Overlay;
 use crate::state::results::{ResultBlock, ResultCursor, ResultId, ResultViewMode, SelectionRect};
+use crate::state::right_panel::RightPanelMode;
 use crate::state::schema::{ExpandOutcome, NodeId, SchemaPanel};
 use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
@@ -99,6 +100,10 @@ pub enum Action {
     /// Flip the right panel between schema and chat. Also moves focus into
     /// the new right pane so the user can immediately type / navigate.
     ToggleRightPanel,
+    /// Set the right panel to a specific mode (and focus into it). Used by
+    /// the leader-chord bindings (`<leader> S` / `<leader> C`) which want
+    /// an unambiguous "go to schema" / "go to chat" gesture, not a toggle.
+    SetRightPanel(RightPanelMode),
     /// `:chat settings` modal interactions.
     LlmSettings(LlmSettingsAction),
 }
@@ -326,7 +331,7 @@ fn schema_scroll(app: &mut App, delta: i32) {
 pub fn apply(app: &mut App, action: Action) {
     match action {
         Action::Quit => app.should_quit = true,
-        Action::FocusPanel(f) => app.focus = f,
+        Action::FocusPanel(f) => focus_panel(app, f),
         Action::ResizeSchema(delta) => resize_schema(app, delta),
         Action::SetPendingChord(c) => app.pending = c,
         Action::EditorEvent(ev) => {
@@ -376,7 +381,20 @@ pub fn apply(app: &mut App, action: Action) {
         Action::Mouse(target) => apply_mouse(app, target),
         Action::Chat(a) => chat::apply(app, a),
         Action::ToggleRightPanel => chat::toggle_right_panel(app),
+        Action::SetRightPanel(mode) => chat::set_right_panel(app, mode),
         Action::LlmSettings(a) => llm_settings::apply(app, a),
+    }
+}
+
+/// Set focus, keeping `app.right_panel` in sync. Schema/Chat/ChatComposer
+/// imply a particular right-panel painting; Editor is left orthogonal so
+/// `Ctrl+W h` from chat doesn't accidentally re-paint the right pane.
+fn focus_panel(app: &mut App, target: Focus) {
+    app.focus = target;
+    match target {
+        Focus::Schema => app.right_panel = RightPanelMode::Schema,
+        Focus::Chat | Focus::ChatComposer => app.right_panel = RightPanelMode::Chat,
+        Focus::Editor => {}
     }
 }
 

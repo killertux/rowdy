@@ -84,10 +84,19 @@ fn persist_last_message(app: &mut App) {
 }
 
 /// Toggle the right panel between schema and chat. Side-effect: focus
-/// follows the panel so the user lands in the new pane.
+/// follows the panel so the user lands in the new pane. Chat lands in
+/// *normal* mode (`Focus::Chat`) — the user picks `i` to start typing.
 pub fn toggle_right_panel(app: &mut App) {
-    app.right_panel = app.right_panel.toggle();
-    app.focus = match app.right_panel {
+    set_right_panel(app, app.right_panel.toggle());
+}
+
+/// Force the right panel to a specific mode and follow with focus. Used
+/// by the leader-chord bindings (`<leader> S` / `<leader> C`) and by
+/// `toggle_right_panel`. Idempotent — calling with the current mode just
+/// re-asserts focus.
+pub fn set_right_panel(app: &mut App, mode: RightPanelMode) {
+    app.right_panel = mode;
+    app.focus = match mode {
         RightPanelMode::Schema => Focus::Schema,
         RightPanelMode::Chat => Focus::Chat,
     };

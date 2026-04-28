@@ -2,7 +2,7 @@
 //!
 //! Phase 3 ships the identity + safety guardrails. Phase 4 extends this
 //! with a tool catalog block describing `list_catalogs`, `read_buffer`,
-//! `replace_buffer`, etc. so the model knows what it can call.
+//! `write_buffer`, etc. so the model knows what it can call.
 
 use crate::app::App;
 
@@ -19,16 +19,27 @@ relevant slice of the schema on first use, so call them freely. If a \
 tool still returns a `note` field, that means introspection itself \
 failed (e.g. no connection, or the database refused the lookup) — \
 surface it to the user instead of fabricating column names.\n\
-- read_buffer — read the user's current SQL editor buffer. Call this \
-*before* answering any request that references the user's existing \
-query — \"this query\", \"my query\", \"the buffer\", \"what I have\", \
-\"refactor this\", \"why is this slow\", \"explain this\", \"fix this\" — \
-so you're working from the actual SQL, not a guess.\n\
-- replace_buffer — overwrite the buffer with new SQL the user will then \
-review and run themselves. Call this whenever the user asks you to \
-draft, write, generate, rewrite, refactor, or fix a query — landing the \
-SQL in the buffer is the answer. Don't paste SQL into chat as a \
-substitute; prose is for explanation, the buffer is for the query.";
+- read_buffer — read the user's current SQL editor buffer with line \
+pagination. Args: optional `start_line` (1-indexed, default 1) and \
+`limit` (default 200, max 1000). Returns `text`, `start_line`, \
+`end_line`, `total_lines`, `remaining_lines`. If `remaining_lines > 0`, \
+call again with `start_line = end_line + 1` to keep paging. Always \
+call read_buffer *before* a write_buffer — both because any answer about \
+\"this query\" / \"my buffer\" / \"refactor this\" / \"why is this \
+slow\" / \"fix this\" must be grounded in the real text, and because \
+write_buffer's `search` snippet has to match what's actually there.\n\
+- write_buffer — replace a precise snippet inside the buffer. Args: \
+`search` (exact substring already present), `replacement` (the new \
+text), and optional `start_line` (1-indexed; only consider matches at or \
+after this line). `search` must match exactly once in scope — zero or \
+multiple matches return an error and you must extend `search` with more \
+surrounding context to disambiguate. Use this for every edit, including \
+drafting a fresh query (read the buffer first, then write_buffer the \
+existing content with the new SQL). The user reviews and runs the SQL — \
+you do NOT execute. Whenever the user asks you to draft, write, \
+generate, rewrite, refactor, or fix a query, the answer goes through \
+write_buffer; don't paste SQL into chat as a substitute. Prose is for \
+explanation, the buffer is the deliverable that the user can run.";
 
 const GUARDRAILS: &str = "\
 Guardrails:\n\
@@ -37,7 +48,7 @@ Guardrails:\n\
 along to the user and don't guess.\n\
 - Warn loudly before suggesting destructive operations (DROP, TRUNCATE, \
 DELETE without WHERE, ALTER on populated tables). Never put destructive \
-SQL in `replace_buffer` without an explicit, prior request from the user.\n\
+SQL in `write_buffer` without an explicit, prior request from the user.\n\
 - The user runs all queries themselves; you draft, you don't execute. \
 You have no tool to run SQL — never claim to have run anything.\n\
 - API keys, connection URLs, and other credentials never appear in your \
