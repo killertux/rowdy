@@ -2,7 +2,22 @@
 pub enum Focus {
     Editor,
     Schema,
+    /// Chat panel in *normal* mode — keystrokes scroll the log, globals
+    /// like `:` / leader / `Ctrl+W` work, `i` switches into
+    /// [`Focus::ChatComposer`]. Mirrors edtui's Normal mode in spirit.
     Chat,
+    /// Chat composer (TextArea) capturing keystrokes — `Esc` bounces back
+    /// to [`Focus::Chat`] (normal mode).
+    ChatComposer,
+}
+
+impl Focus {
+    /// True for both chat focus modes — used by renderers/mouse handlers
+    /// that care about "is the chat panel active" without distinguishing
+    /// normal vs. insert.
+    pub fn is_chat(self) -> bool {
+        matches!(self, Focus::Chat | Focus::ChatComposer)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

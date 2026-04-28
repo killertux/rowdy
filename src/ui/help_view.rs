@@ -177,15 +177,23 @@ struct HelpSection {
 /// `:help` stays accurate.
 const HELP_SECTIONS: &[HelpSection] = &[
     HelpSection {
-        title: "Global",
+        // Anything in this section fires from Editor (Normal/Visual),
+        // Schema, or Chat normal — i.e. every focus except text-input
+        // modes (Editor Insert, Chat composer, modal forms). In an
+        // insert mode, press Esc first.
+        title: "Global (works in any non-insert focus)",
         entries: &[
             HelpEntry {
                 keys: ":",
                 desc: "Open command prompt",
             },
             HelpEntry {
+                keys: "Esc",
+                desc: "From Schema or Chat: focus editor (right panel keeps painting)",
+            },
+            HelpEntry {
                 keys: "Ctrl+W h / l",
-                desc: "Focus editor / schema",
+                desc: "Focus editor / right panel (right panel = schema or chat)",
             },
             HelpEntry {
                 keys: "Ctrl+W < / >",
@@ -195,11 +203,6 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 keys: "Ctrl+C",
                 desc: "Panic exit (use :q for a clean quit)",
             },
-        ],
-    },
-    HelpSection {
-        title: "Editor leader (Space)",
-        entries: &[
             HelpEntry {
                 keys: "<Space> r",
                 desc: "Run statement under cursor (Normal: confirm; Visual: run selection)",
@@ -219,6 +222,14 @@ const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 keys: "<Space> t",
                 desc: "Toggle Dark / Light theme",
+            },
+            HelpEntry {
+                keys: "<Space> S",
+                desc: "Switch right panel to schema (and focus it)",
+            },
+            HelpEntry {
+                keys: "<Space> C",
+                desc: "Switch right panel to chat (and focus it)",
             },
             HelpEntry {
                 keys: "=",
@@ -278,10 +289,14 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 keys: "< / >",
                 desc: "Grow / shrink the panel width",
             },
+            HelpEntry {
+                keys: "Esc",
+                desc: "Focus editor (right panel keeps painting schema)",
+            },
         ],
     },
     HelpSection {
-        title: "LLM chat (right panel)",
+        title: "LLM chat — commands",
         entries: &[
             HelpEntry {
                 keys: ":chat",
@@ -295,9 +310,55 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 keys: ":chat settings",
                 desc: "Configure provider, model, and API key",
             },
+        ],
+    },
+    HelpSection {
+        title: "LLM chat — normal mode (panel focused, composer dormant)",
+        entries: &[
+            HelpEntry {
+                keys: "i",
+                desc: "Enter insert mode (focus the composer to type)",
+            },
+            HelpEntry {
+                keys: "↑ / k / h",
+                desc: "Scroll the message log up by one line",
+            },
+            HelpEntry {
+                keys: "↓ / j / l",
+                desc: "Scroll the message log down by one line",
+            },
+            HelpEntry {
+                keys: "PgUp / PgDn",
+                desc: "Scroll the message log by a page",
+            },
+            HelpEntry {
+                keys: "gg / G",
+                desc: "Jump to the top / bottom of the log (G re-engages auto-follow)",
+            },
+            HelpEntry {
+                keys: "Home / End",
+                desc: "Jump to the top / bottom of the log",
+            },
+            HelpEntry {
+                keys: "Esc",
+                desc: "Focus editor (chat keeps painting on the right)",
+            },
+            HelpEntry {
+                keys: ": / <Space> / Ctrl+W",
+                desc: "Globals work — see the Global section above",
+            },
+        ],
+    },
+    HelpSection {
+        title: "LLM chat — insert mode (composer focused)",
+        entries: &[
             HelpEntry {
                 keys: "Enter",
                 desc: "Submit composer · Shift+Enter inserts a newline",
+            },
+            HelpEntry {
+                keys: "Esc",
+                desc: "Drop back to chat normal mode (composer keeps its contents)",
             },
             HelpEntry {
                 keys: "Ctrl+U",
@@ -314,10 +375,6 @@ const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 keys: "Ctrl+Home / Ctrl+End",
                 desc: "Jump to the top / bottom of the log (End re-engages auto-follow)",
-            },
-            HelpEntry {
-                keys: "Esc",
-                desc: "Bounce back to the schema panel",
             },
         ],
     },

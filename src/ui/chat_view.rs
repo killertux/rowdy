@@ -31,10 +31,12 @@ pub struct ChatPane<'a> {
 impl Widget for ChatPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let theme = &self.app.theme;
-        let focused = self.app.focus == Focus::Chat;
+        let focus = self.app.focus;
+        let panel_focused = focus.is_chat();
+        let composer_focused = focus == Focus::ChatComposer;
         let chat = &self.app.chat;
 
-        let block = themed_block(theme, focused, status_hint(chat));
+        let block = themed_block(theme, panel_focused, status_hint(chat, focus));
         let inner = block.inner(area);
         block.render(area, buf);
 
@@ -45,7 +47,7 @@ impl Widget for ChatPane<'_> {
         let composer_area = chunks[1];
 
         render_log(chat, theme, log_area, buf);
-        render_composer(chat, theme, focused, composer_area, buf);
+        render_composer(chat, theme, composer_focused, composer_area, buf);
     }
 }
 
@@ -91,12 +93,24 @@ fn composer_height(panel: &ChatPanel, available: u16) -> u16 {
         .min(available.saturating_sub(1))
 }
 
-fn status_hint(chat: &ChatPanel) -> Option<String> {
+fn status_hint(chat: &ChatPanel, focus: Focus) -> Option<String> {
     if chat.streaming {
         return Some(" streaming… ".into());
     }
     if let Some(err) = &chat.error {
         return Some(format!(" error: {err} "));
+    }
+    // Mode hint — only meaningful while the chat panel itself is focused.
+    // We surface the current modal state so users can tell at a glance
+    // whether keystrokes will scroll (normal) or land in the composer
+    // (insert).
+    let mode = match focus {
+        Focus::Chat => Some(" normal · i to type "),
+        Focus::ChatComposer => Some(" insert · esc to scroll "),
+        _ => None,
+    };
+    if let Some(m) = mode {
+        return Some(m.to_string());
     }
     if chat.messages.is_empty() {
         return None;

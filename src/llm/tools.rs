@@ -11,10 +11,17 @@
 //!    mean blocking the chat turn on a database round-trip and adds
 //!    a whole new failure mode for marginal benefit.
 //!
-//! 2. **Editor buffer** — `read_buffer` and `replace_buffer`. The LLM
-//!    drafts SQL into the user's editor; the user reviews and runs it
-//!    themselves. There is no `execute_query` tool by design — the
-//!    user retains the run/cancel decision.
+//! 2. **Editor buffer** — `read_buffer` (paginated) and `write_buffer`
+//!    (precise find/replace). The LLM drafts SQL into the user's
+//!    editor; the user reviews and runs it themselves. There is no
+//!    `execute_query` tool by design — the user retains the run/cancel
+//!    decision.
+//!
+//!    `write_buffer` is intentionally NOT a full overwrite: it requires
+//!    a `search` snippet that must match exactly once (optionally
+//!    constrained to lines at or after `start_line`). Zero or multiple
+//!    matches surface as an error so the LLM extends the snippet rather
+//!    than blindly clobbering the buffer.
 //!
 //! Tool execution is sync: the action layer pulls the request off
 //! the worker channel, calls [`dispatch`], and replies via oneshot.
@@ -35,7 +42,15 @@ pub const LIST_SCHEMAS: &str = "list_schemas";
 pub const LIST_TABLES: &str = "list_tables";
 pub const DESCRIBE_TABLE: &str = "describe_table";
 pub const READ_BUFFER: &str = "read_buffer";
-pub const REPLACE_BUFFER: &str = "replace_buffer";
+pub const WRITE_BUFFER: &str = "write_buffer";
+
+/// Default page size for `read_buffer` when the LLM doesn't pass `limit`.
+/// Sized so a typical migration / multi-statement script fits in one or
+/// two reads without flooding the model's context.
+const READ_BUFFER_DEFAULT_LIMIT: usize = 200;
+/// Hard ceiling on `read_buffer.limit` so a runaway request can't dump a
+/// pathological buffer in one go.
+const READ_BUFFER_MAX_LIMIT: usize = 1000;
 
 /// All tools registered with the LLM, ready to pass to
 /// `LLMProvider::chat_stream_with_tools`. Built from the public
@@ -87,19 +102,59 @@ pub fn all() -> Vec<Tool> {
         ),
         function_tool(
             READ_BUFFER,
-            "Read the user's current SQL editor buffer. No arguments. \
-             Returns { text: string }.",
-            &[],
+            "Read the user's current SQL editor buffer with line-based \
+             pagination. Returns { text, start_line, end_line, total_lines, \
+             remaining_lines }. `text` carries the lines from `start_line` \
+             through `end_line` joined with '\\n'. If `remaining_lines > 0`, \
+             call again with `start_line = end_line + 1` to continue. \
+             Always read the buffer before calling write_buffer so you know \
+             exactly what's there to replace.",
+            &[
+                (
+                    "start_line",
+                    "integer",
+                    "1-indexed line to start reading at. Defaults to 1.",
+                ),
+                (
+                    "limit",
+                    "integer",
+                    "Maximum number of lines to return. Defaults to 200, capped at 1000.",
+                ),
+            ],
             &[],
         ),
         function_tool(
-            REPLACE_BUFFER,
-            "Overwrite the user's SQL editor buffer with new text. \
-             The user will review and run it themselves — you do NOT \
-             execute SQL. Use this when they ask you to draft or rewrite \
-             a query. Returns { ok: true }.",
-            &[("text", "string", "Full SQL text to put in the buffer.")],
-            &["text"],
+            WRITE_BUFFER,
+            "Replace a specific snippet in the user's SQL editor buffer. \
+             `search` must match exactly once in the eligible region — if \
+             it matches zero or multiple times, the call errors and you \
+             must supply a longer / more specific snippet. Use this for \
+             every edit: drafting a fresh query (replace the existing \
+             content), refactoring a single CTE, fixing a typo, etc. The \
+             user reviews and runs the SQL themselves — you do NOT \
+             execute. Read the buffer first so your `search` snippet \
+             matches the actual contents. Returns { ok: true, line } \
+             where `line` is the 1-indexed start line of the replacement.",
+            &[
+                (
+                    "search",
+                    "string",
+                    "Exact substring already present in the buffer. Include \
+                     enough surrounding context to make it match exactly once.",
+                ),
+                (
+                    "replacement",
+                    "string",
+                    "Text to substitute in place of `search`.",
+                ),
+                (
+                    "start_line",
+                    "integer",
+                    "Optional 1-indexed line; only consider matches whose \
+                     start byte is at or after the start of this line.",
+                ),
+            ],
+            &["search", "replacement"],
         ),
     ]
 }
@@ -218,8 +273,8 @@ pub fn dispatch(app: &mut App, name: &str, args_json: &str) -> Value {
         LIST_SCHEMAS => list_schemas(app, &args),
         LIST_TABLES => list_tables(app, &args),
         DESCRIBE_TABLE => describe_table(app, &args),
-        READ_BUFFER => read_buffer(app),
-        REPLACE_BUFFER => replace_buffer(app, &args),
+        READ_BUFFER => read_buffer(app, &args),
+        WRITE_BUFFER => write_buffer(app, &args),
         _ => err(format!("unknown tool: {name}")),
     }
 }
@@ -350,17 +405,188 @@ fn describe_table(app: &App, args: &Value) -> Value {
     serde_json::to_value(ColumnList { columns, note }).unwrap_or(Value::Null)
 }
 
-fn read_buffer(app: &App) -> Value {
-    serde_json::json!({ "text": app.editor.text() })
+fn read_buffer(app: &App, args: &Value) -> Value {
+    paginate_buffer(&app.editor.text(), args)
 }
 
-fn replace_buffer(app: &mut App, args: &Value) -> Value {
-    let Some(text) = args.get("text").and_then(|v| v.as_str()) else {
-        return err("missing required `text` argument");
+fn write_buffer(app: &mut App, args: &Value) -> Value {
+    let buffer = app.editor.text();
+    match splice_buffer(&buffer, args) {
+        Err(msg) => err(msg),
+        Ok(spliced) => {
+            app.editor
+                .replace_text_at_row(&spliced.new_text, spliced.match_row);
+            app.editor_dirty = true;
+            serde_json::json!({
+                "ok": true,
+                "line": spliced.match_row + 1,
+            })
+        }
+    }
+}
+
+/// Pure pagination over `buffer`. Lifted out of [`read_buffer`] so tests
+/// can hit it without constructing an `App`.
+///
+/// Lines are 1-indexed in the API. The implementation splits on `\n` and
+/// treats an empty buffer as zero lines (so `start_line=1` past EOF
+/// returns the empty / past-EOF shape rather than panicking on slicing).
+pub(crate) fn paginate_buffer(buffer: &str, args: &Value) -> Value {
+    let lines: Vec<&str> = if buffer.is_empty() {
+        Vec::new()
+    } else {
+        buffer.split('\n').collect()
     };
-    app.editor.replace_text(text);
-    app.editor_dirty = true;
-    serde_json::json!({ "ok": true })
+    let total = lines.len();
+
+    let start_line = args
+        .get("start_line")
+        .and_then(|v| v.as_u64())
+        .map(|n| (n.max(1)) as usize)
+        .unwrap_or(1);
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| (n as usize).clamp(1, READ_BUFFER_MAX_LIMIT))
+        .unwrap_or(READ_BUFFER_DEFAULT_LIMIT);
+
+    if total == 0 || start_line > total {
+        // Past EOF (or empty buffer): return an empty page with a `note`
+        // so the LLM stops paging instead of looping forever.
+        let end_line = start_line.saturating_sub(1);
+        return serde_json::json!({
+            "text": "",
+            "start_line": start_line,
+            "end_line": end_line,
+            "total_lines": total,
+            "remaining_lines": 0,
+            "note": format!(
+                "start_line {start_line} is past end of buffer ({total} lines total)"
+            ),
+        });
+    }
+
+    let start_idx = start_line - 1;
+    let end_idx = (start_idx + limit).min(total); // exclusive
+    let slice = &lines[start_idx..end_idx];
+    let text = slice.join("\n");
+    let end_line = end_idx; // 1-indexed inclusive end
+    let remaining = total.saturating_sub(end_line);
+
+    serde_json::json!({
+        "text": text,
+        "start_line": start_line,
+        "end_line": end_line,
+        "total_lines": total,
+        "remaining_lines": remaining,
+    })
+}
+
+/// Successful result of [`splice_buffer`]: the new buffer plus the
+/// 0-indexed row where the replacement now starts (so the editor can
+/// park the cursor there).
+#[derive(Debug)]
+pub(crate) struct Splice {
+    pub new_text: String,
+    pub match_row: usize,
+}
+
+/// Pure find-replace over `buffer`. Lifted out of [`write_buffer`] so
+/// tests can exercise it directly. Errors come back as `Err(String)`
+/// which the caller wraps with [`err`] before sending to the LLM.
+///
+/// Matching is plain UTF-8 substring (not regex) because we want the
+/// LLM to copy a verbatim chunk from `read_buffer` output. `start_line`
+/// (1-indexed) restricts the search to the byte range from that line's
+/// start onward — handy for "replace the second SELECT" without growing
+/// the snippet to disambiguate.
+pub(crate) fn splice_buffer(buffer: &str, args: &Value) -> Result<Splice, String> {
+    let Some(search) = args.get("search").and_then(|v| v.as_str()) else {
+        return Err("missing required `search` argument".to_string());
+    };
+    if search.is_empty() {
+        return Err("`search` must not be empty".to_string());
+    }
+    let Some(replacement) = args.get("replacement").and_then(|v| v.as_str()) else {
+        return Err("missing required `replacement` argument".to_string());
+    };
+    let start_line = args
+        .get("start_line")
+        .and_then(|v| v.as_u64())
+        .map(|n| (n.max(1)) as usize)
+        .unwrap_or(1);
+
+    // Resolve the byte offset of `start_line`. Line 1 is offset 0; line N
+    // begins one byte past the (N-1)th newline.
+    let region_start_byte = if start_line == 1 {
+        0
+    } else {
+        let mut nl_count = 0usize;
+        let mut found: Option<usize> = None;
+        for (i, b) in buffer.bytes().enumerate() {
+            if b == b'\n' {
+                nl_count += 1;
+                if nl_count == start_line - 1 {
+                    found = Some(i + 1);
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(off) => off,
+            None => {
+                let total = if buffer.is_empty() {
+                    0
+                } else {
+                    buffer.split('\n').count()
+                };
+                return Err(format!(
+                    "start_line {start_line} is past end of buffer ({total} lines)"
+                ));
+            }
+        }
+    };
+
+    let region = &buffer[region_start_byte..];
+    let mut matches = region.match_indices(search);
+    let first = matches.next();
+    let second = matches.next();
+    match (first, second) {
+        (None, _) => {
+            let scope = if start_line > 1 {
+                format!(" (searching from line {start_line})")
+            } else {
+                String::new()
+            };
+            Err(format!(
+                "search string not found in buffer{scope} — call read_buffer to confirm the actual text"
+            ))
+        }
+        (Some(_), Some(_)) => Err(
+            "search string matches more than once — extend it with surrounding context so it's unique"
+                .to_string(),
+        ),
+        (Some((rel_pos, _)), None) => {
+            let match_start_byte = region_start_byte + rel_pos;
+            let match_end_byte = match_start_byte + search.len();
+            let mut new_text =
+                String::with_capacity(buffer.len() - search.len() + replacement.len());
+            new_text.push_str(&buffer[..match_start_byte]);
+            new_text.push_str(replacement);
+            new_text.push_str(&buffer[match_end_byte..]);
+
+            // 0-indexed row of the match (used by EditorPanel::replace_text_at_row).
+            let match_row = buffer[..match_start_byte]
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count();
+
+            Ok(Splice {
+                new_text,
+                match_row,
+            })
+        }
+    }
 }
 
 fn table_kind_str(kind: crate::datasource::schema::TableKind) -> &'static str {
@@ -391,7 +617,7 @@ mod tests {
                 LIST_TABLES,
                 DESCRIBE_TABLE,
                 READ_BUFFER,
-                REPLACE_BUFFER,
+                WRITE_BUFFER,
             ]
         );
         // No duplicates.
@@ -465,6 +691,160 @@ mod tests {
         assert!(target_for(LIST_SCHEMAS, "{}").is_none());
         assert!(target_for(LIST_TABLES, r#"{"catalog":"db"}"#).is_none());
         assert!(target_for(READ_BUFFER, "{}").is_none());
+    }
+
+    // ----- paginate_buffer -----------------------------------------------
+
+    #[test]
+    fn paginate_buffer_defaults_return_full_short_buffer() {
+        let text = "one\ntwo\nthree";
+        let v = paginate_buffer(text, &Value::Null);
+        assert_eq!(
+            v.get("text").and_then(|s| s.as_str()),
+            Some("one\ntwo\nthree")
+        );
+        assert_eq!(v.get("start_line").and_then(|n| n.as_u64()), Some(1));
+        assert_eq!(v.get("end_line").and_then(|n| n.as_u64()), Some(3));
+        assert_eq!(v.get("total_lines").and_then(|n| n.as_u64()), Some(3));
+        assert_eq!(v.get("remaining_lines").and_then(|n| n.as_u64()), Some(0));
+        assert!(v.get("note").is_none());
+    }
+
+    #[test]
+    fn paginate_buffer_respects_start_line_and_limit() {
+        let text = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let args = serde_json::json!({ "start_line": 5, "limit": 3 });
+        let v = paginate_buffer(&text, &args);
+        assert_eq!(
+            v.get("text").and_then(|s| s.as_str()),
+            Some("line 5\nline 6\nline 7")
+        );
+        assert_eq!(v.get("start_line").and_then(|n| n.as_u64()), Some(5));
+        assert_eq!(v.get("end_line").and_then(|n| n.as_u64()), Some(7));
+        assert_eq!(v.get("total_lines").and_then(|n| n.as_u64()), Some(20));
+        assert_eq!(v.get("remaining_lines").and_then(|n| n.as_u64()), Some(13));
+    }
+
+    #[test]
+    fn paginate_buffer_limit_is_clamped() {
+        // Limit=0 clamps up to 1; limit > MAX clamps down. Both branches
+        // must produce a valid page rather than panicking.
+        let text = "a\nb\nc\nd";
+        let lo = paginate_buffer(text, &serde_json::json!({ "limit": 0 }));
+        assert_eq!(lo.get("end_line").and_then(|n| n.as_u64()), Some(1));
+        let hi = paginate_buffer(
+            text,
+            &serde_json::json!({ "limit": (READ_BUFFER_MAX_LIMIT * 2) as u64 }),
+        );
+        assert_eq!(hi.get("end_line").and_then(|n| n.as_u64()), Some(4));
+    }
+
+    #[test]
+    fn paginate_buffer_past_eof_returns_note() {
+        let text = "only one";
+        let v = paginate_buffer(text, &serde_json::json!({ "start_line": 5 }));
+        assert_eq!(v.get("text").and_then(|s| s.as_str()), Some(""));
+        assert_eq!(v.get("remaining_lines").and_then(|n| n.as_u64()), Some(0));
+        assert!(v.get("note").is_some());
+    }
+
+    #[test]
+    fn paginate_buffer_handles_empty_buffer() {
+        let v = paginate_buffer("", &Value::Null);
+        assert_eq!(v.get("text").and_then(|s| s.as_str()), Some(""));
+        assert_eq!(v.get("total_lines").and_then(|n| n.as_u64()), Some(0));
+        assert!(v.get("note").is_some());
+    }
+
+    // ----- splice_buffer -------------------------------------------------
+
+    #[test]
+    fn splice_buffer_replaces_unique_match() {
+        let buf = "SELECT a, b\nFROM users\nWHERE id = 1;";
+        let args = serde_json::json!({ "search": "FROM users", "replacement": "FROM accounts" });
+        let out = splice_buffer(buf, &args).expect("splice succeeds");
+        assert_eq!(out.new_text, "SELECT a, b\nFROM accounts\nWHERE id = 1;");
+        // Match is on row 1 (0-indexed) — the second line.
+        assert_eq!(out.match_row, 1);
+    }
+
+    #[test]
+    fn splice_buffer_errors_on_no_match() {
+        let buf = "SELECT 1;";
+        let args = serde_json::json!({ "search": "DROP TABLE", "replacement": "SELECT 2" });
+        let err = splice_buffer(buf, &args).unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn splice_buffer_errors_on_ambiguous_match() {
+        // Two SELECTs — `SELECT` alone matches both, the LLM must extend.
+        let buf = "SELECT a FROM t1;\nSELECT b FROM t2;";
+        let args = serde_json::json!({ "search": "SELECT", "replacement": "WITH" });
+        let err = splice_buffer(buf, &args).unwrap_err();
+        assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    #[test]
+    fn splice_buffer_start_line_constrains_search() {
+        // `SELECT 1` appears on lines 1 and 3. With start_line=2 only the
+        // second occurrence is in scope, so the splice succeeds and lands
+        // on row index 2.
+        let buf = "SELECT 1;\n-- comment\nSELECT 1;";
+        let args = serde_json::json!({
+            "search": "SELECT 1",
+            "replacement": "SELECT 99",
+            "start_line": 2,
+        });
+        let out = splice_buffer(buf, &args).expect("splice succeeds");
+        assert_eq!(out.new_text, "SELECT 1;\n-- comment\nSELECT 99;");
+        assert_eq!(out.match_row, 2);
+    }
+
+    #[test]
+    fn splice_buffer_start_line_past_eof_errors() {
+        let buf = "one line";
+        let args = serde_json::json!({
+            "search": "one",
+            "replacement": "two",
+            "start_line": 5,
+        });
+        assert!(
+            splice_buffer(buf, &args)
+                .unwrap_err()
+                .contains("past end of buffer")
+        );
+    }
+
+    #[test]
+    fn splice_buffer_rejects_empty_search() {
+        let args = serde_json::json!({ "search": "", "replacement": "x" });
+        assert!(
+            splice_buffer("abc", &args)
+                .unwrap_err()
+                .contains("must not be empty")
+        );
+    }
+
+    #[test]
+    fn splice_buffer_missing_args() {
+        // Missing search.
+        let args = serde_json::json!({ "replacement": "x" });
+        assert!(
+            splice_buffer("abc", &args)
+                .unwrap_err()
+                .contains("`search`")
+        );
+        // Missing replacement.
+        let args = serde_json::json!({ "search": "abc" });
+        assert!(
+            splice_buffer("abc", &args)
+                .unwrap_err()
+                .contains("`replacement`")
+        );
     }
 
     #[test]
