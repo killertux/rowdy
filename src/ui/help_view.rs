@@ -427,6 +427,18 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 desc: "Yank cell (Normal) / selection (Visual, prompts for format)",
             },
             HelpEntry {
+                keys: "H / L",
+                desc: "Move focused column left / right (local to this view)",
+            },
+            HelpEntry {
+                keys: "x",
+                desc: "Hide focused column (R restores)",
+            },
+            HelpEntry {
+                keys: "R",
+                desc: "Reset column order + visibility (un-hide all)",
+            },
+            HelpEntry {
                 keys: "q, Esc",
                 desc: "Visual: exit Visual · Normal: close expanded view",
             },

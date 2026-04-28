@@ -56,6 +56,9 @@ pub enum Action {
     /// `:expand`. Auto-cleared by the next `dispatch_query`.
     DismissResult,
     ResultNav(ResultNavAction),
+    /// Reorder / hide / reset the focused column in the expanded view.
+    /// Local to the current grid view — re-opens reset.
+    ResultColumn(ResultColumnAction),
     ResultEnterVisual,
     ResultExitVisual,
     /// `y` in the expanded view. Yanks the current cell straight to the
@@ -307,6 +310,18 @@ pub enum ResultNavAction {
     Bottom,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ResultColumnAction {
+    /// Swap the focused column with the visible column to its left.
+    MoveLeft,
+    /// Swap the focused column with the visible column to its right.
+    MoveRight,
+    /// Hide the focused column. No-op when only one column is visible.
+    Hide,
+    /// Restore identity column order with every column visible.
+    Reset,
+}
+
 /// Snap the schema selection to a specific node and toggle/expand it.
 /// `select` only moves the selection; `toggle` does both. Helpers exist
 /// in the apply layer so the mouse-click and chevron-click paths share a
@@ -360,6 +375,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::CollapseResult => app.screen = Screen::Normal,
         Action::DismissResult => dismiss_result(app),
         Action::ResultNav(nav) => apply_result_nav(app, nav),
+        Action::ResultColumn(op) => apply_result_column(app, op),
         Action::ResultEnterVisual => result_enter_visual(app),
         Action::ResultExitVisual => result_exit_visual(app),
         Action::ResultYank => result_yank(app),
@@ -563,6 +579,7 @@ fn inline_result_jump(app: &mut App, row: usize, col: usize) {
         col_offset: 0,
         row_offset: 0,
         view: ResultViewMode::Normal,
+        column_view: crate::state::results::ColumnView::new(max_cols),
     };
 }
 
@@ -981,12 +998,14 @@ fn expand_latest(app: &mut App) {
         };
         return;
     };
+    let total_cols = block.columns.len();
     app.screen = Screen::ResultExpanded {
         id: block.id,
         cursor: ResultCursor::default(),
         col_offset: 0,
         row_offset: 0,
         view: ResultViewMode::Normal,
+        column_view: crate::state::results::ColumnView::new(total_cols),
     };
 }
 
@@ -1003,9 +1022,49 @@ fn dismiss_result(app: &mut App) {
     app.preview_hidden = true;
 }
 
+fn apply_result_column(app: &mut App, op: ResultColumnAction) {
+    let Screen::ResultExpanded {
+        cursor,
+        view,
+        column_view,
+        ..
+    } = &mut app.screen
+    else {
+        return;
+    };
+    // Reordering invalidates a Visual rectangle (anchor and cursor are
+    // physical column indices, but the user's selection was visual);
+    // drop back to Normal so we don't leave a stale highlight on the grid.
+    if matches!(view, ResultViewMode::Visual { .. }) {
+        *view = ResultViewMode::Normal;
+    }
+    // Locked while the format prompt is open — mirrors the nav guard.
+    if matches!(view, ResultViewMode::YankFormat { .. }) {
+        return;
+    }
+    match op {
+        ResultColumnAction::MoveLeft => column_view.move_left(cursor.col),
+        ResultColumnAction::MoveRight => column_view.move_right(cursor.col),
+        ResultColumnAction::Hide => {
+            if let Some(next_col) = column_view.hide(cursor.col) {
+                cursor.col = next_col;
+            } else {
+                app.status = QueryStatus::Failed {
+                    error: "can't hide the last visible column".into(),
+                };
+            }
+        }
+        ResultColumnAction::Reset => column_view.reset(),
+    }
+}
+
 fn apply_result_nav(app: &mut App, nav: ResultNavAction) {
     let Screen::ResultExpanded {
-        id, cursor, view, ..
+        id,
+        cursor,
+        view,
+        column_view,
+        ..
     } = &mut app.screen
     else {
         return;
@@ -1020,23 +1079,34 @@ fn apply_result_nav(app: &mut App, nav: ResultNavAction) {
         return;
     };
     let max_rows = block.rows().len();
-    let max_cols = block.columns.len();
-    apply_nav_step(cursor, nav, max_rows, max_cols);
+    apply_nav_step(cursor, nav, max_rows, column_view.visible());
 }
 
 fn apply_nav_step(
     cursor: &mut ResultCursor,
     nav: ResultNavAction,
     max_rows: usize,
-    max_cols: usize,
+    visible: &[usize],
 ) {
+    if visible.is_empty() {
+        return;
+    }
+    let visual = visible.iter().position(|&p| p == cursor.col).unwrap_or(0);
     match nav {
-        ResultNavAction::Left => cursor.move_in(0, -1, max_rows, max_cols),
-        ResultNavAction::Right => cursor.move_in(0, 1, max_rows, max_cols),
-        ResultNavAction::Up => cursor.move_in(-1, 0, max_rows, max_cols),
-        ResultNavAction::Down => cursor.move_in(1, 0, max_rows, max_cols),
-        ResultNavAction::LineStart => cursor.jump_to(cursor.row, 0),
-        ResultNavAction::LineEnd => cursor.jump_to(cursor.row, max_cols.saturating_sub(1)),
+        ResultNavAction::Left => {
+            if visual > 0 {
+                cursor.jump_to(cursor.row, visible[visual - 1]);
+            }
+        }
+        ResultNavAction::Right => {
+            if visual + 1 < visible.len() {
+                cursor.jump_to(cursor.row, visible[visual + 1]);
+            }
+        }
+        ResultNavAction::Up => cursor.move_in(-1, 0, max_rows, 1),
+        ResultNavAction::Down => cursor.move_in(1, 0, max_rows, 1),
+        ResultNavAction::LineStart => cursor.jump_to(cursor.row, visible[0]),
+        ResultNavAction::LineEnd => cursor.jump_to(cursor.row, *visible.last().unwrap()),
         ResultNavAction::Top => cursor.jump_to(0, cursor.col),
         ResultNavAction::Bottom => cursor.jump_to(max_rows.saturating_sub(1), cursor.col),
     }

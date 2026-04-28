@@ -114,14 +114,22 @@ fn render_workspace(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: R
 fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Rect) {
     frame.render_widget(BottomBar::new(app), bottom_area);
 
-    let (id, cur, prev_col_offset, prev_row_offset, view) = match app.screen {
+    let (id, cur, prev_col_offset, prev_row_offset, view, column_view) = match &app.screen {
         Screen::ResultExpanded {
             id,
             cursor,
             col_offset,
             row_offset,
             view,
-        } => (id, cursor, col_offset, row_offset, view),
+            column_view,
+        } => (
+            *id,
+            *cursor,
+            *col_offset,
+            *row_offset,
+            *view,
+            column_view.clone(),
+        ),
         _ => return,
     };
 
@@ -131,11 +139,16 @@ fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Re
 
     let inner_width = main.width.saturating_sub(2);
     let inner_height = main.height.saturating_sub(2);
-    let visible_cols = fit_columns(inner_width).min(block.columns.len().max(1));
+    let total_visible = column_view.visible().len().max(1);
+    let visible_cols = fit_columns(inner_width).min(total_visible);
     // -2 reserves the header row and the bottom cell-value badge.
     let visible_rows = (inner_height.saturating_sub(2) as usize).max(1);
 
-    let new_col_offset = clamp_offset(prev_col_offset, cur.col, visible_cols, block.columns.len());
+    // col_offset is in *visual* position (index into the visible
+    // column-view), so reorder/hide ops naturally compose with the
+    // existing horizontal-scroll math.
+    let cursor_visual = column_view.visual_position(cur.col).unwrap_or(0);
+    let new_col_offset = clamp_offset(prev_col_offset, cursor_visual, visible_cols, total_visible);
     let new_row_offset = clamp_offset(prev_row_offset, cur.row, visible_rows, block.rows().len());
 
     let selection = view.anchor().map(|anchor| SelectionRect::new(anchor, cur));
@@ -160,6 +173,7 @@ fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Re
             visible_rows,
             theme: &app.theme,
             selection,
+            column_view: &column_view,
         },
         main,
     );

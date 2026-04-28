@@ -7,8 +7,8 @@ use ratatui_textarea::Input;
 
 use crate::action::{
     Action, AuthAction, ChatAction, CommandAction, CompletionAction, ConnFormAction,
-    ConnListAction, HelpAxis, HelpScrollDelta, LlmSettingsAction, MouseTarget, ResultNavAction,
-    SchemaAction,
+    ConnListAction, HelpAxis, HelpScrollDelta, LlmSettingsAction, MouseTarget, ResultColumnAction,
+    ResultNavAction, SchemaAction,
 };
 use crate::app::App;
 use crate::command::FormatScope;
@@ -467,6 +467,20 @@ fn translate_expanded_key(key: KeyEvent, view: &ResultViewMode) -> Option<Action
             });
         }
         (KeyCode::Char('y'), m) if m.is_empty() => return Some(Action::ResultYank),
+        // Column ops — uppercase variants leave the lowercase keys for
+        // navigation. Documented in the Expanded result view help section.
+        (KeyCode::Char('H'), _) => {
+            return Some(Action::ResultColumn(ResultColumnAction::MoveLeft));
+        }
+        (KeyCode::Char('L'), _) => {
+            return Some(Action::ResultColumn(ResultColumnAction::MoveRight));
+        }
+        (KeyCode::Char('x'), m) if m.is_empty() => {
+            return Some(Action::ResultColumn(ResultColumnAction::Hide));
+        }
+        (KeyCode::Char('R'), _) => {
+            return Some(Action::ResultColumn(ResultColumnAction::Reset));
+        }
         (KeyCode::Char('h'), _) | (KeyCode::Left, _) => Left,
         (KeyCode::Char('l'), _) | (KeyCode::Right, _) => Right,
         (KeyCode::Char('j'), _) | (KeyCode::Down, _) => Down,
@@ -1425,6 +1439,28 @@ mod tests {
             let action = translate_expanded_key(key(k), &view);
             assert!(matches_action(&action, want), "{k:?} → {want}");
         }
+    }
+
+    #[test]
+    fn expanded_key_column_ops() {
+        let view = ResultViewMode::Normal;
+        // Shift+H/L move the focused column; x hides; R resets.
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Char('H')), &view),
+            Some(Action::ResultColumn(ResultColumnAction::MoveLeft))
+        ));
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Char('L')), &view),
+            Some(Action::ResultColumn(ResultColumnAction::MoveRight))
+        ));
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Char('x')), &view),
+            Some(Action::ResultColumn(ResultColumnAction::Hide))
+        ));
+        assert!(matches!(
+            translate_expanded_key(key(KeyCode::Char('R')), &view),
+            Some(Action::ResultColumn(ResultColumnAction::Reset))
+        ));
     }
 
     #[test]
