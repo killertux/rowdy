@@ -43,13 +43,23 @@ fn translate_paste(app: &App, event: CtEvent) -> Option<Action> {
     let text = text.clone();
     // Overlays preempt paste routing — `:` command bar takes the
     // bracketed-paste payload before the underlying screen sees it.
-    if let Some(Overlay::Command(_)) = &app.overlay {
-        return Some(Action::Command(CommandAction::Paste(Some(text))));
+    if let Some(overlay) = &app.overlay {
+        return match overlay {
+            Overlay::Command(_) => Some(Action::Command(CommandAction::Paste(Some(text)))),
+            Overlay::LlmSettings(_) => {
+                Some(Action::LlmSettings(LlmSettingsAction::Paste(Some(text))))
+            }
+            // Help / ConfirmRun / Connecting don't take text input.
+            _ => None,
+        };
     }
     match &app.screen {
         Screen::Auth(_) => Some(Action::Auth(AuthAction::Paste(Some(text)))),
         Screen::EditConnection(_) => Some(Action::ConnForm(ConnFormAction::Paste(Some(text)))),
         Screen::Normal if app.focus == Focus::Editor => Some(Action::EditorEvent(event)),
+        Screen::Normal if app.focus == Focus::Chat => {
+            Some(Action::Chat(ChatAction::Paste(Some(text))))
+        }
         _ => None,
     }
 }
