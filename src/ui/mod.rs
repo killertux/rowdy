@@ -2,6 +2,7 @@ pub mod auth_view;
 pub mod autocomplete_popover;
 pub mod bottom_bar;
 pub mod chat_view;
+pub mod command_completion_popover;
 pub mod conn_form_view;
 pub mod conn_list_view;
 pub mod editor_view;
@@ -261,6 +262,42 @@ fn render_immutable_panes(
     if let Some(Overlay::Command(buf)) = &app.overlay {
         let input_area = command_input_area(bottom_area);
         frame.render_widget(&buf.input, input_area);
+        // Autocomplete popover floats above the command bar — only
+        // when the buffer has matches. Anchored bottom-right of
+        // `bottom_area` so it sits flush against the input.
+        if let Some(completion) = &buf.completion {
+            let popover_area = command_completion_popover_area(bottom_area, completion);
+            frame.render_widget(
+                command_completion_popover::CommandCompletionPopover {
+                    completion,
+                    theme: &app.theme,
+                },
+                popover_area,
+            );
+        }
+    }
+}
+
+fn command_completion_popover_area(
+    bottom: Rect,
+    completion: &crate::state::command::CommandCompletion,
+) -> Rect {
+    // Width = longest hit + 4 cells of padding (border + breathing room),
+    // capped at half the screen width so it never crowds the status.
+    let widest = completion
+        .hits
+        .iter()
+        .map(|h| h.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let width = widest.saturating_add(4).min(bottom.width.max(8) / 2 + 8);
+    let height = (completion.hits.len() as u16 + 2).min(8); // border + cap rows
+    let y = bottom.y.saturating_sub(height);
+    Rect {
+        x: bottom.x,
+        y,
+        width: width.min(bottom.width),
+        height,
     }
 }
 

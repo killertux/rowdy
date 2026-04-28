@@ -267,6 +267,27 @@ const HELP_SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
+        title: "Command bar autocomplete (`:`)",
+        entries: &[
+            HelpEntry {
+                keys: "(any letter)",
+                desc: "Live prefix-match against top-level commands",
+            },
+            HelpEntry {
+                keys: "Up / Down / Ctrl+P / Ctrl+N",
+                desc: "Move popover selection",
+            },
+            HelpEntry {
+                keys: "Tab",
+                desc: "Replace the in-progress command name with the highlighted one",
+            },
+            HelpEntry {
+                keys: "(Space)",
+                desc: "Closes the popover — assumed you've committed to the command and are typing args",
+            },
+        ],
+    },
+    HelpSection {
         title: "Schema panel",
         entries: &[
             HelpEntry {
