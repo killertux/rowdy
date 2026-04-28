@@ -11,7 +11,7 @@
 use crate::state::auth::AuthState;
 use crate::state::conn_form::ConnFormState;
 use crate::state::conn_list::ConnListState;
-use crate::state::results::{ResultCursor, ResultId, ResultViewMode};
+use crate::state::results::{ColumnView, ResultCursor, ResultId, ResultViewMode};
 
 // `TextArea` is ~700 bytes (the `Auth`/`EditConnection` variants carry one or
 // two each), so the variants are uneven. Screen lives once per App and is
@@ -34,6 +34,9 @@ pub enum Screen {
         row_offset: usize,
         /// Visual selection / yank-format prompt sub-state.
         view: ResultViewMode,
+        /// Per-grid column reorder + hide state. Reset every time the
+        /// expanded view opens.
+        column_view: ColumnView,
     },
     /// Pre-app password prompt — shown when the store is encrypted, or
     /// on first launch before the user has chosen plaintext-vs-encrypted

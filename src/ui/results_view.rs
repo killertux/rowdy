@@ -8,7 +8,7 @@ use ratatui::widgets::{
 
 use crate::datasource::Cell;
 use crate::state::layout::TableLayout;
-use crate::state::results::{ResultBlock, ResultCursor, SelectionRect, fit_columns};
+use crate::state::results::{ColumnView, ResultBlock, ResultCursor, SelectionRect, fit_columns};
 use crate::ui::theme::Theme;
 
 pub struct InlineResult<'a> {
@@ -32,13 +32,15 @@ impl Widget for InlineResult<'_> {
             return;
         }
 
+        // Inline preview ignores column-view ops — the user reaches it
+        // outside the expanded screen, where reorder/hide aren't bound.
+        let identity: Vec<usize> = (0..visible_cols).collect();
         let table = build_table(
             self.block,
             None,
             0,
             self.max_preview_rows,
-            0,
-            visible_cols,
+            &identity,
             self.theme,
             None,
         );
@@ -83,11 +85,15 @@ pub struct ExpandedResult<'a> {
     /// `Some` when Visual mode is active; the rectangle is highlighted
     /// in the grid and surfaced in the title bar.
     pub selection: Option<SelectionRect>,
+    /// Per-grid column reorder + hide state. Render walks
+    /// `column_view.visible()[col_offset..col_offset+visible_cols]`
+    /// rather than a contiguous slice of `block.columns`.
+    pub column_view: &'a ColumnView,
 }
 
 impl Widget for ExpandedResult<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let total_cols = self.block.columns.len();
+        let total_cols = self.column_view.visible().len();
         let total_rows = self.block.rows().len();
         let title = expanded_title(
             self.block,
@@ -122,13 +128,13 @@ impl Widget for ExpandedResult<'_> {
             (inner, None)
         };
 
+        let visible_slice = visible_slice(self.column_view, self.col_offset, self.visible_cols);
         let table = build_table(
             self.block,
             Some(self.cursor),
             self.row_offset,
             self.visible_rows,
-            self.col_offset,
-            self.visible_cols,
+            visible_slice,
             self.theme,
             self.selection,
         );
@@ -145,6 +151,13 @@ impl Widget for ExpandedResult<'_> {
             render_cell_badge(self.block, self.cursor, badge_area, self.theme, buf);
         }
     }
+}
+
+fn visible_slice(view: &ColumnView, col_offset: usize, visible_cols: usize) -> &[usize] {
+    let v = view.visible();
+    let end = (col_offset + visible_cols).min(v.len());
+    let start = col_offset.min(end);
+    &v[start..end]
 }
 
 fn render_cell_badge(
@@ -193,20 +206,22 @@ struct BuiltTable<'a> {
     rows: Vec<TableRow<'a>>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_table<'a>(
     block: &'a ResultBlock,
     cursor: Option<ResultCursor>,
     row_offset: usize,
     visible_rows: usize,
-    col_offset: usize,
-    visible_cols: usize,
+    visible_cols: &[usize],
     theme: &Theme,
     selection: Option<SelectionRect>,
 ) -> BuiltTable<'a> {
-    let col_end = (col_offset + visible_cols).min(block.columns.len());
-    let header = TableRow::new(block.columns[col_offset..col_end].iter().map(|c| {
-        TableCell::from(c.name.as_str()).style(
+    let header = TableRow::new(visible_cols.iter().map(|&physical| {
+        let name = block
+            .columns
+            .get(physical)
+            .map(|c| c.name.as_str())
+            .unwrap_or("");
+        TableCell::from(name).style(
             Style::default()
                 .fg(theme.header_fg)
                 .bg(theme.bg)
@@ -220,36 +235,28 @@ fn build_table<'a>(
         .enumerate()
         .map(|(local, row)| {
             let absolute_row = row_offset + local;
-            build_row(
-                row,
-                absolute_row,
-                col_offset,
-                col_end,
-                cursor,
-                theme,
-                selection,
-            )
+            build_row(row, absolute_row, visible_cols, cursor, theme, selection)
         })
         .collect();
     BuiltTable { header, rows }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_row<'a>(
     row: &[Cell],
     absolute_row: usize,
-    col_offset: usize,
-    col_end: usize,
+    visible_cols: &[usize],
     cursor: Option<ResultCursor>,
     theme: &Theme,
     selection: Option<SelectionRect>,
 ) -> TableRow<'a> {
-    // Slice defensively — a row that lost cells (driver bug or NULL handling
-    // mismatch) shouldn't panic the renderer.
-    let end = col_end.min(row.len());
-    let start = col_offset.min(end);
-    TableRow::new(row[start..end].iter().enumerate().map(|(local, value)| {
-        let absolute_col = col_offset + local;
+    TableRow::new(visible_cols.iter().map(|&physical| {
+        // Slice defensively — a row that lost cells (driver bug or NULL
+        // handling mismatch) shouldn't panic the renderer.
+        let value = match row.get(physical) {
+            Some(v) => v,
+            None => return TableCell::from("").style(Style::default().fg(theme.fg).bg(theme.bg)),
+        };
+        let absolute_col = physical;
         let is_cursor =
             matches!(cursor, Some(cur) if cur.row == absolute_row && cur.col == absolute_col);
         let in_selection = selection
