@@ -36,8 +36,8 @@ impl Widget for BottomBar<'_> {
                 render_command_prefix(area, buf, &self.app.theme);
                 return;
             }
-            Some(Overlay::ConfirmRun { .. }) => {
-                render_confirm(area, buf, &self.app.theme);
+            Some(Overlay::ConfirmRun { reason, .. }) => {
+                render_confirm(reason, area, buf, &self.app.theme);
                 return;
             }
             Some(Overlay::Connecting { name }) => {
@@ -99,22 +99,42 @@ fn render_connecting(name: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
     line.render(area, buf);
 }
 
-fn render_confirm(area: Rect, buf: &mut Buffer, theme: &Theme) {
-    let line = Line::from(vec![
-        Span::styled("▶ ", Style::default().fg(theme.status_running).bg(theme.bg)),
-        Span::styled(
-            "run highlighted statement?",
-            Style::default()
-                .fg(theme.fg)
-                .bg(theme.bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "  Enter to confirm · Esc to cancel",
-            Style::default().fg(theme.fg_dim).bg(theme.bg),
-        ),
-    ]);
-    line.render(area, buf);
+fn render_confirm(
+    reason: &crate::state::overlay::ConfirmRunReason,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+) {
+    use crate::state::overlay::ConfirmRunReason;
+    // Destructive variant gets a louder leader and the AST-derived
+    // reason ("DELETE without WHERE", "TRUNCATE"); the standard manual
+    // confirm keeps its existing copy.
+    let (leader, leader_color, headline) = match reason {
+        ConfirmRunReason::Manual => ("▶ ", theme.status_running, "run highlighted statement?"),
+        ConfirmRunReason::Destructive(why) => ("⚠ ", theme.status_error, *why),
+    };
+    let mut spans = vec![Span::styled(
+        leader,
+        Style::default().fg(leader_color).bg(theme.bg),
+    )];
+    spans.push(Span::styled(
+        headline,
+        Style::default()
+            .fg(theme.fg)
+            .bg(theme.bg)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if matches!(reason, ConfirmRunReason::Destructive(_)) {
+        spans.push(Span::styled(
+            " — confirm to run",
+            Style::default().fg(theme.fg).bg(theme.bg),
+        ));
+    }
+    spans.push(Span::styled(
+        "  Enter to confirm · Esc to cancel",
+        Style::default().fg(theme.fg_dim).bg(theme.bg),
+    ));
+    Line::from(spans).render(area, buf);
 }
 
 fn paint_background(area: Rect, buf: &mut Buffer, theme: &Theme) {

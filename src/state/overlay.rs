@@ -23,8 +23,14 @@ pub enum Overlay {
     Command(CommandBuffer),
     /// "▶ run highlighted statement?" prompt — the matching SQL is
     /// snapshotted here so the dispatch on Enter doesn't need to
-    /// re-derive it.
-    ConfirmRun { statement: String },
+    /// re-derive it. `reason` distinguishes a manually requested
+    /// confirm (`<leader>r`) from an auto-prompt fired because the
+    /// statement looked dangerous (`UPDATE` / `DELETE` without WHERE,
+    /// `TRUNCATE`).
+    ConfirmRun {
+        statement: String,
+        reason: ConfirmRunReason,
+    },
     /// Async connection in flight; UI shows "connecting to <name>…"
     /// and keys are inert until `Connected`/`ConnectFailed` lands.
     Connecting { name: String },
@@ -38,4 +44,17 @@ pub enum Overlay {
     /// `:chat settings` modal — choose a provider, enter / update an
     /// API key. The state struct owns the `TextArea`s and focus.
     LlmSettings(LlmSettingsState),
+}
+
+/// Why the confirm-run overlay opened. Drives the headline at the top
+/// of the prompt so users know whether they hit the dangerous-statement
+/// guardrail or just the normal `<leader>r` confirm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmRunReason {
+    /// Standard "press Enter to run" prompt. No extra warning copy.
+    Manual,
+    /// Auto-fired because the SQL looked destructive (e.g. "DELETE
+    /// without WHERE", "TRUNCATE"). The string is the user-facing
+    /// reason shown in the headline.
+    Destructive(&'static str),
 }

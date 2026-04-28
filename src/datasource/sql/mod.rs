@@ -139,6 +139,87 @@ fn strip_leading_comments_and_ws(sql: &str) -> &str {
     }
 }
 
+/// Inspect `sql` and return `Some(reason)` if the statement looks
+/// destructive enough that we want to prompt the user before running.
+/// `None` means "fire-and-forget OK".
+///
+/// Triggers (against the first parsed statement):
+/// - `UPDATE` with no `WHERE` clause → `"UPDATE without WHERE"`
+/// - `DELETE` with no `WHERE` clause → `"DELETE without WHERE"`
+/// - any `TRUNCATE`               → `"TRUNCATE"`
+///
+/// Strategy mirrors `is_row_returning`: AST first, hardened keyword
+/// fallback when sqlparser refuses the input. False positives (the
+/// fallback flagging a statement that does have WHERE in some odd
+/// form) just produce an extra confirm — annoying, not data-loss.
+/// False negatives (slipping past the guard) are the failure mode we
+/// care about; the AST path catches the canonical cases cleanly.
+pub(crate) fn requires_destructive_confirmation(
+    sql: &str,
+    dialect: &dyn sqlparser::dialect::Dialect,
+) -> Option<&'static str> {
+    use sqlparser::parser::Parser;
+
+    if let Ok(stmts) = Parser::parse_sql(dialect, sql) {
+        return stmts.first().and_then(classify_destructive_ast);
+    }
+    classify_destructive_keyword(sql)
+}
+
+fn classify_destructive_ast(stmt: &sqlparser::ast::Statement) -> Option<&'static str> {
+    use sqlparser::ast::Statement;
+    match stmt {
+        Statement::Update(u) if u.selection.is_none() => Some("UPDATE without WHERE"),
+        Statement::Delete(d) if d.selection.is_none() => Some("DELETE without WHERE"),
+        Statement::Truncate { .. } => Some("TRUNCATE"),
+        _ => None,
+    }
+}
+
+fn classify_destructive_keyword(sql: &str) -> Option<&'static str> {
+    let stripped = strip_leading_comments_and_ws(sql);
+    let head: String = stripped
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    match head.to_ascii_uppercase().as_str() {
+        "TRUNCATE" => Some("TRUNCATE"),
+        "UPDATE" if !contains_where_keyword(stripped) => Some("UPDATE without WHERE"),
+        "DELETE" if !contains_where_keyword(stripped) => Some("DELETE without WHERE"),
+        _ => None,
+    }
+}
+
+/// Best-effort case-insensitive scan for a `WHERE` keyword. Used only
+/// in the keyword fallback (sqlparser refused the input). String
+/// literals containing the word "where" can fool this — but the
+/// fallback's job is to over-warn, not under-warn, and a spurious
+/// confirm is cheaper than a missed one.
+fn contains_where_keyword(sql: &str) -> bool {
+    let upper = sql.to_ascii_uppercase();
+    // Walk char by char looking for an ASCII word boundary followed by
+    // "WHERE" followed by another boundary.
+    let bytes = upper.as_bytes();
+    let pat = b"WHERE";
+    if bytes.len() < pat.len() {
+        return false;
+    }
+    for i in 0..=bytes.len() - pat.len() {
+        if &bytes[i..i + pat.len()] != pat {
+            continue;
+        }
+        let prev_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+        let next_ok = i + pat.len() == bytes.len() || {
+            let c = bytes[i + pat.len()];
+            !c.is_ascii_alphanumeric() && c != b'_'
+        };
+        if prev_ok && next_ok {
+            return true;
+        }
+    }
+    false
+}
+
 /// Hides the password between `://user:` and `@host` so it doesn't end up in
 /// the log file. Other URL forms are returned untouched.
 pub(crate) fn redact_url(url: &str) -> String {
@@ -263,6 +344,91 @@ mod tests {
         assert!(!is_row_returning("", &d));
         assert!(!is_row_returning("   \n  ", &d));
         assert!(!is_row_returning("-- only a comment\n", &d));
+    }
+
+    #[test]
+    fn destructive_update_without_where_flagged() {
+        let d = PostgreSqlDialect {};
+        assert_eq!(
+            requires_destructive_confirmation("UPDATE users SET name='x'", &d),
+            Some("UPDATE without WHERE")
+        );
+    }
+
+    #[test]
+    fn destructive_update_with_where_passes() {
+        let d = PostgreSqlDialect {};
+        assert!(
+            requires_destructive_confirmation("UPDATE users SET name='x' WHERE id=1", &d).is_none()
+        );
+    }
+
+    #[test]
+    fn destructive_delete_without_where_flagged() {
+        let d = PostgreSqlDialect {};
+        assert_eq!(
+            requires_destructive_confirmation("DELETE FROM users", &d),
+            Some("DELETE without WHERE")
+        );
+    }
+
+    #[test]
+    fn destructive_delete_with_where_passes() {
+        let d = PostgreSqlDialect {};
+        assert!(requires_destructive_confirmation("DELETE FROM users WHERE id=1", &d).is_none());
+    }
+
+    #[test]
+    fn destructive_truncate_always_flagged() {
+        let d = PostgreSqlDialect {};
+        assert_eq!(
+            requires_destructive_confirmation("TRUNCATE users", &d),
+            Some("TRUNCATE")
+        );
+        assert_eq!(
+            requires_destructive_confirmation("TRUNCATE TABLE users", &d),
+            Some("TRUNCATE")
+        );
+    }
+
+    #[test]
+    fn destructive_select_passes() {
+        let d = PostgreSqlDialect {};
+        assert!(requires_destructive_confirmation("SELECT * FROM users", &d).is_none());
+    }
+
+    #[test]
+    fn destructive_with_leading_comment_still_flagged() {
+        let d = PostgreSqlDialect {};
+        assert_eq!(
+            requires_destructive_confirmation("-- routine cleanup\nDELETE FROM tmp_results", &d),
+            Some("DELETE without WHERE")
+        );
+    }
+
+    #[test]
+    fn destructive_keyword_fallback_for_unparseable_input() {
+        // Input sqlparser refuses (typed-while-still-editing). The
+        // fallback should still spot the bare DELETE.
+        let d = GenericDialect {};
+        let sql = "DELETE FROM users WH"; // unfinished WHERE
+        // unfinished — keyword sniffer sees no whole "WHERE" word.
+        assert_eq!(
+            requires_destructive_confirmation(sql, &d),
+            Some("DELETE without WHERE")
+        );
+    }
+
+    #[test]
+    fn destructive_keyword_fallback_respects_word_boundary() {
+        // "WHERETOOLONG" should NOT be treated as WHERE (regex word-
+        // boundary check).
+        let d = GenericDialect {};
+        let sql = "DELETE FROM x WHERETOOLONG"; // garbage — sqlparser will likely refuse
+        assert_eq!(
+            requires_destructive_confirmation(sql, &d),
+            Some("DELETE without WHERE")
+        );
     }
 
     #[test]
