@@ -10,6 +10,7 @@ use crate::config::ConfigStore;
 use crate::connections::ConnectionStore;
 use crate::datasource::DriverKind;
 use crate::llm::keystore::LlmKeyStore;
+use crate::llm::worker::PendingChatTool;
 use crate::log::Logger;
 use crate::state::chat::ChatPanel;
 use crate::state::completion::CompletionState;
@@ -112,6 +113,11 @@ pub struct App {
     /// side-effect of `ui::render`; consumed by the next `CtEvent::Mouse`
     /// to map (column, row) back to the panel that was clicked.
     pub layout: LayoutCache,
+    /// Tool calls from the LLM stream that we paused while waiting for an
+    /// introspection round-trip (auto-expand of an unloaded schema node).
+    /// Drained by `action::chat::complete_pending_for_target` when the
+    /// matching `WorkerEvent::SchemaLoaded` / `SchemaFailed` lands.
+    pub pending_chat_tools: Vec<PendingChatTool>,
 }
 
 impl App {
@@ -157,6 +163,7 @@ impl App {
             completion: None,
             completion_snoozed_at: None,
             layout: LayoutCache::default(),
+            pending_chat_tools: Vec::new(),
         }
     }
 }

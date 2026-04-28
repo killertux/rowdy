@@ -305,7 +305,15 @@ const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 keys: "PgUp / PgDn",
-                desc: "Scroll the message log",
+                desc: "Scroll the message log by a page",
+            },
+            HelpEntry {
+                keys: "Ctrl+↑ / Ctrl+↓",
+                desc: "Scroll the message log line by line",
+            },
+            HelpEntry {
+                keys: "Ctrl+Home / Ctrl+End",
+                desc: "Jump to the top / bottom of the log (End re-engages auto-follow)",
             },
             HelpEntry {
                 keys: "Esc",

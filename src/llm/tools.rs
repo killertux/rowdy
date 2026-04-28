@@ -27,6 +27,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::app::App;
+use crate::autocomplete::SchemaCache;
+use crate::worker::IntrospectTarget;
 
 pub const LIST_CATALOGS: &str = "list_catalogs";
 pub const LIST_SCHEMAS: &str = "list_schemas";
@@ -73,9 +75,9 @@ pub fn all() -> Vec<Tool> {
         function_tool(
             DESCRIBE_TABLE,
             "Get column names + types for a (catalog, schema, table). \
-             Returns { columns: [{name, type}] }. If columns aren't loaded, \
-             returns { columns: [], note: '...' } — ask the user to expand \
-             the table in the schema panel rather than guessing.",
+             Returns { columns: [{name, type}] }. Auto-loads the table's \
+             columns on first use. If introspection fails the response \
+             includes a `note` describing why — pass that to the user.",
             &[
                 ("catalog", "string", "Catalog name."),
                 ("schema", "string", "Schema name."),
@@ -135,6 +137,72 @@ fn function_tool(
             parameters: serde_json::to_value(schema).unwrap_or(Value::Null),
         },
         cache_control: None,
+    }
+}
+
+/// True when `name` reads from the in-memory schema cache. The chat
+/// dispatcher uses this to decide whether a cache miss should trigger an
+/// auto-introspection (schema tools) or fall through to the regular
+/// "tool returned an error" path (buffer tools never miss the cache).
+pub fn is_schema_tool(name: &str) -> bool {
+    matches!(
+        name,
+        LIST_CATALOGS | LIST_SCHEMAS | LIST_TABLES | DESCRIBE_TABLE
+    )
+}
+
+/// Decode the `IntrospectTarget` a schema tool would need. Returns
+/// `None` if `name` is not a schema tool or the args don't carry the
+/// required fields — the dispatcher then falls back to the synchronous
+/// path which surfaces the missing-arg error to the LLM.
+pub fn target_for(name: &str, args_json: &str) -> Option<IntrospectTarget> {
+    let args: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
+    match name {
+        LIST_CATALOGS => Some(IntrospectTarget::Catalogs),
+        LIST_SCHEMAS => {
+            let catalog = args.get("catalog").and_then(|v| v.as_str())?.to_string();
+            Some(IntrospectTarget::Schemas { catalog })
+        }
+        LIST_TABLES => {
+            let catalog = args.get("catalog").and_then(|v| v.as_str())?.to_string();
+            let schema = args.get("schema").and_then(|v| v.as_str())?.to_string();
+            Some(IntrospectTarget::Tables { catalog, schema })
+        }
+        DESCRIBE_TABLE => {
+            let catalog = args.get("catalog").and_then(|v| v.as_str())?.to_string();
+            let schema = args.get("schema").and_then(|v| v.as_str())?.to_string();
+            let table = args.get("table").and_then(|v| v.as_str())?.to_string();
+            Some(IntrospectTarget::Columns {
+                catalog,
+                schema,
+                table,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Whether the slice of the cache `target` references is already
+/// populated. `Catalogs` is treated as "cached" iff at least one is
+/// present — meaning the empty-database edge case will trigger one
+/// re-introspection (acceptable; the result lands in the same empty
+/// state and the retry guard prevents a loop).
+pub fn is_cached(cache: &SchemaCache, target: &IntrospectTarget) -> bool {
+    match target {
+        IntrospectTarget::Catalogs => !cache.catalogs.is_empty(),
+        IntrospectTarget::Schemas { catalog } => cache.schemas.contains_key(catalog),
+        IntrospectTarget::Tables { catalog, schema } => cache
+            .tables
+            .contains_key(&(catalog.clone(), schema.clone())),
+        IntrospectTarget::Columns {
+            catalog,
+            schema,
+            table,
+        } => cache
+            .columns
+            .contains_key(&(catalog.clone(), schema.clone(), table.clone())),
+        // Indices aren't surfaced as a tool — never expected here.
+        IntrospectTarget::Indices { .. } => true,
     }
 }
 
@@ -213,7 +281,7 @@ fn list_schemas(app: &App, args: &Value) -> Value {
         None => (
             Vec::new(),
             Some(format!(
-                "catalog {catalog:?} not loaded — ask the user to expand it in the schema panel"
+                "schemas of catalog {catalog:?} could not be loaded — verify the catalog name with list_catalogs"
             )),
         ),
     };
@@ -242,7 +310,7 @@ fn list_tables(app: &App, args: &Value) -> Value {
         None => (
             Vec::new(),
             Some(format!(
-                "schema {schema:?} in {catalog:?} not loaded — ask the user to expand it"
+                "tables of {catalog:?}.{schema:?} could not be loaded — verify the names with list_schemas"
             )),
         ),
     };
@@ -274,8 +342,8 @@ fn describe_table(app: &App, args: &Value) -> Value {
         None => (
             Vec::new(),
             Some(format!(
-                "columns of {catalog:?}.{schema:?}.{table:?} not loaded — \
-                 ask the user to expand the table in the schema panel"
+                "columns of {catalog:?}.{schema:?}.{table:?} could not be loaded — \
+                 verify the names with list_tables"
             )),
         ),
     };
@@ -358,5 +426,82 @@ mod tests {
     fn err_helper_shape() {
         let v = err("boom");
         assert_eq!(v.get("error").and_then(|s| s.as_str()), Some("boom"));
+    }
+
+    #[test]
+    fn target_for_decodes_each_schema_tool() {
+        assert_eq!(
+            target_for(LIST_CATALOGS, "{}"),
+            Some(IntrospectTarget::Catalogs)
+        );
+        assert_eq!(
+            target_for(LIST_SCHEMAS, r#"{"catalog":"db"}"#),
+            Some(IntrospectTarget::Schemas {
+                catalog: "db".into()
+            })
+        );
+        assert_eq!(
+            target_for(LIST_TABLES, r#"{"catalog":"db","schema":"public"}"#),
+            Some(IntrospectTarget::Tables {
+                catalog: "db".into(),
+                schema: "public".into(),
+            })
+        );
+        assert_eq!(
+            target_for(
+                DESCRIBE_TABLE,
+                r#"{"catalog":"db","schema":"public","table":"users"}"#
+            ),
+            Some(IntrospectTarget::Columns {
+                catalog: "db".into(),
+                schema: "public".into(),
+                table: "users".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn target_for_returns_none_when_args_missing() {
+        assert!(target_for(LIST_SCHEMAS, "{}").is_none());
+        assert!(target_for(LIST_TABLES, r#"{"catalog":"db"}"#).is_none());
+        assert!(target_for(READ_BUFFER, "{}").is_none());
+    }
+
+    #[test]
+    fn is_cached_tracks_population() {
+        use crate::autocomplete::cache::CachedTable;
+        use crate::datasource::schema::TableKind;
+        let mut cache = SchemaCache::new();
+        let tgt = IntrospectTarget::Tables {
+            catalog: "db".into(),
+            schema: "public".into(),
+        };
+        assert!(!is_cached(&cache, &tgt));
+        cache.tables.insert(
+            ("db".into(), "public".into()),
+            vec![CachedTable {
+                name: "users".into(),
+                kind: TableKind::Table,
+            }],
+        );
+        assert!(is_cached(&cache, &tgt));
+
+        // Empty-but-present is still "cached" — introspection succeeded
+        // with no rows, so the tool should report the empty list, not
+        // re-introspect.
+        let cols = IntrospectTarget::Columns {
+            catalog: "db".into(),
+            schema: "public".into(),
+            table: "empty".into(),
+        };
+        cache
+            .columns
+            .insert(("db".into(), "public".into(), "empty".into()), Vec::new());
+        assert!(is_cached(&cache, &cols));
+
+        // Catalogs uses non-empty as the "loaded" signal.
+        assert!(!is_cached(&cache, &IntrospectTarget::Catalogs));
+        cache.catalogs.push("db".into());
+        assert!(is_cached(&cache, &IntrospectTarget::Catalogs));
     }
 }

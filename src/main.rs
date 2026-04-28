@@ -1,6 +1,7 @@
 mod action;
 mod app;
 mod autocomplete;
+mod chat_session;
 mod cli;
 mod clipboard;
 mod command;

@@ -209,6 +209,13 @@ fn render_immutable_panes(
         }
         RightPanelMode::Chat => {
             let chat_layout = chat_view::layout_for(&app.chat, right_area);
+            // Clamp the chat scroll against actual content+viewport
+            // before we hand &App to ChatPane. Mirrors the schema
+            // panel's pattern so the renderer itself stays read-only.
+            let log_w = chat_layout.log_area.width;
+            let log_h = chat_layout.log_area.height;
+            let content_h = app.chat.content_height(log_w);
+            app.chat.clamp_scroll(content_h, log_h);
             app.layout.chat = Some(chat_layout);
         }
     }

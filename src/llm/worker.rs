@@ -24,7 +24,7 @@ use tokio::sync::oneshot;
 
 use crate::llm::tools;
 use crate::state::chat::{ChatBlock, ChatMessage, ChatRole};
-use crate::worker::WorkerEvent;
+use crate::worker::{IntrospectTarget, WorkerEvent};
 
 /// Cap on tool-call rounds in a single turn so a misbehaving model can't
 /// pin the worker.
@@ -61,6 +61,21 @@ pub struct ChatTurn {
     pub client: Box<dyn LLMProvider>,
     pub history: Vec<ChatMessage>,
     pub evt_tx: UnboundedSender<WorkerEvent>,
+}
+
+/// A tool call whose execution is paused until an introspection result
+/// arrives. Schema tools that hit a cache miss queue one of these,
+/// dispatch a `WorkerCommand::Introspect`, and let the resulting
+/// `WorkerEvent::SchemaLoaded`/`SchemaFailed` arrival drain the queue —
+/// at which point we re-run the tool against the freshly-populated
+/// cache and reply on the oneshot.
+#[derive(Debug)]
+pub struct PendingChatTool {
+    pub target: IntrospectTarget,
+    pub call_id: String,
+    pub tool_name: String,
+    pub args_json: String,
+    pub reply: oneshot::Sender<ToolReply>,
 }
 
 /// Spawn a tokio task that drives one chat turn (and any follow-up

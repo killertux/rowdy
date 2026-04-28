@@ -237,6 +237,10 @@ pub enum ChatAction {
     ClearComposer,
     ScrollUp(u16),
     ScrollDown(u16),
+    /// Jump the message log to the top.
+    ScrollToTop,
+    /// Jump to the bottom and re-engage auto-follow.
+    ScrollToBottom,
 }
 
 #[derive(Debug)]
@@ -1061,6 +1065,7 @@ fn on_connected(app: &mut App, name: String) {
     app.schema = SchemaPanel::new(app.schema.width);
     app.results.clear();
     load_session(app, &name);
+    load_chat_session(app, &name);
     app.schema.begin_root_load();
     let _ = app.cmd_tx.send(WorkerCommand::Introspect {
         target: IntrospectTarget::Catalogs,
@@ -1125,18 +1130,81 @@ fn on_schema_loaded(
     payload: crate::worker::SchemaPayload,
 ) {
     use crate::worker::SchemaPayload;
+    if let Ok(mut guard) = app.schema_cache.write() {
+        cache_introspect_payload(&mut guard, &target, &payload);
+    }
     match payload {
         SchemaPayload::Catalogs(catalogs) => app.schema.populate_catalogs(catalogs),
         other => app.schema.populate(&target, other),
     }
+    chat::complete_pending_for_target(app, &target, None);
 }
 
 fn on_schema_failed(app: &mut App, target: IntrospectTarget, error: String) {
     if matches!(target, IntrospectTarget::Catalogs) {
-        app.schema.fail_root_load(error);
-        return;
+        app.schema.fail_root_load(error.clone());
+    } else {
+        app.schema.record_failure(&target, error.clone());
     }
-    app.schema.record_failure(&target, error);
+    chat::complete_pending_for_target(app, &target, Some(error));
+}
+
+/// Mirror an introspection result into the autocomplete `SchemaCache`.
+/// `worker::prime_cache` and `worker::load_columns` already do this for
+/// the cache-prime / lazy-column paths; the chat auto-expand path
+/// reaches the cache through here instead so a schema tool that
+/// triggered the introspect can re-run against fresh data.
+fn cache_introspect_payload(
+    cache: &mut crate::autocomplete::SchemaCache,
+    target: &IntrospectTarget,
+    payload: &crate::worker::SchemaPayload,
+) {
+    use crate::autocomplete::cache::{CachedColumn, CachedTable};
+    use crate::worker::SchemaPayload;
+    match (target, payload) {
+        (IntrospectTarget::Catalogs, SchemaPayload::Catalogs(catalogs)) => {
+            cache.catalogs = catalogs.iter().map(|c| c.name.clone()).collect();
+        }
+        (IntrospectTarget::Schemas { catalog }, SchemaPayload::Schemas(schemas)) => {
+            cache.schemas.insert(
+                catalog.clone(),
+                schemas.iter().map(|s| s.name.clone()).collect(),
+            );
+        }
+        (IntrospectTarget::Tables { catalog, schema }, SchemaPayload::Tables(tables)) => {
+            let cached: Vec<CachedTable> = tables
+                .iter()
+                .map(|t| CachedTable {
+                    name: t.name.clone(),
+                    kind: t.kind,
+                })
+                .collect();
+            cache
+                .tables
+                .insert((catalog.clone(), schema.clone()), cached);
+        }
+        (
+            IntrospectTarget::Columns {
+                catalog,
+                schema,
+                table,
+            },
+            SchemaPayload::Columns(columns),
+        ) => {
+            let cached: Vec<CachedColumn> = columns
+                .iter()
+                .map(|c| CachedColumn {
+                    name: c.name.clone(),
+                    type_name: c.type_name.clone(),
+                })
+                .collect();
+            cache
+                .columns
+                .insert((catalog.clone(), schema.clone(), table.clone()), cached);
+        }
+        // Indices aren't in the cache and aren't surfaced as a tool.
+        _ => {}
+    }
 }
 
 fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResult) {
@@ -1786,6 +1854,35 @@ fn load_session(app: &mut App, name: &str) {
     }
     app.editor_dirty = false;
     app.pending_save_at = None;
+}
+
+/// Load the persisted chat-session messages for `name` into
+/// `app.chat.messages`. Missing file → empty history. Failures are
+/// surfaced as a warning + empty history rather than a hard error;
+/// chat is non-essential to the rest of the UI.
+fn load_chat_session(app: &mut App, name: &str) {
+    let path = crate::chat_session::path_for(&app.data_dir, name);
+    match crate::chat_session::load(&path) {
+        Ok(messages) => {
+            let count = messages.len();
+            app.chat.messages = messages;
+            // Land at the bottom of the loaded history — that's where
+            // the conversation left off, and what the user expects when
+            // resuming a session.
+            app.chat.scroll_to_bottom();
+            app.chat.streaming = false;
+            app.chat.error = None;
+            app.log.info(
+                "chat",
+                format!("loaded {count} message(s) from {}", path.display()),
+            );
+        }
+        Err(err) => {
+            app.log
+                .warn("chat", format!("load {} failed: {err}", path.display()));
+            app.chat.messages.clear();
+        }
+    }
 }
 
 #[cfg(test)]

@@ -569,6 +569,23 @@ fn translate_chat_key(key: KeyEvent) -> Option<Action> {
     if (key.code == KeyCode::PageDown) && bare {
         return Some(Action::Chat(ChatAction::ScrollDown(8)));
     }
+    // Ctrl+Up/Down — line-by-line scroll. Plain Up/Down is reserved for
+    // the composer's textarea (multi-line cursor movement).
+    if key.code == KeyCode::Up && ctrl {
+        return Some(Action::Chat(ChatAction::ScrollUp(1)));
+    }
+    if key.code == KeyCode::Down && ctrl {
+        return Some(Action::Chat(ChatAction::ScrollDown(1)));
+    }
+    // Ctrl+Home / Ctrl+End — jump to top/bottom of the log. Plain
+    // Home/End remain delegated to the composer for line-start /
+    // line-end movement, matching the rest of the app's text inputs.
+    if key.code == KeyCode::Home && ctrl {
+        return Some(Action::Chat(ChatAction::ScrollToTop));
+    }
+    if key.code == KeyCode::End && ctrl {
+        return Some(Action::Chat(ChatAction::ScrollToBottom));
+    }
     let _ = shift_only;
     Some(Action::Chat(ChatAction::Input(Input::from(key))))
 }
