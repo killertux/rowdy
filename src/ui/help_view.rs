@@ -293,11 +293,15 @@ const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 keys: ":chat settings",
-                desc: "Configure provider / API key (lands in phase 3)",
+                desc: "Configure provider, model, and API key",
             },
             HelpEntry {
                 keys: "Enter",
                 desc: "Submit composer · Shift+Enter inserts a newline",
+            },
+            HelpEntry {
+                keys: "Ctrl+U",
+                desc: "Clear the composer (message log untouched)",
             },
             HelpEntry {
                 keys: "PgUp / PgDn",
@@ -306,6 +310,31 @@ const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 keys: "Esc",
                 desc: "Bounce back to the schema panel",
+            },
+        ],
+    },
+    HelpSection {
+        title: "Form fields (any modal: settings, conn-form, auth, : prompt)",
+        entries: &[
+            HelpEntry {
+                keys: "Tab / Shift+Tab",
+                desc: "Move between fields",
+            },
+            HelpEntry {
+                keys: "Ctrl+V / Ctrl+C / Ctrl+X",
+                desc: "Paste / copy / cut (system clipboard)",
+            },
+            HelpEntry {
+                keys: "Ctrl+U",
+                desc: "Clear the focused field",
+            },
+            HelpEntry {
+                keys: "Enter / Esc",
+                desc: "Submit / cancel",
+            },
+            HelpEntry {
+                keys: "← → or [ ]",
+                desc: ":chat settings — change provider (only on Backend field)",
             },
         ],
     },

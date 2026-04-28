@@ -15,6 +15,7 @@ use crate::command::FormatScope;
 use crate::export::ExportFormat;
 use crate::state::focus::{Focus, PendingChord};
 use crate::state::layout::{DragState, rect_contains};
+use crate::state::llm_settings::{LlmSettingsField, LlmSettingsState};
 use crate::state::overlay::Overlay;
 use crate::state::results::ResultViewMode;
 use crate::state::right_panel::RightPanelMode;
@@ -81,7 +82,7 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
             // Keys are inert until the worker responds.
             Overlay::Connecting { .. } => None,
             Overlay::Help { .. } => translate_help_key(key),
-            Overlay::LlmSettings(_) => translate_llm_settings_key(key),
+            Overlay::LlmSettings(state) => translate_llm_settings_key(state, key),
         };
     }
     match &app.screen {
@@ -159,6 +160,9 @@ fn translate_auth_key(key: KeyEvent) -> Option<Action> {
     ) {
         return Some(Action::Auth(act));
     }
+    if is_ctrl_u(key) {
+        return Some(Action::Auth(AuthAction::ClearField));
+    }
     match key.code {
         KeyCode::Esc => Some(Action::Auth(AuthAction::Cancel)),
         KeyCode::Enter => Some(Action::Auth(AuthAction::Submit)),
@@ -174,6 +178,9 @@ fn translate_conn_form_key(key: KeyEvent) -> Option<Action> {
         ConnFormAction::Cut,
     ) {
         return Some(Action::ConnForm(act));
+    }
+    if is_ctrl_u(key) {
+        return Some(Action::ConnForm(ConnFormAction::ClearField));
     }
     match key.code {
         KeyCode::Esc => Some(Action::ConnForm(ConnFormAction::Cancel)),
@@ -253,6 +260,9 @@ fn translate_command_key(key: KeyEvent) -> Option<Action> {
     ) {
         return Some(Action::Command(act));
     }
+    if is_ctrl_u(key) {
+        return Some(Action::Command(CommandAction::ClearField));
+    }
     match key.code {
         KeyCode::Esc => Some(Action::Command(CommandAction::Cancel)),
         KeyCode::Enter => Some(Action::Command(CommandAction::Submit)),
@@ -294,6 +304,14 @@ fn is_ctrl_space(key: KeyEvent) -> bool {
     key.code == KeyCode::Char(' ')
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::SHIFT)
+}
+
+/// Recognise the "clear current field" shortcut. `Ctrl+U` is the
+/// universal *kill-to-start-of-line* convention; in our single-line
+/// form fields it functions as "wipe everything I typed".
+fn is_ctrl_u(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// Keys consumed by the popover when it's open. `None` means "fall
@@ -478,7 +496,7 @@ fn translate_gg_chord(app: &App, key: KeyEvent) -> Option<Action> {
     }
 }
 
-fn translate_llm_settings_key(key: KeyEvent) -> Option<Action> {
+fn translate_llm_settings_key(state: &LlmSettingsState, key: KeyEvent) -> Option<Action> {
     if let Some(act) = clipboard_arm(
         key,
         LlmSettingsAction::Paste(None),
@@ -489,17 +507,23 @@ fn translate_llm_settings_key(key: KeyEvent) -> Option<Action> {
     }
     let mods = key.modifiers;
     let bare = mods.is_empty();
+    let on_backend = state.focus == LlmSettingsField::Backend;
+
+    // Ctrl+U clears the focused TextArea (no-op when focus is Backend).
+    if key.code == KeyCode::Char('u') && mods.contains(KeyModifiers::CONTROL) {
+        return Some(Action::LlmSettings(LlmSettingsAction::ClearField));
+    }
     match (key.code, bare) {
         (KeyCode::Esc, _) => Some(Action::LlmSettings(LlmSettingsAction::Cancel)),
         (KeyCode::Enter, true) => Some(Action::LlmSettings(LlmSettingsAction::Submit)),
         (KeyCode::Tab, _) => Some(Action::LlmSettings(LlmSettingsAction::CycleField)),
         (KeyCode::BackTab, _) => Some(Action::LlmSettings(LlmSettingsAction::CycleFieldBack)),
-        // Backend cycling (only meaningful while focus is on Backend, but
-        // we let the action layer ignore the rest).
-        (KeyCode::Left, true) | (KeyCode::Char('['), true) => {
+        // Backend cycling — only fires when the Backend field is active so
+        // the user can use ← / → / `[` / `]` normally inside text fields.
+        (KeyCode::Left, true) | (KeyCode::Char('['), true) if on_backend => {
             Some(Action::LlmSettings(LlmSettingsAction::CycleBackend(-1)))
         }
-        (KeyCode::Right, true) | (KeyCode::Char(']'), true) => {
+        (KeyCode::Right, true) | (KeyCode::Char(']'), true) if on_backend => {
             Some(Action::LlmSettings(LlmSettingsAction::CycleBackend(1)))
         }
         _ => Some(Action::LlmSettings(LlmSettingsAction::Input(Input::from(
@@ -516,6 +540,9 @@ fn translate_chat_key(key: KeyEvent) -> Option<Action> {
         ChatAction::Cut,
     ) {
         return Some(Action::Chat(act));
+    }
+    if is_ctrl_u(key) {
+        return Some(Action::Chat(ChatAction::ClearComposer));
     }
     let mods = key.modifiers;
     let bare = mods.is_empty();
@@ -1286,6 +1313,73 @@ mod tests {
         assert!(matches!(
             translate_expanded_key(key(KeyCode::Char('v')), &view),
             Some(Action::ResultExitVisual)
+        ));
+    }
+
+    // ----- translate_llm_settings_key ----------------------------------
+
+    #[test]
+    fn llm_settings_arrows_cycle_backend_only_on_backend_field() {
+        let mut state = LlmSettingsState::new_create();
+        // Default focus is Backend — arrows cycle.
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Left)),
+            "CycleBackend(-1)"
+        ));
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Right)),
+            "CycleBackend(1)"
+        ));
+        // Move focus to Model — arrows now fall through to TextArea Input.
+        state.focus = LlmSettingsField::Model;
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Left)),
+            "Input"
+        ));
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Right)),
+            "Input"
+        ));
+        // `[` and `]` follow the same gating.
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Char('['))),
+            "Input"
+        ));
+        state.focus = LlmSettingsField::Backend;
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Char('['))),
+            "CycleBackend(-1)"
+        ));
+    }
+
+    #[test]
+    fn llm_settings_ctrl_u_clears_field() {
+        let state = LlmSettingsState::new_create();
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, ctrl(KeyCode::Char('u'))),
+            "ClearField"
+        ));
+    }
+
+    #[test]
+    fn ctrl_u_recognised_in_form_keymaps() {
+        // Ctrl+U → ClearField across every modal that has a TextArea.
+        assert!(matches_action(
+            &translate_auth_key(ctrl(KeyCode::Char('u'))),
+            "ClearField"
+        ));
+        assert!(matches_action(
+            &translate_conn_form_key(ctrl(KeyCode::Char('u'))),
+            "ClearField"
+        ));
+        assert!(matches_action(
+            &translate_command_key(ctrl(KeyCode::Char('u'))),
+            "ClearField"
+        ));
+        // Chat composer uses ClearComposer to disambiguate from `:chat clear`.
+        assert!(matches_action(
+            &translate_chat_key(ctrl(KeyCode::Char('u'))),
+            "ClearComposer"
         ));
     }
 }

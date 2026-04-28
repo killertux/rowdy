@@ -26,6 +26,7 @@ pub fn apply(app: &mut App, action: AuthAction) {
         // Copying a masked password buffer would defeat the masking;
         // ignore copy/cut here.
         AuthAction::Copy | AuthAction::Cut => {}
+        AuthAction::ClearField => state.clear_input(),
         AuthAction::Cancel => app.should_quit = true,
         AuthAction::Submit => submit(app),
     }

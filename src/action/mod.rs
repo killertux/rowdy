@@ -178,6 +178,8 @@ pub enum AuthAction {
     Paste(Option<String>),
     Copy,
     Cut,
+    /// Wipe the password field (`Ctrl+U`).
+    ClearField,
     Submit,
     Cancel,
 }
@@ -191,6 +193,8 @@ pub enum ConnFormAction {
     Copy,
     Cut,
     ToggleFocus,
+    /// Wipe the focused field (`Ctrl+U`).
+    ClearField,
     Submit,
     Cancel,
 }
@@ -229,6 +233,8 @@ pub enum ChatAction {
     Cancel,
     /// Wipe the message log and reset the composer.
     Clear,
+    /// Wipe just the composer (`Ctrl+U`), leaving the message log intact.
+    ClearComposer,
     ScrollUp(u16),
     ScrollDown(u16),
 }
@@ -245,6 +251,8 @@ pub enum LlmSettingsAction {
     CycleField,
     /// Shift+Tab backward through the four fields.
     CycleFieldBack,
+    /// Wipe the focused field (`Ctrl+U`). No-op when focus is on Backend.
+    ClearField,
     Submit,
     Cancel,
 }
@@ -257,6 +265,8 @@ pub enum CommandAction {
     Paste(Option<String>),
     Copy,
     Cut,
+    /// Wipe the command-bar input (`Ctrl+U`).
+    ClearField,
     Submit,
     Cancel,
 }
@@ -581,6 +591,9 @@ fn apply_command(app: &mut App, action: CommandAction) {
         CommandAction::Paste(text) => paste_into(&mut buf.input, &app.log, text),
         CommandAction::Copy => copy_from(&mut buf.input, &app.log),
         CommandAction::Cut => cut_from(&mut buf.input, &app.log),
+        CommandAction::ClearField => {
+            buf.input.clear();
+        }
         CommandAction::Cancel => app.overlay = None,
         CommandAction::Submit => submit_command(app),
     }

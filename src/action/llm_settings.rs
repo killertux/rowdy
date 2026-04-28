@@ -66,6 +66,11 @@ pub fn apply(app: &mut App, action: LlmSettingsAction) {
         LlmSettingsAction::CycleBackend(delta) => state.cycle_backend(delta),
         LlmSettingsAction::CycleField => state.focus = state.focus.next(),
         LlmSettingsAction::CycleFieldBack => state.focus = state.focus.prev(),
+        LlmSettingsAction::ClearField => {
+            if !matches!(state.focus, LlmSettingsField::Backend) {
+                state.current_input_mut().clear();
+            }
+        }
         LlmSettingsAction::Cancel => app.overlay = None,
         LlmSettingsAction::Submit => submit(app),
     }

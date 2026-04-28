@@ -34,6 +34,9 @@ pub fn apply(app: &mut App, action: ChatAction) {
             app.chat.clear();
             app.log.info("chat", "cleared session");
         }
+        ChatAction::ClearComposer => {
+            app.chat.composer.clear();
+        }
         ChatAction::ScrollUp(n) => app.chat.scroll_up(n),
         ChatAction::ScrollDown(n) => app.chat.scroll_down(n),
     }
