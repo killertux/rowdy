@@ -285,6 +285,12 @@ pub enum CommandAction {
     ClearField,
     Submit,
     Cancel,
+    /// Move the autocomplete popover selection by `±1`. No-op when no
+    /// popover is open.
+    CompletionMove(i32),
+    /// Replace the in-progress command name with the highlighted
+    /// candidate. Tab.
+    CompletionAccept,
 }
 
 #[derive(Debug)]
@@ -631,15 +637,35 @@ fn apply_command(app: &mut App, action: CommandAction) {
     match action {
         CommandAction::Input(input) => {
             let _ = buf.input.input(input);
+            buf.recompute_completion();
         }
-        CommandAction::Paste(text) => paste_into(&mut buf.input, &app.log, text),
+        CommandAction::Paste(text) => {
+            paste_into(&mut buf.input, &app.log, text);
+            buf.recompute_completion();
+        }
         CommandAction::Copy => copy_from(&mut buf.input, &app.log),
-        CommandAction::Cut => cut_from(&mut buf.input, &app.log),
+        CommandAction::Cut => {
+            cut_from(&mut buf.input, &app.log);
+            buf.recompute_completion();
+        }
         CommandAction::ClearField => {
             buf.input.clear();
+            buf.recompute_completion();
         }
         CommandAction::Cancel => app.overlay = None,
         CommandAction::Submit => submit_command(app),
+        CommandAction::CompletionMove(delta) => {
+            if let Some(c) = &mut buf.completion {
+                c.move_selection(delta);
+            }
+        }
+        CommandAction::CompletionAccept => {
+            if let Some(c) = &buf.completion
+                && let Some(name) = c.current()
+            {
+                buf.accept_completion(name);
+            }
+        }
     }
 }
 

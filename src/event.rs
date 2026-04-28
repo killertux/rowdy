@@ -13,6 +13,7 @@ use crate::action::{
 use crate::app::App;
 use crate::command::FormatScope;
 use crate::export::ExportFormat;
+use crate::state::command::CommandBuffer;
 use crate::state::focus::{Focus, PendingChord};
 use crate::state::layout::{DragState, rect_contains};
 use crate::state::llm_settings::{LlmSettingsField, LlmSettingsState};
@@ -80,7 +81,7 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
     // grid, key goes to the help popover and not the grid.
     if let Some(overlay) = &app.overlay {
         return match overlay {
-            Overlay::Command(_) => translate_command_key(key),
+            Overlay::Command(buf) => translate_command_key(buf, key),
             Overlay::ConfirmRun { .. } => translate_confirm_key(key),
             // Keys are inert until the worker responds.
             Overlay::Connecting { .. } => None,
@@ -254,7 +255,7 @@ fn panic_quit(key: KeyEvent) -> Option<Action> {
     bare_ctrl_c.then_some(Action::Quit)
 }
 
-fn translate_command_key(key: KeyEvent) -> Option<Action> {
+fn translate_command_key(buf: &CommandBuffer, key: KeyEvent) -> Option<Action> {
     if let Some(act) = clipboard_arm(
         key,
         CommandAction::Paste(None),
@@ -266,7 +267,23 @@ fn translate_command_key(key: KeyEvent) -> Option<Action> {
     if is_ctrl_u(key) {
         return Some(Action::Command(CommandAction::ClearField));
     }
+    let popover_open = buf.completion.is_some();
     match key.code {
+        // Tab inserts a literal tab when the popover isn't showing —
+        // unusual but consistent with the existing fallthrough. With
+        // the popover up, Tab accepts the highlighted candidate.
+        KeyCode::Tab if popover_open => Some(Action::Command(CommandAction::CompletionAccept)),
+        // Arrow / Ctrl+P / Ctrl+N navigate the popover when open. Off
+        // mode lets the keys fall through to TextArea (which ignores
+        // them on a single-line input).
+        KeyCode::Up if popover_open => Some(Action::Command(CommandAction::CompletionMove(-1))),
+        KeyCode::Down if popover_open => Some(Action::Command(CommandAction::CompletionMove(1))),
+        KeyCode::Char('p') if popover_open && key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Action::Command(CommandAction::CompletionMove(-1)))
+        }
+        KeyCode::Char('n') if popover_open && key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Action::Command(CommandAction::CompletionMove(1)))
+        }
         KeyCode::Esc => Some(Action::Command(CommandAction::Cancel)),
         KeyCode::Enter => Some(Action::Command(CommandAction::Submit)),
         _ => Some(Action::Command(CommandAction::Input(Input::from(key)))),
@@ -1115,28 +1132,30 @@ mod tests {
 
     #[test]
     fn command_key_clipboard_arms_route_through() {
+        let buf = CommandBuffer::default();
         assert!(matches_action(
-            &translate_command_key(ctrl(KeyCode::Char('v'))),
+            &translate_command_key(&buf, ctrl(KeyCode::Char('v'))),
             "Paste"
         ));
         assert!(matches_action(
-            &translate_command_key(ctrl(KeyCode::Char('c'))),
+            &translate_command_key(&buf, ctrl(KeyCode::Char('c'))),
             "Copy"
         ));
         assert!(matches_action(
-            &translate_command_key(ctrl(KeyCode::Char('x'))),
+            &translate_command_key(&buf, ctrl(KeyCode::Char('x'))),
             "Cut"
         ));
     }
 
     #[test]
     fn command_key_submit_and_cancel() {
+        let buf = CommandBuffer::default();
         assert!(matches_action(
-            &translate_command_key(key(KeyCode::Enter)),
+            &translate_command_key(&buf, key(KeyCode::Enter)),
             "Submit"
         ));
         assert!(matches_action(
-            &translate_command_key(key(KeyCode::Esc)),
+            &translate_command_key(&buf, key(KeyCode::Esc)),
             "Cancel"
         ));
     }
@@ -1144,9 +1163,34 @@ mod tests {
     #[test]
     fn command_key_input_passthrough() {
         // Any other key falls through as an Input. Matching just by tag.
+        let buf = CommandBuffer::default();
         assert!(matches_action(
-            &translate_command_key(key(KeyCode::Char('a'))),
+            &translate_command_key(&buf, key(KeyCode::Char('a'))),
             "Input"
+        ));
+    }
+
+    #[test]
+    fn command_key_popover_intercepts_tab_and_arrows() {
+        // Build a buffer with the popover open (any prefix-matched
+        // first token will work).
+        let mut buf = CommandBuffer {
+            input: ratatui_textarea::TextArea::new(vec!["e".into()]),
+            ..Default::default()
+        };
+        buf.recompute_completion();
+        assert!(buf.completion.is_some(), "popover should be open");
+        assert!(matches_action(
+            &translate_command_key(&buf, key(KeyCode::Tab)),
+            "CompletionAccept"
+        ));
+        assert!(matches_action(
+            &translate_command_key(&buf, key(KeyCode::Up)),
+            "CompletionMove"
+        ));
+        assert!(matches_action(
+            &translate_command_key(&buf, key(KeyCode::Down)),
+            "CompletionMove"
         ));
     }
 
@@ -1559,7 +1603,7 @@ mod tests {
             "ClearField"
         ));
         assert!(matches_action(
-            &translate_command_key(ctrl(KeyCode::Char('u'))),
+            &translate_command_key(&CommandBuffer::default(), ctrl(KeyCode::Char('u'))),
             "ClearField"
         ));
         // Chat composer uses ClearComposer to disambiguate from `:chat clear`.
