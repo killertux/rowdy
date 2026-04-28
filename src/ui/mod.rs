@@ -329,6 +329,9 @@ fn render_modal(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect)
 }
 
 fn latest_result(app: &App) -> Option<&ResultBlock> {
+    if app.preview_hidden {
+        return None;
+    }
     app.results.last()
 }
 

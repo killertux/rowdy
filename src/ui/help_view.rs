@@ -216,6 +216,10 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 desc: "Expand the latest result",
             },
             HelpEntry {
+                keys: "Q  (also :close)",
+                desc: "Hide the inline result preview (next query un-hides)",
+            },
+            HelpEntry {
                 keys: "<Space> c",
                 desc: "Cancel the in-flight query",
             },

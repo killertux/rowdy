@@ -22,6 +22,9 @@ pub enum Command {
     Cancel,
     Expand,
     Collapse,
+    /// Hide the inline result preview without dropping history.
+    /// `:close` / `:hide`. Bare `Q` does the same in Normal mode.
+    CloseResult,
     Theme(ThemeChoice),
     Export {
         fmt: ExportFormat,
@@ -100,6 +103,7 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
         "cancel" => Command::Cancel,
         "expand" | "e" => Command::Expand,
         "collapse" | "c" => Command::Collapse,
+        "close" | "hide" => Command::CloseResult,
         "theme" => parse_theme(&args)?,
         "export" => parse_export(&args)?,
         "format" | "fmt" => parse_format(&args)?,
@@ -248,6 +252,12 @@ mod tests {
     #[test]
     fn unknown_command_surfaces_message() {
         assert_eq!(parse("nope"), Err("unknown command: nope".into()));
+    }
+
+    #[test]
+    fn close_and_hide_dismiss_result_preview() {
+        assert_eq!(parse("close"), Ok(Some(Command::CloseResult)));
+        assert_eq!(parse("hide"), Ok(Some(Command::CloseResult)));
     }
 
     #[test]

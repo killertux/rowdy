@@ -51,6 +51,10 @@ pub enum Action {
     CancelQuery,
     ExpandLatestResult,
     CollapseResult,
+    /// Hide the inline result preview (`Q` in Normal mode, or `:close`).
+    /// Doesn't drop history — the latest block is still reachable via
+    /// `:expand`. Auto-cleared by the next `dispatch_query`.
+    DismissResult,
     ResultNav(ResultNavAction),
     ResultEnterVisual,
     ResultExitVisual,
@@ -354,6 +358,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::CancelQuery => cancel_query(app),
         Action::ExpandLatestResult => expand_latest(app),
         Action::CollapseResult => app.screen = Screen::Normal,
+        Action::DismissResult => dismiss_result(app),
         Action::ResultNav(nav) => apply_result_nav(app, nav),
         Action::ResultEnterVisual => result_enter_visual(app),
         Action::ResultExitVisual => result_exit_visual(app),
@@ -646,6 +651,7 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         C::Cancel => apply(app, Action::CancelQuery),
         C::Expand => apply(app, Action::ExpandLatestResult),
         C::Collapse => apply(app, Action::CollapseResult),
+        C::CloseResult => apply(app, Action::DismissResult),
         C::Theme(ThemeChoice::Toggle) => apply(app, Action::ToggleTheme),
         C::Theme(ThemeChoice::Set(kind)) => apply_theme(app, kind),
         C::Export { fmt, target } => apply(
@@ -950,6 +956,10 @@ fn dispatch_query(app: &mut App, sql: String) {
         };
         return;
     }
+    // The user explicitly ran a new query — un-hide the preview so we
+    // can show whatever this run produces (or auto-hide it again from
+    // `on_query_done` if the new statement is DML).
+    app.preview_hidden = false;
     let req = app.requests.next();
     app.in_flight_query = Some(crate::app::InFlightQuery {
         req,
@@ -978,6 +988,19 @@ fn expand_latest(app: &mut App) {
         row_offset: 0,
         view: ResultViewMode::Normal,
     };
+}
+
+/// User-driven dismiss of the inline result preview. Doesn't touch
+/// `app.results` so `:expand` can still pull the same block back up;
+/// the next `dispatch_query` un-hides automatically.
+fn dismiss_result(app: &mut App) {
+    if app.results.last().is_none() {
+        app.status = QueryStatus::Failed {
+            error: "no result preview to close".into(),
+        };
+        return;
+    }
+    app.preview_hidden = true;
 }
 
 fn apply_result_nav(app: &mut App, nav: ResultNavAction) {
@@ -1249,7 +1272,9 @@ fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResu
     let affected = result.affected;
 
     // Statements run via `execute()` (DML/DDL) report no columns — there's
-    // nothing to render in a result block, so skip pushing one.
+    // nothing to render in a result block, so skip pushing one. Also hide
+    // the inline preview so a stale grid from an earlier SELECT doesn't
+    // linger on screen after a `DELETE`/`UPDATE` lands.
     if !result.columns.is_empty() {
         let id = ResultId(app.results.len());
         // `active_dialect` should always be Some here (we only run queries
@@ -1266,6 +1291,8 @@ fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResu
             sql: in_flight.sql,
             dialect,
         });
+    } else {
+        app.preview_hidden = true;
     }
 
     app.status = QueryStatus::Succeeded {

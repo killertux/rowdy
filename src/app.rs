@@ -118,6 +118,10 @@ pub struct App {
     /// Drained by `action::chat::complete_pending_for_target` when the
     /// matching `WorkerEvent::SchemaLoaded` / `SchemaFailed` lands.
     pub pending_chat_tools: Vec<PendingChatTool>,
+    /// User explicitly dismissed the inline result preview (`Q` /
+    /// `:close`). Reset by every `dispatch_query`. The expanded-view
+    /// path bypasses this; we only gate the inline split.
+    pub preview_hidden: bool,
 }
 
 impl App {
@@ -164,6 +168,7 @@ impl App {
             completion_snoozed_at: None,
             layout: LayoutCache::default(),
             pending_chat_tools: Vec::new(),
+            preview_hidden: false,
         }
     }
 }
