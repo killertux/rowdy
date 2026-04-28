@@ -8,6 +8,9 @@
 
 use crate::action::{ChatAction, copy_from, cut_from, paste_into};
 use crate::app::App;
+use crate::llm::prompt::build_system_prompt;
+use crate::llm::provider::build_client;
+use crate::llm::worker::{ChatDelta, spawn_chat_turn};
 use crate::state::chat::ChatMessage;
 use crate::state::focus::Focus;
 use crate::state::right_panel::RightPanelMode;
@@ -53,11 +56,68 @@ fn submit(app: &mut App) {
     if text.is_empty() {
         return;
     }
+    if app.chat.streaming {
+        // A turn is already in flight — queue is not implemented yet, so
+        // tell the user instead of silently dropping the new message.
+        app.chat.error = Some("a response is still streaming — wait or :chat clear".into());
+        return;
+    }
     app.chat.error = None;
     app.chat.push_message(ChatMessage::user_text(text));
     app.chat.reset_composer();
-    // Phase 2 stub — remove once the LLM worker is wired in phase 3.
-    app.chat.push_message(ChatMessage::assistant_text(
-        "(LLM not configured yet — `:chat settings` lands in phase 3)",
-    ));
+
+    // Resolve provider + key. Errors land as a user-visible assistant
+    // bubble rather than a status-bar message — feels more natural for
+    // a chat-style UI.
+    let Some(entry) = app.config.llm_providers().first().cloned() else {
+        app.chat.push_message(ChatMessage::assistant_text(
+            "No LLM provider configured. Run `:chat settings` to add one.",
+        ));
+        return;
+    };
+    let Some(keystore) = app.llm_keystore.as_ref() else {
+        app.chat.error = Some("internal: no keystore unlocked".into());
+        return;
+    };
+
+    let system_prompt = build_system_prompt(app);
+    let client = match build_client(&entry, keystore, &system_prompt) {
+        Ok(c) => c,
+        Err(err) => {
+            app.chat
+                .push_message(ChatMessage::assistant_text(format!("Build error: {err}")));
+            return;
+        }
+    };
+
+    let history = app.chat.messages.clone();
+    let evt_tx = app.evt_tx.clone();
+    // Dropping the JoinHandle here doesn't cancel the task — tokio
+    // detaches it. We don't need to track it yet; phase-3 cancellation
+    // (`Action::Chat(Cancel)`) will plumb it through `app.chat` later.
+    let _handle = spawn_chat_turn(client, history, evt_tx);
+    app.chat.streaming = true;
+}
+
+/// Fold a streaming delta into the chat panel. Called from
+/// `action::apply_worker_event` when a `WorkerEvent::ChatDelta` lands.
+pub fn on_delta(app: &mut App, delta: ChatDelta) {
+    match delta {
+        ChatDelta::Text(text) => {
+            app.chat.append_assistant_text(&text);
+        }
+        ChatDelta::Done { full_text } => {
+            // The Text deltas already covered the live UI; `full_text` is
+            // available for phase-5 session persistence. Drop it here for
+            // now so we don't leak the API response into a log.
+            let _ = full_text;
+            app.chat.streaming = false;
+        }
+        ChatDelta::Error(msg) => {
+            app.chat.streaming = false;
+            app.chat.error = Some(msg.clone());
+            app.chat
+                .push_message(ChatMessage::assistant_text(format!("error: {msg}")));
+        }
+    }
 }

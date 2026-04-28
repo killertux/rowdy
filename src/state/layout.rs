@@ -120,6 +120,8 @@ pub enum OverlayLayout {
     ConnForm { area: Rect },
     /// Auth prompt (password).
     Auth { area: Rect },
+    /// LLM settings modal.
+    LlmSettings { area: Rect },
 }
 
 impl OverlayLayout {
@@ -128,7 +130,8 @@ impl OverlayLayout {
             Self::Help { area }
             | Self::ConnList { area }
             | Self::ConnForm { area }
-            | Self::Auth { area } => *area,
+            | Self::Auth { area }
+            | Self::LlmSettings { area } => *area,
         }
     }
 }

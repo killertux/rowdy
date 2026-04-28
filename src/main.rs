@@ -111,13 +111,14 @@ async fn run_app() -> Result<i32> {
     let worker_handle = tokio::spawn(worker::run(
         logger.clone(),
         cmd_rx,
-        evt_tx,
+        evt_tx.clone(),
         schema_cache.clone(),
     ));
 
     let mut tui = Tui::init()?;
     let mut app = App::new(
         cmd_tx,
+        evt_tx,
         config,
         logger.clone(),
         data_dir.clone(),

@@ -3,6 +3,8 @@ use std::sync::{Arc, RwLock};
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::worker::WorkerEvent;
+
 use crate::autocomplete::SchemaCache;
 use crate::config::ConfigStore;
 use crate::connections::ConnectionStore;
@@ -57,6 +59,11 @@ pub struct App {
     /// the right status to the shell.
     pub exit_code: i32,
     pub cmd_tx: UnboundedSender<WorkerCommand>,
+    /// Sink for `WorkerEvent`s from short-lived tokio tasks (currently
+    /// the LLM streaming task). The long-running `worker::run` keeps its
+    /// own clone; this one lets the action layer spawn ad-hoc tasks
+    /// that funnel events into the same loop.
+    pub evt_tx: UnboundedSender<WorkerEvent>,
     pub requests: RequestCounter,
     /// The currently in-flight query, if any. The SQL travels alongside so
     /// `on_query_done` can attach it to the resulting `ResultBlock` (used by
@@ -110,6 +117,7 @@ pub struct App {
 impl App {
     pub fn new(
         cmd_tx: UnboundedSender<WorkerCommand>,
+        evt_tx: UnboundedSender<WorkerEvent>,
         config: ConfigStore,
         log: Logger,
         data_dir: PathBuf,
@@ -133,6 +141,7 @@ impl App {
             should_quit: false,
             exit_code: 0,
             cmd_tx,
+            evt_tx,
             requests: RequestCounter::new(),
             in_flight_query: None,
             config,

@@ -8,6 +8,7 @@
 //! editor; `:help` over `ResultExpanded` returns to the grid.
 
 use crate::state::command::CommandBuffer;
+use crate::state::llm_settings::LlmSettingsState;
 
 /// The layer that floats over the current [`crate::state::screen::Screen`].
 //
@@ -34,4 +35,7 @@ pub enum Overlay {
     /// against the actual content size, so the next keystroke sees a
     /// sane value rather than an accumulated "past-the-end" count.
     Help { scroll: u16, h_scroll: u16 },
+    /// `:chat settings` modal — choose a provider, enter / update an
+    /// API key. The state struct owns the `TextArea`s and focus.
+    LlmSettings(LlmSettingsState),
 }

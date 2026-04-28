@@ -12,6 +12,9 @@
 #![allow(dead_code)]
 
 pub mod keystore;
+pub mod prompt;
+pub mod provider;
+pub mod worker;
 
 use serde::{Deserialize, Serialize};
 

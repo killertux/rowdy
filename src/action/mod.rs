@@ -9,6 +9,7 @@ mod chat;
 mod completion;
 mod conn_form;
 mod conn_list;
+mod llm_settings;
 
 use crate::app::{App, MAX_SCHEMA_WIDTH, MIN_SCHEMA_WIDTH};
 use crate::clipboard;
@@ -98,6 +99,8 @@ pub enum Action {
     /// Flip the right panel between schema and chat. Also moves focus into
     /// the new right pane so the user can immediately type / navigate.
     ToggleRightPanel,
+    /// `:chat settings` modal interactions.
+    LlmSettings(LlmSettingsAction),
 }
 
 /// What a click or scroll-wheel was aimed at. Translated from
@@ -231,6 +234,22 @@ pub enum ChatAction {
 }
 
 #[derive(Debug)]
+pub enum LlmSettingsAction {
+    Input(Input),
+    Paste(Option<String>),
+    Copy,
+    Cut,
+    /// Move backend selection by `±1` (left/right arrows or `[`/`]`).
+    CycleBackend(i32),
+    /// Tab forward through the four fields.
+    CycleField,
+    /// Shift+Tab backward through the four fields.
+    CycleFieldBack,
+    Submit,
+    Cancel,
+}
+
+#[derive(Debug)]
 pub enum CommandAction {
     Input(Input),
     /// `None` reads the system clipboard. `Some(text)` carries text supplied
@@ -343,6 +362,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::Mouse(target) => apply_mouse(app, target),
         Action::Chat(a) => chat::apply(app, a),
         Action::ToggleRightPanel => chat::toggle_right_panel(app),
+        Action::LlmSettings(a) => llm_settings::apply(app, a),
     }
 }
 
@@ -618,13 +638,7 @@ fn dispatch_chat(app: &mut App, sub: ChatSubcommand) {
     match sub {
         ChatSubcommand::Toggle => apply(app, Action::ToggleRightPanel),
         ChatSubcommand::Clear => apply(app, Action::Chat(ChatAction::Clear)),
-        ChatSubcommand::Settings => {
-            // Phase 3 ships the settings overlay; for now surface a clear
-            // hint in the status bar so users know what's coming.
-            app.status = QueryStatus::Failed {
-                error: ":chat settings lands in phase 3".into(),
-            };
-        }
+        ChatSubcommand::Settings => llm_settings::open(app),
     }
 }
 
@@ -986,6 +1000,7 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
         WorkerEvent::CompletionCacheFailed { stage, error } => {
             on_cache_failed(app, stage, error.to_string())
         }
+        WorkerEvent::ChatDelta(delta) => chat::on_delta(app, delta),
     }
 }
 

@@ -6,6 +6,7 @@ pub mod conn_form_view;
 pub mod conn_list_view;
 pub mod editor_view;
 pub mod help_view;
+pub mod llm_settings_view;
 pub mod results_view;
 pub mod schema_view;
 pub mod theme;
@@ -29,6 +30,7 @@ use conn_form_view::ConnForm;
 use conn_list_view::ConnList;
 use editor_view::EditorPane;
 use help_view::HelpPopover;
+use llm_settings_view::LlmSettingsForm;
 use results_view::{ExpandedResult, InlineResult};
 use schema_view::SchemaPane;
 
@@ -49,6 +51,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         render_help(app, frame, area, bottom_area);
         return;
     }
+    if matches!(&app.overlay, Some(Overlay::LlmSettings(_))) {
+        render_llm_settings(app, frame, area, bottom_area);
+        return;
+    }
 
     match &app.screen {
         Screen::Auth(_) | Screen::EditConnection(_) | Screen::ConnectionList(_) => {
@@ -56,6 +62,21 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         }
         Screen::ResultExpanded { .. } => render_expanded(app, frame, main, bottom_area),
         _ => render_workspace(app, frame, main, bottom_area),
+    }
+}
+
+fn render_llm_settings(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {
+    if let Some(area) = llm_settings_view::inner_box(full) {
+        app.layout.overlay = Some(OverlayLayout::LlmSettings { area });
+    }
+    let app: &App = app;
+    frame.render_widget(BottomBar::new(app), bottom_area);
+    if let Some(Overlay::LlmSettings(state)) = &app.overlay {
+        let form = LlmSettingsForm {
+            state,
+            theme: &app.theme,
+        };
+        frame.render_widget(form, full);
     }
 }
 

@@ -7,7 +7,8 @@ use ratatui_textarea::Input;
 
 use crate::action::{
     Action, AuthAction, ChatAction, CommandAction, CompletionAction, ConnFormAction,
-    ConnListAction, HelpAxis, HelpScrollDelta, MouseTarget, ResultNavAction, SchemaAction,
+    ConnListAction, HelpAxis, HelpScrollDelta, LlmSettingsAction, MouseTarget, ResultNavAction,
+    SchemaAction,
 };
 use crate::app::App;
 use crate::command::FormatScope;
@@ -70,6 +71,7 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
             // Keys are inert until the worker responds.
             Overlay::Connecting { .. } => None,
             Overlay::Help { .. } => translate_help_key(key),
+            Overlay::LlmSettings(_) => translate_llm_settings_key(key),
         };
     }
     match &app.screen {
@@ -463,6 +465,36 @@ fn translate_gg_chord(app: &App, key: KeyEvent) -> Option<Action> {
         (Screen::ResultExpanded { .. }, _) => Some(Action::ResultNav(ResultNavAction::Top)),
         (Screen::Normal, Focus::Schema) => Some(Action::Schema(SchemaAction::Top)),
         _ => None,
+    }
+}
+
+fn translate_llm_settings_key(key: KeyEvent) -> Option<Action> {
+    if let Some(act) = clipboard_arm(
+        key,
+        LlmSettingsAction::Paste(None),
+        LlmSettingsAction::Copy,
+        LlmSettingsAction::Cut,
+    ) {
+        return Some(Action::LlmSettings(act));
+    }
+    let mods = key.modifiers;
+    let bare = mods.is_empty();
+    match (key.code, bare) {
+        (KeyCode::Esc, _) => Some(Action::LlmSettings(LlmSettingsAction::Cancel)),
+        (KeyCode::Enter, true) => Some(Action::LlmSettings(LlmSettingsAction::Submit)),
+        (KeyCode::Tab, _) => Some(Action::LlmSettings(LlmSettingsAction::CycleField)),
+        (KeyCode::BackTab, _) => Some(Action::LlmSettings(LlmSettingsAction::CycleFieldBack)),
+        // Backend cycling (only meaningful while focus is on Backend, but
+        // we let the action layer ignore the rest).
+        (KeyCode::Left, true) | (KeyCode::Char('['), true) => {
+            Some(Action::LlmSettings(LlmSettingsAction::CycleBackend(-1)))
+        }
+        (KeyCode::Right, true) | (KeyCode::Char(']'), true) => {
+            Some(Action::LlmSettings(LlmSettingsAction::CycleBackend(1)))
+        }
+        _ => Some(Action::LlmSettings(LlmSettingsAction::Input(Input::from(
+            key,
+        )))),
     }
 }
 
