@@ -222,7 +222,7 @@ impl Datasource for PostgresDatasource {
             })?;
         self.in_flight_pid.store(pid, Ordering::SeqCst);
 
-        if super::is_row_returning(statement) {
+        if super::is_row_returning(statement, &sqlparser::dialect::PostgreSqlDialect {}) {
             let result = sqlx::query(statement).fetch_all(&mut *conn).await;
             // Clear the pid before checking the result so a subsequent cancel
             // doesn't try to kill a backend that's already free. On abort,

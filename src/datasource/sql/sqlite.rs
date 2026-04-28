@@ -157,7 +157,7 @@ impl Datasource for SqliteDatasource {
             format!("execute: {}", super::one_line_sql(statement)),
         );
         let started = Instant::now();
-        if super::is_row_returning(statement) {
+        if super::is_row_returning(statement, &sqlparser::dialect::SQLiteDialect {}) {
             let rows = sqlx::query(statement)
                 .fetch_all(&self.pool)
                 .await
