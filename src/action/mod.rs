@@ -908,11 +908,12 @@ fn prepare_confirm_run(app: &mut App) {
     crate::state::editor::highlight_range(&mut app.editor.state, &range, style);
     app.overlay = Some(Overlay::ConfirmRun {
         statement: range.text,
+        reason: crate::state::overlay::ConfirmRunReason::Manual,
     });
 }
 
 fn confirm_run_submit(app: &mut App) {
-    let Some(Overlay::ConfirmRun { statement }) = app.overlay.take() else {
+    let Some(Overlay::ConfirmRun { statement, .. }) = app.overlay.take() else {
         return;
     };
     crate::state::editor::clear_confirm_highlight(&mut app.editor.state);
@@ -973,6 +974,23 @@ fn dispatch_query(app: &mut App, sql: String) {
         };
         return;
     }
+    // Destructive-statement guardrail: bare UPDATE/DELETE without WHERE
+    // and any TRUNCATE bounce through a confirm overlay. Reuses the
+    // `<leader>r` confirm machinery — Enter dispatches the held SQL
+    // (which lands back here, but the overlay is gone by then so we
+    // don't loop). Skipped when the user already passed through a
+    // manual confirm (overlay is consumed before re-dispatch).
+    if app.overlay.is_none()
+        && let Some(dialect) = destructive_dialect(app)
+        && let Some(reason) =
+            crate::datasource::sql::requires_destructive_confirmation(&trimmed, dialect.as_ref())
+    {
+        app.overlay = Some(Overlay::ConfirmRun {
+            statement: trimmed,
+            reason: crate::state::overlay::ConfirmRunReason::Destructive(reason),
+        });
+        return;
+    }
     // The user explicitly ran a new query — un-hide the preview so we
     // can show whatever this run produces (or auto-hide it again from
     // `on_query_done` if the new statement is DML).
@@ -989,6 +1007,19 @@ fn dispatch_query(app: &mut App, sql: String) {
     let _ = app
         .cmd_tx
         .send(WorkerCommand::Execute { req, sql: trimmed });
+}
+
+/// Pick a sqlparser dialect to feed `requires_destructive_confirmation`.
+/// Falls back to `Generic` when no connection is active so the guardrail
+/// still fires for queries typed before connecting (rare but possible).
+fn destructive_dialect(app: &App) -> Option<Box<dyn sqlparser::dialect::Dialect>> {
+    use crate::datasource::DriverKind;
+    let kind = app.active_dialect.unwrap_or(DriverKind::Sqlite);
+    Some(match kind {
+        DriverKind::Postgres => Box::new(sqlparser::dialect::PostgreSqlDialect {}),
+        DriverKind::Mysql => Box::new(sqlparser::dialect::MySqlDialect {}),
+        DriverKind::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
+    })
 }
 
 fn expand_latest(app: &mut App) {
