@@ -110,6 +110,12 @@ fn render_workspace(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: R
             editor_area,
         );
     }
+    // Command overlay paints LAST so its popover sits on top of the
+    // editor — not vice-versa. Rendering it inside
+    // `render_immutable_panes` puts it before the editor pane, which
+    // overwrites the popover cells (the popover lives in the editor's
+    // vertical band, just above the bottom bar).
+    render_command_overlay(app, frame, bottom_area);
 }
 
 fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Rect) {
@@ -188,6 +194,9 @@ fn render_expanded(app: &mut App, frame: &mut Frame, main: Rect, bottom_area: Re
         *cstored = new_col_offset;
         *rstored = new_row_offset;
     }
+    // Same precedence as `render_workspace`: command overlay (input +
+    // popover) paints after the screen content so it sits on top.
+    render_command_overlay(app, frame, bottom_area);
 }
 
 /// Slide a 1-D viewport so it both stays inside `[0, total)` and contains
@@ -257,24 +266,27 @@ fn render_immutable_panes(
         );
     }
     frame.render_widget(BottomBar::new(app), bottom_area);
+}
 
-    // Command overlay's input value rides on top of the bottom bar.
-    if let Some(Overlay::Command(buf)) = &app.overlay {
-        let input_area = command_input_area(bottom_area);
-        frame.render_widget(&buf.input, input_area);
-        // Autocomplete popover floats above the command bar — only
-        // when the buffer has matches. Anchored bottom-right of
-        // `bottom_area` so it sits flush against the input.
-        if let Some(completion) = &buf.completion {
-            let popover_area = command_completion_popover_area(bottom_area, completion);
-            frame.render_widget(
-                command_completion_popover::CommandCompletionPopover {
-                    completion,
-                    theme: &app.theme,
-                },
-                popover_area,
-            );
-        }
+/// Paint the command-bar input textarea and its autocomplete popover
+/// when the `:` overlay is open. Called by the per-screen renderers
+/// *after* the screen's content is drawn so the popover sits on top
+/// of the editor / expanded result instead of being overdrawn by it.
+fn render_command_overlay(app: &App, frame: &mut Frame, bottom_area: Rect) {
+    let Some(Overlay::Command(buf)) = &app.overlay else {
+        return;
+    };
+    let input_area = command_input_area(bottom_area);
+    frame.render_widget(&buf.input, input_area);
+    if let Some(completion) = &buf.completion {
+        let popover_area = command_completion_popover_area(bottom_area, completion);
+        frame.render_widget(
+            command_completion_popover::CommandCompletionPopover {
+                completion,
+                theme: &app.theme,
+            },
+            popover_area,
+        );
     }
 }
 
