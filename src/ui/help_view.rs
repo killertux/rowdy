@@ -682,6 +682,10 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 keys: ":conn use <name>",
                 desc: "Switch active connection",
             },
+            HelpEntry {
+                keys: ":update",
+                desc: "Check GitHub for a new release (manual; bypasses 24h throttle)",
+            },
         ],
     },
 ];

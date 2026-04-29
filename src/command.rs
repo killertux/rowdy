@@ -43,6 +43,12 @@ pub enum Command {
     Source,
     Conn(ConnSubcommand),
     Chat(ChatSubcommand),
+    /// `:update` — manual check against the GitHub release API,
+    /// independent of the 24h startup throttle and any prior
+    /// dismissal. Newer release → standard "y/n" prompt; same
+    /// version → "v0.7.x is the latest" notice; network failure →
+    /// error in the bottom bar.
+    Update,
 }
 
 /// `:chat` subcommands. Bare `:chat` toggles the right panel between
@@ -116,6 +122,7 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
         "source" => Command::Source,
         "conn" | "conns" => Command::Conn(parse_conn(&args)?),
         "chat" => Command::Chat(parse_chat(&args)?),
+        "update" => Command::Update,
         _ => return Err(format!("unknown command: {cmd}")),
     };
     Ok(Some(parsed))
@@ -264,6 +271,13 @@ mod tests {
     fn close_and_hide_dismiss_result_preview() {
         assert_eq!(parse("close"), Ok(Some(Command::CloseResult)));
         assert_eq!(parse("hide"), Ok(Some(Command::CloseResult)));
+    }
+
+    #[test]
+    fn update_command_parses() {
+        assert_eq!(parse("update"), Ok(Some(Command::Update)));
+        // Args after `:update` are ignored — manual check takes none.
+        assert_eq!(parse("update extra"), Ok(Some(Command::Update)));
     }
 
     #[test]
