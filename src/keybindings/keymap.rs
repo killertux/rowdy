@@ -122,16 +122,17 @@ impl Keymap {
     }
 
     fn insert(&mut self, ctx: Context, chord: Chord, action: BindableAction) {
-        // Normalize on the way in so an explicit `<S-S>` lands at the
-        // same key as bare `S` — both should fire on a Shift+s press
-        // regardless of which terminal protocol generates the event.
+        // Normalize on the way in so an explicit `<S-S>`, `<S-s>`, and
+        // bare `S` all collapse to the same canonical key — they
+        // should all fire on a Shift+s press regardless of which
+        // terminal protocol generates the event.
         let chord = Chord(
             chord
                 .0
                 .into_iter()
-                .map(|kc| KeyChord {
-                    code: kc.code,
-                    mods: normalize_mods(kc.code, kc.mods),
+                .map(|kc| {
+                    let (code, mods) = normalize_chord(kc.code, kc.mods);
+                    KeyChord { code, mods }
                 })
                 .collect(),
         );
@@ -187,10 +188,8 @@ impl Keymap {
         code: KeyCode,
         mods: KeyModifiers,
     ) -> Option<BindableAction> {
-        let chord = Chord::single(KeyChord {
-            code,
-            mods: normalize_mods(code, mods),
-        });
+        let (code, mods) = normalize_chord(code, mods);
+        let chord = Chord::single(KeyChord { code, mods });
         self.lookup_chord(ctx, &chord)
     }
 
@@ -200,20 +199,30 @@ impl Keymap {
     }
 }
 
-/// Strip `SHIFT` for character keys. Crossterm reports Shift+S as
-/// `Char('S') + NONE` on classic ttys but `Char('S') + SHIFT` under
-/// the kitty / xterm-modifyOtherKeys / iTerm enhanced-keyboard
-/// protocols — the SHIFT bit is already encoded in the uppercase
-/// glyph (or the shifted symbol like `!`), so treating both shapes
-/// as equivalent is what users expect. Non-Char codes (Tab, Enter,
-/// arrows, F-keys) keep SHIFT verbatim because there it's
-/// information, not redundancy.
-fn normalize_mods(code: KeyCode, mods: KeyModifiers) -> KeyModifiers {
-    if matches!(code, KeyCode::Char(_)) {
-        mods - KeyModifiers::SHIFT
+/// Canonicalise a (code, mods) pair so the four shapes a terminal can
+/// produce for "Shift+s" all collapse to the same lookup key:
+///
+/// 1. `(Char('S'), NONE)`  — classic ttys
+/// 2. `(Char('S'), SHIFT)` — kitty / iTerm enhanced kbd
+/// 3. `(Char('s'), SHIFT)` — xterm `modifyOtherKeys=2`, some Alacritty
+///    configurations
+/// 4. (lowercase + NONE is `s`, not Shift+s — not part of this case)
+///
+/// We strip `SHIFT` for any character key (the bit is already encoded
+/// in the uppercase letter or the shifted symbol like `!`) AND, when
+/// the char is ASCII lowercase, uppercase it. Non-`Char` codes (Tab,
+/// Enter, arrows, F-keys) keep `SHIFT` verbatim because there it
+/// carries information, not redundancy.
+fn normalize_chord(code: KeyCode, mods: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    let KeyCode::Char(c) = code else {
+        return (code, mods);
+    };
+    let upper = if mods.contains(KeyModifiers::SHIFT) && c.is_ascii_lowercase() {
+        KeyCode::Char(c.to_ascii_uppercase())
     } else {
-        mods
-    }
+        code
+    };
+    (upper, mods - KeyModifiers::SHIFT)
 }
 
 // Single source of truth for default chords. `event::translate_*` for
@@ -312,20 +321,36 @@ mod tests {
         // SHIFT-bearing event so leader bindings like `<Space>S` /
         // `<Space>C` / `<Space>R` keep firing on these terminals.
         let m = Keymap::defaults();
-        for (ch, expected) in [
-            ('S', BindableAction::SetRightPanelSchema),
-            ('C', BindableAction::SetRightPanelChat),
-            ('R', BindableAction::RunStatementUnderCursor),
+        for (upper, lower, expected) in [
+            ('S', 's', BindableAction::SetRightPanelSchema),
+            ('C', 'c', BindableAction::SetRightPanelChat),
+            ('R', 'r', BindableAction::RunStatementUnderCursor),
         ] {
+            // Shape 1: classic — uppercase + NONE.
             assert_eq!(
-                m.lookup_key(Context::Leader, KeyCode::Char(ch), KeyModifiers::SHIFT),
+                m.lookup_key(Context::Leader, KeyCode::Char(upper), KeyModifiers::NONE),
                 Some(expected),
-                "Shift+{ch} (with SHIFT modifier set) must still resolve",
             );
-            // Sanity: the no-modifier shape (legacy terminals) still works.
+            // Shape 2: kitty/iTerm enhanced — uppercase + SHIFT.
             assert_eq!(
-                m.lookup_key(Context::Leader, KeyCode::Char(ch), KeyModifiers::NONE),
+                m.lookup_key(Context::Leader, KeyCode::Char(upper), KeyModifiers::SHIFT),
                 Some(expected),
+                "Shift+{upper} (uppercase + SHIFT) must resolve",
+            );
+            // Shape 3: xterm modifyOtherKeys / some Alacritty —
+            // lowercase + SHIFT. This was the case my prior fix
+            // missed; lookup must uppercase the char before matching.
+            assert_eq!(
+                m.lookup_key(Context::Leader, KeyCode::Char(lower), KeyModifiers::SHIFT),
+                Some(expected),
+                "Shift+{upper} (delivered as lowercase '{lower}' + SHIFT) must resolve",
+            );
+            // Plain lowercase keypress (no SHIFT) must NOT match the
+            // uppercase binding — it's a different chord.
+            assert_ne!(
+                m.lookup_key(Context::Leader, KeyCode::Char(lower), KeyModifiers::NONE),
+                Some(expected),
+                "lowercase {lower} (no SHIFT) must not resolve as Shift+{upper}",
             );
         }
     }
