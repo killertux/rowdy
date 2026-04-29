@@ -33,7 +33,7 @@ line to add to your shell rc.
 
 ### Build from source
 
-Requires Rust 2024 edition (≥ 1.85) and a terminal that supports truecolor
+Requires Rust 2024 edition (≥ 1.86) and a terminal that supports truecolor
 for accurate theme rendering.
 
 ```sh
@@ -118,6 +118,126 @@ doesn't exist. It holds:
   each saved connection. Append-only JSONL; one `ChatMessage` per line.
   System messages are filtered out on append so we don't persist tool
   prompts. Wiped by `:chat clear`.
+
+### User configuration: `~/.rowdy/`
+
+Rowdy also reads from `$HOME/.rowdy/` (Unix) or
+`%USERPROFILE%\.rowdy\` (Windows) for cross-project defaults. The
+directory is **never auto-created** — rowdy only reads from it.
+
+- `config.toml` — user-level defaults for `theme` and
+  `schema_width`. Both fields are optional; missing fields fall
+  through to the compiled defaults. Project-level
+  `./.rowdy/config.toml` overrides the user file per-field on
+  read, so per-project pins still win.
+- `keybindings.toml` — sparse override of the default keymap. Only
+  the chords you change need to be listed; everything else stays
+  on its default.
+
+Connections, the encrypted crypto block, LLM API keys, per-session
+editor buffers, chat logs, and the on-disk session log all stay
+**per-project** in `./.rowdy/`. They are not user-wide.
+
+Runtime mutators (`:theme dark`, `:width 48`) write to the
+**project** file, not the user file — the project file remains the
+deliberate-pin lever.
+
+#### `:source`
+
+`:source` re-reads `~/.rowdy/config.toml`, `./.rowdy/config.toml`
+(UI prefs only — theme + schema_width), `~/.rowdy/keybindings.toml`,
+and the `llm_providers` block of both files. The active connection,
+the encrypted crypto block, the worker pool, and any in-flight query
+are **not** touched. On a malformed `keybindings.toml` the previous
+keymap stays active — you don't lose your working overrides because
+of one typo.
+
+#### `keybindings.toml` worked example
+
+```toml
+# Sparse override — only the chords you change need to appear.
+# Defaults that aren't listed stay on their built-in chord.
+
+[leader]
+# `<Space>r` cancels the running query instead of prompting to run
+# the statement under the cursor.
+r = "cancel-query"
+
+[global_immediate]
+# `=` opens the autocomplete popover instead of formatting.
+"=" = "open-completion-popover"
+
+[schema]
+# `o` collapses-or-ascends instead of toggling.
+o = "schema-collapse-or-ascend"
+```
+
+Tables are keyed by **context** (`global_immediate`, `leader`,
+`schema`, `result`, `chat_normal`, `chat_insert`). Inside each table,
+keys are chord-notation strings and values are bindable action IDs.
+
+**Chord notation.** Bare characters (`r`, `:`, `0`, `$`), named
+keys (`<Esc>`, `<Enter>`, `<Tab>`, `<Up>`, `<Down>`, `<Left>`,
+`<Right>`, `<Home>`, `<End>`, `<PageUp>`, `<PageDown>`, `<Space>`,
+`<BackTab>`, `<Backspace>`), and modifier prefixes (`<C-x>`,
+`<S-r>`, `<C-S-r>`, `<C-Space>`). Two-step sequences are written
+adjacent (`gg`, `<Space>r`, `<C-w>l`).
+
+**Chord openers are NOT rebindable.** `<Space>` (leader chord),
+`Ctrl+W` (window chord), and `g`/`G` (GG navigation) trigger state
+transitions into the chord machine — they don't fire actions
+themselves and putting them in any context table is a parse error.
+Rebind chords *under* them (e.g. `<Space>r`) instead.
+
+**Bindable action IDs by context.**
+
+| Context           | Action ID                       | Description                                                |
+|-------------------|---------------------------------|------------------------------------------------------------|
+| `global_immediate`| `open-command`                  | Open command prompt                                        |
+| `global_immediate`| `format-buffer`                 | Format SQL under the cursor                                |
+| `global_immediate`| `grow-schema`                   | Grow schema panel width                                    |
+| `global_immediate`| `shrink-schema`                 | Shrink schema panel width                                  |
+| `global_immediate`| `open-completion-popover`       | Open autocomplete popover                                  |
+| `leader`          | `run-prompt-or-selection`       | Run selection (Visual) / prompt to run statement (Normal)  |
+| `leader`          | `run-statement-under-cursor`    | Run the statement under the cursor — no prompt             |
+| `leader`          | `cancel-query`                  | Cancel the in-flight query                                 |
+| `leader`          | `expand-latest-result`          | Expand the latest result to full view                      |
+| `leader`          | `toggle-theme`                  | Toggle Dark / Light theme                                  |
+| `leader`          | `set-right-panel-schema`        | Switch right panel to schema (and focus)                   |
+| `leader`          | `set-right-panel-chat`          | Switch right panel to chat (and focus)                     |
+| `schema`          | `schema-up` / `schema-down`     | Move selection                                             |
+| `schema`          | `schema-collapse-or-ascend`     | Collapse node or ascend                                    |
+| `schema`          | `schema-expand-or-descend`      | Expand node or descend                                     |
+| `schema`          | `schema-toggle`                 | Toggle expand / collapse                                   |
+| `schema`          | `schema-bottom`                 | Jump to bottom                                             |
+| `result`          | `result-{up,down,left,right}`   | Move cell cursor                                           |
+| `result`          | `result-line-start` / `-end`    | First / last column in row                                 |
+| `result`          | `result-bottom`                 | Last row                                                   |
+| `result`          | `result-yank`                   | Yank selected cell or selection                            |
+| `result`          | `result-column-{move-left,move-right,hide,reset}` | Column ops                              |
+| `chat_normal`     | `chat-enter-insert`             | Focus the composer                                         |
+| `chat_normal`     | `chat-{scroll-up,scroll-down}`  | Scroll log line by line                                    |
+| `chat_normal`     | `chat-{page-up,page-down}`      | Scroll log by a page                                       |
+| `chat_normal`     | `chat-{top,bottom}`             | Jump to top / bottom of log                                |
+| `chat_insert`     | `chat-{scroll-up,scroll-down,page-up,page-down}` | Log scroll while composer is focused      |
+
+Today only the **`global_immediate`**, **`leader`**, and **`schema`**
+tables are routed through the keymap inside `event::translate`. The
+`result`, `chat_normal`, and `chat_insert` tables are accepted by the
+parser and surfaced to the help popover but the corresponding
+keystrokes still flow through the hardcoded matches in `src/event.rs`,
+because their behaviour depends on per-mode sub-state (Visual vs
+Normal, composer focused vs scroll). Wiring these last three is
+tracked as Phase 2 follow-up.
+
+**Sparse overrides + new defaults.** Newly-added defaults reach
+existing users automatically. If you happened to bind the same chord
+to a different action, the new default is shadowed (your override
+wins).
+
+**`keybindings.toml` deletion** is a valid state — defaults go back
+into effect at the next launch / `:source`. Rowdy does not error
+when the file is missing.
 
 ## Connection strings
 
@@ -561,6 +681,7 @@ After pressing `:`.
 | `:export sql [table] [path]` | Emit `INSERT` statements. Table is inferred from the query for simple `SELECT * FROM t` / `SELECT cols FROM t` shapes; pass `<table>` explicitly for joins, aggregates, aliases, etc. `:export sql > path` writes to disk with inferred table |
 | `:format`, `:fmt`            | Format the SQL buffer (or active Visual selection) via `sqlformat`. Undo via edtui's `u` won't restore the pre-format text — yank first if you need a backup |
 | `:reload`                    | Drop and re-prime the autocomplete schema cache against the active connection (use after DDL outside the app) |
+| `:source`                    | Re-read user + project UI prefs, the user keybindings file, and LLM provider records. Connections, crypto, the worker pool, and any in-flight query are NOT touched |
 | `:conn`, `:conn list`        | Open the connection list                                        |
 | `:conn add <name>`           | Open the form to create `<name>`                                |
 | `:conn edit <name>`          | Open the form pre-filled with `<name>`'s URL (overwrite on save) |

@@ -36,6 +36,11 @@ pub enum Command {
     },
     Format(FormatScope),
     Reload,
+    /// Re-read user + project config UI prefs, the user keybindings
+    /// file, and the LLM provider records. Connections, crypto, the
+    /// in-flight worker query, and the active session are NOT
+    /// reloaded — those stay live across the call.
+    Source,
     Conn(ConnSubcommand),
     Chat(ChatSubcommand),
 }
@@ -108,6 +113,7 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
         "export" => parse_export(&args)?,
         "format" | "fmt" => parse_format(&args)?,
         "reload" => Command::Reload,
+        "source" => Command::Source,
         "conn" | "conns" => Command::Conn(parse_conn(&args)?),
         "chat" => Command::Chat(parse_chat(&args)?),
         _ => return Err(format!("unknown command: {cmd}")),

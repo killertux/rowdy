@@ -11,7 +11,6 @@ use crate::action::{
     ResultNavAction, SchemaAction,
 };
 use crate::app::App;
-use crate::command::FormatScope;
 use crate::export::ExportFormat;
 use crate::state::command::CommandBuffer;
 use crate::state::focus::{Focus, PendingChord};
@@ -309,7 +308,7 @@ fn translate_normal_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action
         return Some(Action::Completion(CompletionAction::Open));
     }
     if can_intercept_globally(app)
-        && let Some(action) = translate_global(key)
+        && let Some(action) = translate_global(app, key)
     {
         return Some(action);
     }
@@ -328,7 +327,7 @@ fn translate_normal_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action
     }
     match app.focus {
         Focus::Editor => Some(Action::EditorEvent(raw)),
-        Focus::Schema => translate_schema_key(key),
+        Focus::Schema => translate_schema_key(&app.keymap, key),
         Focus::Chat => translate_chat_normal_key(key),
         Focus::ChatComposer => translate_chat_composer_key(key),
     }
@@ -393,29 +392,32 @@ fn can_intercept_globally(app: &App) -> bool {
 
 // NOTE: any new global binding MUST also be listed in the `:help` popover.
 // See `HELP_SECTIONS` in `src/ui/help_view.rs`.
-fn translate_global(key: KeyEvent) -> Option<Action> {
+fn translate_global(app: &App, key: KeyEvent) -> Option<Action> {
+    // Chord-arming keys are NOT user-rebindable: their job is to drop
+    // the input pipeline into a `PendingChord` state machine, not
+    // to fire an action. They stay hardcoded here so a misbehaving
+    // user keybinding cannot disable the leader/window/help system.
     let ctrl_w = key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL);
     if ctrl_w {
         return Some(Action::SetPendingChord(PendingChord::Window));
     }
-    if key.code == KeyCode::Char(':') && key.modifiers.is_empty() {
-        return Some(Action::OpenCommand);
-    }
     if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
         return Some(Action::SetPendingChord(PendingChord::Leader));
     }
-    if key.code == KeyCode::Char('=') && key.modifiers.is_empty() {
-        return Some(Action::FormatEditor(FormatScope::Cursor));
-    }
-    // Panel resize is global so the user doesn't have to chase focus
-    // into the schema pane (or remember the Ctrl+W chord) just to widen
-    // the right column. Bare `<` grows, `>` shrinks; the Ctrl+W variants
-    // remain in `translate_window_chord` for muscle memory.
-    if key.code == KeyCode::Char('<') && key.modifiers.is_empty() {
-        return Some(Action::ResizeSchema(2));
-    }
-    if key.code == KeyCode::Char('>') && key.modifiers.is_empty() {
-        return Some(Action::ResizeSchema(-2));
+
+    // GlobalImmediate keymap consultation. Defaults match the
+    // hardcoded behaviour we replaced (`:`, `=`, `<`, `>`,
+    // `Ctrl+Space`); user overrides land here too.
+    if let Some(action) = app
+        .keymap
+        .lookup_key(
+            crate::keybindings::keymap::Context::GlobalImmediate,
+            key.code,
+            key.modifiers,
+        )
+        .map(|a| a.into_action(app))
+    {
+        return Some(action);
     }
     None
 }
@@ -423,22 +425,13 @@ fn translate_global(key: KeyEvent) -> Option<Action> {
 // NOTE: any new leader-chord binding MUST also be listed in the `:help`
 // popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
 fn translate_leader_chord(app: &App, key: KeyEvent) -> Option<Action> {
-    match key.code {
-        KeyCode::Char('r') => Some(if app.editor.editor_mode() == EditorMode::Visual {
-            Action::RunSelection
-        } else {
-            Action::PrepareConfirmRun
-        }),
-        KeyCode::Char('R') => Some(Action::RunStatementUnderCursor),
-        KeyCode::Char('c') => Some(Action::CancelQuery),
-        KeyCode::Char('e') => Some(Action::ExpandLatestResult),
-        KeyCode::Char('t') => Some(Action::ToggleTheme),
-        // Right-panel switchers. Uppercase to leave room for future
-        // lowercase bindings; mnemonic: Schema / Chat.
-        KeyCode::Char('S') => Some(Action::SetRightPanel(RightPanelMode::Schema)),
-        KeyCode::Char('C') => Some(Action::SetRightPanel(RightPanelMode::Chat)),
-        _ => None,
-    }
+    app.keymap
+        .lookup_key(
+            crate::keybindings::keymap::Context::Leader,
+            key.code,
+            key.modifiers,
+        )
+        .map(|a| a.into_action(app))
 }
 
 // NOTE: any new expanded-result binding MUST also be listed in the `:help`
@@ -531,24 +524,51 @@ fn translate_window_chord(right: RightPanelMode, key: KeyEvent) -> Option<Action
 }
 
 // NOTE: any new schema-panel binding MUST also be listed in the `:help`
-// popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
-fn translate_schema_key(key: KeyEvent) -> Option<Action> {
-    let action = match (key.code, key.modifiers) {
-        (KeyCode::Char('j'), m) if m.is_empty() => SchemaAction::Down,
-        (KeyCode::Char('k'), m) if m.is_empty() => SchemaAction::Up,
-        (KeyCode::Char('h'), m) if m.is_empty() => SchemaAction::CollapseOrAscend,
-        (KeyCode::Char('l'), m) if m.is_empty() => SchemaAction::ExpandOrDescend,
-        (KeyCode::Enter, _) | (KeyCode::Char('o'), _) => SchemaAction::Toggle,
-        (KeyCode::Char('G'), _) => SchemaAction::Bottom,
-        (KeyCode::Char('g'), m) if m.is_empty() => {
-            return Some(Action::SetPendingChord(PendingChord::GG));
+// popover, which renders from the active keymap.
+fn translate_schema_key(
+    keymap: &crate::keybindings::keymap::Keymap,
+    key: KeyEvent,
+) -> Option<Action> {
+    use crate::keybindings::actions::BindableAction;
+    use crate::keybindings::keymap::Context;
+
+    // Hardcoded: `g` arms the GG chord; `Esc` returns focus to the
+    // editor. Both are non-rebindable — `g` is a chord opener and
+    // `Esc` is a focus-state primitive.
+    if key.code == KeyCode::Char('g') && key.modifiers.is_empty() {
+        return Some(Action::SetPendingChord(PendingChord::GG));
+    }
+    if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+        return Some(Action::FocusPanel(Focus::Editor));
+    }
+
+    let action = keymap.lookup_key(Context::Schema, key.code, key.modifiers)?;
+    let schema = match action {
+        BindableAction::SchemaUp => SchemaAction::Up,
+        BindableAction::SchemaDown => SchemaAction::Down,
+        BindableAction::SchemaCollapseOrAscend => SchemaAction::CollapseOrAscend,
+        BindableAction::SchemaExpandOrDescend => SchemaAction::ExpandOrDescend,
+        BindableAction::SchemaToggle => SchemaAction::Toggle,
+        BindableAction::SchemaBottom => SchemaAction::Bottom,
+        // Some other action ID was bound to a Schema chord — defer to
+        // the generic resolver, which will refuse non-Schema actions
+        // gracefully (returns the wrapped Action regardless of focus).
+        // This lets users put non-schema binds under `[schema]` if
+        // they really want, e.g. `:` to open the command prompt while
+        // the schema panel has focus.
+        other => {
+            // Fall back: route through Action returned by the
+            // canonical leader-mode-style mapping. We don't have an
+            // `&App` here, but only the editor-mode-dependent
+            // RunPromptOrSelection variant cares — schema rebindings
+            // to that one will degrade to PrepareConfirmRun (the
+            // Normal-mode fall-through), which is the correct
+            // behaviour because the editor is not in Visual mode
+            // when the schema panel has focus.
+            return Some(other.into_action_no_visual());
         }
-        // Esc returns focus to the editor without flipping the right
-        // panel back to chat — same gesture as `Ctrl+W h`, just shorter.
-        (KeyCode::Esc, m) if m.is_empty() => return Some(Action::FocusPanel(Focus::Editor)),
-        _ => return None,
     };
-    Some(Action::Schema(action))
+    Some(Action::Schema(schema))
 }
 
 fn translate_gg_chord(app: &App, key: KeyEvent) -> Option<Action> {
@@ -1339,39 +1359,75 @@ mod tests {
 
     #[test]
     fn global_keys_recognised() {
-        assert!(matches!(
-            translate_global(ctrl(KeyCode::Char('w'))),
-            Some(Action::SetPendingChord(PendingChord::Window))
-        ));
-        assert!(matches!(
-            translate_global(key(KeyCode::Char(':'))),
-            Some(Action::OpenCommand)
-        ));
-        assert!(matches!(
-            translate_global(key(KeyCode::Char(' '))),
-            Some(Action::SetPendingChord(PendingChord::Leader))
-        ));
-        assert!(matches!(
-            translate_global(key(KeyCode::Char('='))),
-            Some(Action::FormatEditor(FormatScope::Cursor))
-        ));
-        // Bare `<` / `>` resize the schema panel from any global-
-        // intercept context (Editor Normal/Visual, Schema, Chat normal).
-        assert!(matches!(
-            translate_global(key(KeyCode::Char('<'))),
-            Some(Action::ResizeSchema(2))
-        ));
-        assert!(matches!(
-            translate_global(key(KeyCode::Char('>'))),
-            Some(Action::ResizeSchema(-2))
-        ));
-        assert!(translate_global(key(KeyCode::Char('a'))).is_none());
+        // `Ctrl+W` and `<Space>` stay hardcoded as chord-arming keys
+        // and are NOT consulted through the keymap. The remaining
+        // GlobalImmediate keys (`:`, `=`, `<`, `>`) are checked against
+        // `Keymap::defaults()` directly so this test does not need a
+        // full `App` fixture; the prelude in `translate_global` is a
+        // straight `lookup_key → into_action` shape and is covered by
+        // the `keymap` module's own tests.
+        use crate::keybindings::actions::BindableAction;
+        use crate::keybindings::keymap::{Context, Keymap};
+        let m = Keymap::defaults();
+        assert_eq!(
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char(':'),
+                KeyModifiers::NONE
+            ),
+            Some(BindableAction::OpenCommand)
+        );
+        assert_eq!(
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char('='),
+                KeyModifiers::NONE
+            ),
+            Some(BindableAction::FormatBuffer)
+        );
+        assert_eq!(
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char('<'),
+                KeyModifiers::NONE
+            ),
+            Some(BindableAction::GrowSchema)
+        );
+        assert_eq!(
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char('>'),
+                KeyModifiers::NONE
+            ),
+            Some(BindableAction::ShrinkSchema)
+        );
+        assert_eq!(
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char('a'),
+                KeyModifiers::NONE
+            ),
+            None
+        );
+        // Chord-arming keys are absent from any keymap context — only
+        // the hardcoded `translate_global` branch handles them.
+        assert_eq!(
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char(' '),
+                KeyModifiers::NONE
+            ),
+            None
+        );
+        let _ = ctrl;
+        let _ = key;
     }
 
     #[test]
     fn schema_keys() {
+        let m = crate::keybindings::keymap::Keymap::defaults();
         let case = |k, want| {
-            let actual = translate_schema_key(key(k));
+            let actual = translate_schema_key(&m, key(k));
             assert!(
                 matches!(actual, Some(Action::Schema(ref a)) if std::mem::discriminant(a) == std::mem::discriminant(&want)),
                 "{k:?}"
@@ -1386,14 +1442,14 @@ mod tests {
         case(KeyCode::Char('G'), SchemaAction::Bottom);
         // `g` is a chord trigger, not a Schema action.
         assert!(matches!(
-            translate_schema_key(key(KeyCode::Char('g'))),
+            translate_schema_key(&m, key(KeyCode::Char('g'))),
             Some(Action::SetPendingChord(PendingChord::GG))
         ));
         // `<` / `>` no longer live here — they're global (see
         // `global_keys_recognised`).
-        assert!(translate_schema_key(key(KeyCode::Char('<'))).is_none());
-        assert!(translate_schema_key(key(KeyCode::Char('>'))).is_none());
-        assert!(translate_schema_key(key(KeyCode::Char('z'))).is_none());
+        assert!(translate_schema_key(&m, key(KeyCode::Char('<'))).is_none());
+        assert!(translate_schema_key(&m, key(KeyCode::Char('>'))).is_none());
+        assert!(translate_schema_key(&m, key(KeyCode::Char('z'))).is_none());
     }
 
     // ----- translate_completion_popover_key ----------------------------
@@ -1640,8 +1696,9 @@ mod tests {
 
     #[test]
     fn schema_esc_focuses_editor() {
+        let m = crate::keybindings::keymap::Keymap::defaults();
         assert!(matches!(
-            translate_schema_key(key(KeyCode::Esc)),
+            translate_schema_key(&m, key(KeyCode::Esc)),
             Some(Action::FocusPanel(Focus::Editor))
         ));
     }

@@ -11,6 +11,7 @@ mod crypto;
 mod datasource;
 mod event;
 mod export;
+mod keybindings;
 mod llm;
 mod log;
 mod session;
@@ -20,6 +21,7 @@ mod state;
 mod subcommands;
 mod terminal;
 mod ui;
+mod user_config;
 mod worker;
 
 use anyhow::{Context, Result, anyhow};
@@ -101,6 +103,24 @@ async fn run_app() -> Result<i32> {
     let mut config = ConfigStore::load(&data_dir)
         .with_context(|| format!("loading config from {}", data_dir.display()))?;
 
+    // Layered user-level defaults at `$HOME/.rowdy/config.toml`. Project
+    // values override per-field on read; runtime mutators stay
+    // project-scoped.
+    let user_dir = user_config::user_data_dir();
+    let user_config = match &user_dir {
+        Some(dir) => user_config::UserConfigStore::load(dir)
+            .with_context(|| format!("loading user config from {}", dir.display()))?,
+        None => user_config::UserConfigStore::empty(std::path::Path::new(".")),
+    };
+
+    // Keybindings layer. Cold-start parse failures (malformed TOML or
+    // unknown action ID) are non-fatal: defaults stay active, and the
+    // App surfaces a one-shot error string for the bottom bar.
+    let (keymap, startup_error) = match user_dir.as_deref() {
+        Some(dir) => load_keymap(dir),
+        None => (Arc::new(keybindings::keymap::Keymap::defaults()), None),
+    };
+
     // Resolve as much of the auth/connection picture as we can before
     // reaching for the TUI. `Decision::*` tells us how to seed the App.
     let decision = decide_startup(&mut config, &args, &logger)?;
@@ -121,11 +141,20 @@ async fn run_app() -> Result<i32> {
         cmd_tx,
         evt_tx,
         config,
+        user_config,
+        keymap,
+        startup_error,
         logger.clone(),
         data_dir.clone(),
         schema_cache,
     );
     apply_decision(&mut app, decision);
+
+    // Surface a startup-time keybindings parse error in the bottom bar
+    // on the first frame. Defaults are already active in `app.keymap`.
+    if let Some(err) = app.startup_error.take() {
+        app.status = state::status::QueryStatus::Failed { error: err };
+    }
 
     let result = run(&mut tui.terminal, &mut app, evt_rx).await;
     Tui::restore()?;
@@ -262,6 +291,27 @@ fn apply_decision(app: &mut App, decision: Decision) {
 fn install_stores(app: &mut App, stores: ResolvedStores) {
     app.connection_store = Some(stores.conn);
     app.llm_keystore = Some(stores.llm);
+}
+
+/// Read `<dir>/keybindings.toml` and merge it into `Keymap::defaults()`.
+/// Any parse error (malformed TOML, unknown action, unparseable chord)
+/// is non-fatal: defaults remain active and the formatted error is
+/// returned for the bottom bar.
+fn load_keymap(dir: &Path) -> (Arc<keybindings::keymap::Keymap>, Option<String>) {
+    let mut keymap = keybindings::keymap::Keymap::defaults();
+    match keybindings::load(dir) {
+        Ok(file) => match keymap.merge_overrides(&file) {
+            Ok(()) => (Arc::new(keymap), None),
+            Err(err) => (
+                Arc::new(keybindings::keymap::Keymap::defaults()),
+                Some(format!("keybindings.toml: {err}")),
+            ),
+        },
+        Err(err) => (
+            Arc::new(keybindings::keymap::Keymap::defaults()),
+            Some(format!("keybindings.toml: {err}")),
+        ),
+    }
 }
 
 fn init_data_dir() -> std::io::Result<PathBuf> {

@@ -9,6 +9,7 @@ use crate::autocomplete::SchemaCache;
 use crate::config::ConfigStore;
 use crate::connections::ConnectionStore;
 use crate::datasource::DriverKind;
+use crate::keybindings::keymap::Keymap;
 use crate::llm::keystore::LlmKeyStore;
 use crate::llm::worker::PendingChatTool;
 use crate::log::Logger;
@@ -24,6 +25,7 @@ use crate::state::schema::SchemaPanel;
 use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
 use crate::ui::theme::Theme;
+use crate::user_config::UserConfigStore;
 use crate::worker::{RequestCounter, RequestId, WorkerCommand};
 
 pub const DEFAULT_SCHEMA_WIDTH: u16 = 32;
@@ -71,6 +73,15 @@ pub struct App {
     /// `:export sql` for source-table inference).
     pub in_flight_query: Option<InFlightQuery>,
     pub config: ConfigStore,
+    /// User-level defaults. Project `config` overrides per-field on
+    /// read; runtime mutators write to `config` only.
+    #[allow(dead_code)] // future `:set` writer; held for `:source` symmetry.
+    pub user_config: UserConfigStore,
+    /// `Arc` so `:source` can swap atomically.
+    pub keymap: Arc<Keymap>,
+    /// Set by the startup keybindings loader on parse failure.
+    /// Drained once by `main` into the bottom bar status.
+    pub startup_error: Option<String>,
     pub log: Logger,
     /// `Some` once the store is unlocked (or known plaintext). Until then
     /// connection management actions short-circuit.
@@ -125,17 +136,31 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cmd_tx: UnboundedSender<WorkerCommand>,
         evt_tx: UnboundedSender<WorkerEvent>,
         config: ConfigStore,
+        user_config: UserConfigStore,
+        keymap: Arc<Keymap>,
+        startup_error: Option<String>,
         log: Logger,
         data_dir: PathBuf,
         schema_cache: Arc<RwLock<SchemaCache>>,
     ) -> Self {
-        let initial = config.state();
-        let schema = SchemaPanel::new(initial.schema_width);
-        let theme = Theme::for_kind(initial.theme);
+        // Layered precedence: project pin > user pin > compiled
+        // default. See `user_config::effective_theme` /
+        // `effective_schema_width`.
+        let project = config.state();
+        let user = user_config.state();
+        let theme_kind = crate::user_config::effective_theme(project.theme, user.theme);
+        let width = crate::user_config::effective_schema_width(
+            project.schema_width,
+            user.schema_width,
+            DEFAULT_SCHEMA_WIDTH,
+        );
+        let schema = SchemaPanel::new(width);
+        let theme = Theme::for_kind(theme_kind);
         Self {
             editor: EditorPanel::new(),
             schema,
@@ -155,6 +180,9 @@ impl App {
             requests: RequestCounter::new(),
             in_flight_query: None,
             config,
+            user_config,
+            keymap,
+            startup_error,
             log,
             connection_store: None,
             llm_keystore: None,
