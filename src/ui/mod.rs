@@ -293,10 +293,16 @@ fn command_completion_popover_area(
     let width = widest.saturating_add(4).min(bottom.width.max(8) / 2 + 8);
     let height = (completion.hits.len() as u16 + 2).min(8); // border + cap rows
     let y = bottom.y.saturating_sub(height);
+    // Anchor the left border one column right of the bar's edge so the
+    // popover content lines up with the textarea's first column (the
+    // `:` prefix lives in column 0 — `command_input_area` skips it).
+    let prefix = COMMAND_PREFIX.chars().count() as u16;
+    let x = bottom.x.saturating_add(prefix);
+    let max_width = bottom.width.saturating_sub(prefix);
     Rect {
-        x: bottom.x,
+        x,
         y,
-        width: width.min(bottom.width),
+        width: width.min(max_width),
         height,
     }
 }
