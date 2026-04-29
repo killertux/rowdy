@@ -56,16 +56,6 @@ pub struct ResultCursor {
 }
 
 impl ResultCursor {
-    pub fn move_in(&mut self, drow: i32, dcol: i32, max_rows: usize, max_cols: usize) {
-        if max_rows == 0 || max_cols == 0 {
-            return;
-        }
-        let new_row = (self.row as i32 + drow).clamp(0, max_rows as i32 - 1);
-        let new_col = (self.col as i32 + dcol).clamp(0, max_cols as i32 - 1);
-        self.row = new_row as usize;
-        self.col = new_col as usize;
-    }
-
     pub fn jump_to(&mut self, row: usize, col: usize) {
         self.row = row;
         self.col = col;
