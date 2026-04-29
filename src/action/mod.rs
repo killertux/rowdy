@@ -1302,18 +1302,48 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
 }
 
 fn on_update_available(app: &mut App, current: String, latest: String) {
-    // Don't clobber an active overlay (e.g. the user is mid-`:` command
-    // when the network round-trip lands).
-    if app.overlay.is_some() {
-        app.log.info(
-            "update",
-            format!(
-                "deferring update prompt for {latest} — overlay {:?} is active",
-                app.overlay
-            ),
-        );
+    // Stash for later instead of opening the overlay immediately.
+    // Showing the prompt during startup (Auth screen, ConnectionList,
+    // Connecting overlay) would steal keyboard input from the password
+    // prompt or silently dismiss itself if the user types `n` in their
+    // password. `try_promote_pending_update` (called once per main-loop
+    // tick) does the deferred handoff once the user reaches Normal.
+    app.log.info(
+        "update",
+        format!("update {latest} pending; will prompt when user is idle"),
+    );
+    app.pending_update_prompt = Some((current, latest));
+}
+
+/// Move a queued update prompt from `App::pending_update_prompt` onto
+/// the live `Overlay` once the user is on `Screen::Normal` with no
+/// active overlay and is not actively typing. Idempotent and cheap —
+/// safe to call from the run loop on every iteration.
+pub fn try_promote_pending_update(app: &mut App) {
+    if app.pending_update_prompt.is_none() {
         return;
     }
+    if !matches!(app.screen, Screen::Normal) {
+        return;
+    }
+    if app.overlay.is_some() {
+        return;
+    }
+    // Don't capture keystrokes from a user actively typing.
+    if matches!(app.focus, Focus::ChatComposer) {
+        return;
+    }
+    if matches!(app.focus, Focus::Editor)
+        && !matches!(
+            app.editor.editor_mode(),
+            edtui::EditorMode::Normal | edtui::EditorMode::Visual
+        )
+    {
+        return;
+    }
+    let Some((current, latest)) = app.pending_update_prompt.take() else {
+        return;
+    };
     app.overlay = Some(Overlay::UpdateAvailable { current, latest });
 }
 
@@ -2409,6 +2439,66 @@ mod tests {
         let reordered = vec![2, 4, 0, 1, 3];
         apply_nav_step(&mut cursor, ResultNavAction::Up, 10, &reordered);
         assert_eq!((cursor.row, cursor.col), (2, 4));
+    }
+
+    #[test]
+    fn pending_update_prompt_is_deferred_during_startup_overlay() {
+        // Regression: the auto-update WorkerEvent landing while
+        // Overlay::Connecting is up used to be silently dropped, and
+        // landing while Screen::Auth was up used to steal keystrokes
+        // from the password prompt. Both cases must defer.
+        use crate::state::overlay::Overlay;
+        use crate::state::screen::Screen;
+        let dir = temp_dir("update-defer");
+        let (mut app, _cmd_rx, _evt_rx) = fixture_app(dir);
+
+        // Simulate startup: Connecting overlay is up.
+        app.overlay = Some(Overlay::Connecting {
+            name: "main".into(),
+        });
+        super::on_update_available(&mut app, "0.7.0".into(), "0.7.1".into());
+        assert!(
+            matches!(app.overlay, Some(Overlay::Connecting { .. })),
+            "Connecting overlay must not be replaced",
+        );
+        assert_eq!(
+            app.pending_update_prompt.as_ref(),
+            Some(&("0.7.0".to_string(), "0.7.1".to_string())),
+            "update event must be stashed, not dropped",
+        );
+
+        // Promotion is a no-op while the overlay is still active.
+        super::try_promote_pending_update(&mut app);
+        assert!(matches!(app.overlay, Some(Overlay::Connecting { .. })));
+        assert!(app.pending_update_prompt.is_some());
+
+        // Once the user reaches Normal with no overlay, promotion fires.
+        app.overlay = None;
+        app.screen = Screen::Normal;
+        super::try_promote_pending_update(&mut app);
+        assert!(
+            matches!(app.overlay, Some(Overlay::UpdateAvailable { .. })),
+            "expected promotion to UpdateAvailable, got {:?}",
+            app.overlay,
+        );
+        assert!(app.pending_update_prompt.is_none(), "pending must clear");
+    }
+
+    #[test]
+    fn pending_update_prompt_does_not_capture_password_screen() {
+        use crate::state::auth::AuthState;
+        use crate::state::screen::Screen;
+        let dir = temp_dir("update-auth");
+        let (mut app, _cmd_rx, _evt_rx) = fixture_app(dir);
+
+        app.screen = Screen::Auth(AuthState::new(crate::state::auth::AuthKind::FirstSetup));
+        super::on_update_available(&mut app, "0.7.0".into(), "0.7.1".into());
+        super::try_promote_pending_update(&mut app);
+
+        // Auth screen must keep its keyboard input — overlay must NOT
+        // be set to UpdateAvailable while screen != Normal.
+        assert!(app.overlay.is_none(), "auth screen must not be preempted");
+        assert!(app.pending_update_prompt.is_some(), "still pending");
     }
 
     #[test]

@@ -348,6 +348,12 @@ async fn run(
 ) -> Result<()> {
     let mut events = EventStream::new();
     while !app.should_quit {
+        // Hand any queued auto-update prompt to the overlay layer when
+        // the user is on Normal with no other overlay/insert. Done at
+        // the top of the loop so the prompt appears on the next frame
+        // after the modal screens (Auth / ConnectionList / Connecting)
+        // close, not blocking them.
+        action::try_promote_pending_update(app);
         terminal.draw(|f| ui::render(app, f))?;
         // Read the deadlines once per iteration so the sleeps are rebuilt
         // each loop with whatever the latest edit pushed them to.

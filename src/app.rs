@@ -133,6 +133,13 @@ pub struct App {
     /// `:close`). Reset by every `dispatch_query`. The expanded-view
     /// path bypasses this; we only gate the inline split.
     pub preview_hidden: bool,
+    /// Auto-update prompt waiting to be shown. Held here instead of
+    /// going straight onto `overlay` so we don't preempt the password
+    /// prompt, the connection picker, or the in-flight `Connecting`
+    /// overlay at startup. Promoted to `Overlay::UpdateAvailable` by
+    /// `update::try_promote_pending_prompt` once the user reaches a
+    /// quiescent `Screen::Normal`.
+    pub pending_update_prompt: Option<(String, String)>,
 }
 
 impl App {
@@ -197,6 +204,7 @@ impl App {
             layout: LayoutCache::default(),
             pending_chat_tools: Vec::new(),
             preview_hidden: false,
+            pending_update_prompt: None,
         }
     }
 }
