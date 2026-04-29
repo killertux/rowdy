@@ -44,6 +44,11 @@ pub enum Overlay {
     /// `:chat settings` modal — choose a provider, enter / update an
     /// API key. The state struct owns the `TextArea`s and focus.
     LlmSettings(LlmSettingsState),
+    /// "rowdy v0.6.2 → v0.7.0 — update? (y/n)" prompt fired by the
+    /// background `crate::update` check on startup. Dismissal records
+    /// the latest tag in user-config so we don't re-prompt for the
+    /// same version.
+    UpdateAvailable { current: String, latest: String },
 }
 
 /// Why the confirm-run overlay opened. Drives the headline at the top

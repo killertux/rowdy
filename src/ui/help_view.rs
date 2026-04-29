@@ -529,6 +529,23 @@ const HELP_SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
+        title: "Auto-update prompt",
+        entries: &[
+            HelpEntry {
+                keys: "y / Enter",
+                desc: "Download and install the new release in place",
+            },
+            HelpEntry {
+                keys: "n / Esc",
+                desc: "Dismiss; we won't re-prompt for this version",
+            },
+            HelpEntry {
+                keys: "(opt-out)",
+                desc: "Set check_for_updates = false in ~/.rowdy/config.toml",
+            },
+        ],
+    },
+    HelpSection {
         title: "Mouse",
         entries: &[
             HelpEntry {

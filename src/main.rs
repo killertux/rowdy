@@ -21,6 +21,7 @@ mod state;
 mod subcommands;
 mod terminal;
 mod ui;
+mod update;
 mod user_config;
 mod worker;
 
@@ -135,6 +136,21 @@ async fn run_app() -> Result<i32> {
         evt_tx.clone(),
         schema_cache.clone(),
     ));
+
+    // Lazy auto-update check. Fires after the worker is up so a slow
+    // GitHub round-trip never blocks the first frame. The task reads
+    // throttle/dismissal state from `~/.rowdy/config.toml` and either
+    // emits `WorkerEvent::UpdateAvailable` (prompting the user) or
+    // exits silently. Disabled if `check_for_updates = false` is
+    // pinned in user config.
+    if user_config.state().check_for_updates != Some(false) {
+        update::spawn_check(
+            evt_tx.clone(),
+            logger.clone(),
+            env!("CARGO_PKG_VERSION").to_string(),
+            user_dir.clone(),
+        );
+    }
 
     let mut tui = Tui::init()?;
     let mut app = App::new(

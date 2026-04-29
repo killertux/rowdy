@@ -31,6 +31,28 @@ Override via env:
 If the install dir isn't already on your `$PATH`, the script prints the
 line to add to your shell rc.
 
+### Auto-update
+
+When rowdy starts, it asynchronously checks GitHub for a newer release
+(at most once every 24 hours, with no impact on launch time). If a new
+version is available, the bottom bar prompts:
+
+```
+⬆ rowdy v0.6.2 → v0.7.0 available — y to update · n/Esc to dismiss
+```
+
+Pressing `y` re-runs the install script against the running binary's
+directory (so it overwrites the rowdy you're currently using). After a
+successful install, restart rowdy to pick up the new binary. Pressing
+`n` records the dismissed version in `~/.rowdy/config.toml` so we don't
+re-prompt for the same release on every launch.
+
+To disable the check entirely, add to `~/.rowdy/config.toml`:
+
+```toml
+check_for_updates = false
+```
+
 ### Build from source
 
 Requires Rust 2024 edition (≥ 1.86) and a terminal that supports truecolor

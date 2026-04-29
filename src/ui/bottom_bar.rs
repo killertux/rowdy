@@ -52,6 +52,10 @@ impl Widget for BottomBar<'_> {
                 // Settings modal owns its own footer.
                 return;
             }
+            Some(Overlay::UpdateAvailable { current, latest }) => {
+                render_update(current, latest, area, buf, &self.app.theme);
+                return;
+            }
             None => {}
         }
         match &self.app.screen {
@@ -135,6 +139,24 @@ fn render_confirm(
         Style::default().fg(theme.fg_dim).bg(theme.bg),
     ));
     Line::from(spans).render(area, buf);
+}
+
+fn render_update(current: &str, latest: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    let line = Line::from(vec![
+        Span::styled("⬆ ", Style::default().fg(theme.status_running).bg(theme.bg)),
+        Span::styled(
+            format!("rowdy {current} → {latest} available"),
+            Style::default()
+                .fg(theme.fg)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  y to update · n/Esc to dismiss",
+            Style::default().fg(theme.fg_dim).bg(theme.bg),
+        ),
+    ]);
+    line.render(area, buf);
 }
 
 fn paint_background(area: Rect, buf: &mut Buffer, theme: &Theme) {

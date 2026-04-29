@@ -126,6 +126,22 @@ pub enum WorkerEvent {
         args_json: String,
         reply: tokio::sync::oneshot::Sender<crate::llm::worker::ToolReply>,
     },
+    /// Background update check found a newer release. UI shows the
+    /// "y/n" prompt.
+    UpdateAvailable {
+        current: String,
+        latest: String,
+    },
+    /// Install script exited 0 — surface a notice telling the user to
+    /// restart rowdy.
+    UpdateInstalled {
+        tag: String,
+    },
+    /// Install script failed (non-zero exit). The string is the first
+    /// stderr line, suitable for the bottom-bar `Failed` status.
+    UpdateInstallFailed {
+        error: String,
+    },
 }
 
 /// Phase markers for cache prime / lazy loads. `Tables` carries the
