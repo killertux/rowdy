@@ -86,6 +86,7 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
             Overlay::Connecting { .. } => None,
             Overlay::Help { .. } => translate_help_key(key),
             Overlay::LlmSettings(state) => translate_llm_settings_key(state, key),
+            Overlay::UpdateAvailable { .. } => translate_update_key(key),
         };
     }
     match &app.screen {
@@ -239,6 +240,15 @@ fn translate_confirm_key(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Enter => Some(Action::ConfirmRunSubmit),
         KeyCode::Esc => Some(Action::ConfirmRunCancel),
+        _ => None,
+    }
+}
+
+/// Auto-update prompt: y/Y/Enter accept, n/N/Esc dismiss.
+fn translate_update_key(key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(Action::UpdateAccept),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::UpdateDismiss),
         _ => None,
     }
 }

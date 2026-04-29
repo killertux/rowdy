@@ -48,6 +48,20 @@ pub struct UserConfig {
     pub theme: Option<ThemeKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_width: Option<u16>,
+    /// Master switch for the startup auto-update check. `None` is
+    /// treated as enabled by `update::should_check`; flip to
+    /// `Some(false)` in `~/.rowdy/config.toml` to opt out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_for_updates: Option<bool>,
+    /// Unix seconds of the last successful release-API call. Drives
+    /// the 24h throttle so we don't hit GitHub on every launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update_check_at: Option<i64>,
+    /// Tag the user said "no" to most recently. We suppress the
+    /// prompt while the latest release equals this value so we don't
+    /// pester them; a *newer* release lifts the suppression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_dismissed_version: Option<String>,
 }
 
 /// Owns the on-disk user config. Vanilla runs never touch the
@@ -92,9 +106,25 @@ impl UserConfigStore {
         &self.state
     }
 
-    /// Lazy mkdir on first write. No runtime callers yet; reserved for
-    /// a future `:set` command that writes user-side prefs.
-    #[allow(dead_code)]
+    /// Persist the auto-update bookkeeping fields. `now_unix` is the
+    /// timestamp of the just-completed release-API call;
+    /// `dismissed_version` is set when the user said "no" to a prompt
+    /// (suppressing it on subsequent launches until a newer release
+    /// lands). Calls `flush()` so the result hits disk before the
+    /// next process starts.
+    pub fn record_check(
+        &mut self,
+        now_unix: i64,
+        dismissed_version: Option<String>,
+    ) -> io::Result<()> {
+        self.state.last_update_check_at = Some(now_unix);
+        if dismissed_version.is_some() {
+            self.state.last_dismissed_version = dismissed_version;
+        }
+        self.flush()
+    }
+
+    /// Lazy mkdir on first write.
     pub fn flush(&self) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
@@ -161,12 +191,48 @@ mod tests {
         let cfg = UserConfig {
             theme: Some(ThemeKind::Light),
             schema_width: Some(48),
+            check_for_updates: Some(false),
+            last_update_check_at: Some(1_730_000_000),
+            last_dismissed_version: Some("v0.7.0".into()),
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let parsed: UserConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed, cfg);
         // Default `Option::None` fields are skipped on serialise.
         assert!(!text.contains("None"));
+    }
+
+    #[test]
+    fn record_check_persists_timestamp_and_dismissal() {
+        let dir = tempdir();
+        let mut store = UserConfigStore::load(&dir).unwrap();
+        store
+            .record_check(1_730_000_000, Some("v0.7.0".into()))
+            .unwrap();
+
+        let reloaded = UserConfigStore::load(&dir).unwrap();
+        assert_eq!(reloaded.state().last_update_check_at, Some(1_730_000_000));
+        assert_eq!(
+            reloaded.state().last_dismissed_version.as_deref(),
+            Some("v0.7.0")
+        );
+    }
+
+    #[test]
+    fn record_check_without_dismissal_keeps_existing_dismissal() {
+        let dir = tempdir();
+        let mut store = UserConfigStore::load(&dir).unwrap();
+        store.record_check(1, Some("v0.6.9".into())).unwrap();
+        // Throttle-only update (no new dismissal) should preserve the
+        // earlier dismissed tag.
+        store.record_check(2, None).unwrap();
+
+        let reloaded = UserConfigStore::load(&dir).unwrap();
+        assert_eq!(reloaded.state().last_update_check_at, Some(2));
+        assert_eq!(
+            reloaded.state().last_dismissed_version.as_deref(),
+            Some("v0.6.9")
+        );
     }
 
     #[test]
@@ -213,7 +279,7 @@ mod tests {
         // A.1: user theme=light, project does not pin theme.
         let user = UserConfig {
             theme: Some(ThemeKind::Light),
-            schema_width: None,
+            ..Default::default()
         };
         let project_theme: Option<ThemeKind> = None;
         assert_eq!(effective_theme(project_theme, user.theme), ThemeKind::Light);
@@ -224,7 +290,7 @@ mod tests {
         // A.2: user dark + project light → project wins.
         let user = UserConfig {
             theme: Some(ThemeKind::Dark),
-            schema_width: None,
+            ..Default::default()
         };
         let project_theme = Some(ThemeKind::Light);
         assert_eq!(effective_theme(project_theme, user.theme), ThemeKind::Light);

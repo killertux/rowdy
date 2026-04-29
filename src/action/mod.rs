@@ -46,6 +46,12 @@ pub enum Action {
     PrepareConfirmRun,
     ConfirmRunSubmit,
     ConfirmRunCancel,
+    /// User pressed `y` on the auto-update prompt. Spawns the install
+    /// script against the running binary's directory.
+    UpdateAccept,
+    /// User pressed `n`/`Esc` on the auto-update prompt. Persists the
+    /// dismissed tag so we don't re-prompt for the same version.
+    UpdateDismiss,
     RunStatementUnderCursor,
     RunSelection,
     CancelQuery,
@@ -379,6 +385,8 @@ pub fn apply(app: &mut App, action: Action) {
         Action::PrepareConfirmRun => prepare_confirm_run(app),
         Action::ConfirmRunSubmit => confirm_run_submit(app),
         Action::ConfirmRunCancel => confirm_run_cancel(app),
+        Action::UpdateAccept => apply_update_accept(app),
+        Action::UpdateDismiss => apply_update_dismiss(app),
         Action::RunStatementUnderCursor => run_statement_under_cursor(app),
         Action::RunSelection => run_selection(app),
         Action::CancelQuery => cancel_query(app),
@@ -1285,6 +1293,94 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
             args_json,
             reply,
         } => chat::on_tool_request(app, call_id, name, args_json, reply),
+        WorkerEvent::UpdateAvailable { current, latest } => {
+            on_update_available(app, current, latest)
+        }
+        WorkerEvent::UpdateInstalled { tag } => on_update_installed(app, tag),
+        WorkerEvent::UpdateInstallFailed { error } => on_update_install_failed(app, error),
+    }
+}
+
+fn on_update_available(app: &mut App, current: String, latest: String) {
+    // Don't clobber an active overlay (e.g. the user is mid-`:` command
+    // when the network round-trip lands).
+    if app.overlay.is_some() {
+        app.log.info(
+            "update",
+            format!(
+                "deferring update prompt for {latest} — overlay {:?} is active",
+                app.overlay
+            ),
+        );
+        return;
+    }
+    app.overlay = Some(Overlay::UpdateAvailable { current, latest });
+}
+
+fn on_update_installed(app: &mut App, tag: String) {
+    app.log
+        .info("update", format!("install.sh succeeded for {tag}"));
+    app.status = QueryStatus::Notice {
+        msg: format!("✓ updated to {tag} — restart rowdy to use it"),
+    };
+}
+
+fn on_update_install_failed(app: &mut App, error: String) {
+    app.log
+        .warn("update", format!("install.sh failed: {error}"));
+    app.status = QueryStatus::Failed {
+        error: format!("update failed: {error}"),
+    };
+}
+
+fn apply_update_accept(app: &mut App) {
+    let Some(Overlay::UpdateAvailable { latest, .. }) = app.overlay.take() else {
+        return;
+    };
+    app.status = QueryStatus::Notice {
+        msg: format!("⬇ downloading {latest}…"),
+    };
+    let install_dir = match std::env::current_exe() {
+        Ok(exe) => exe.parent().map(std::path::Path::to_path_buf),
+        Err(err) => {
+            app.log.warn("update", format!("current_exe failed: {err}"));
+            None
+        }
+    };
+    let Some(install_dir) = install_dir else {
+        app.status = QueryStatus::Failed {
+            error: "update failed: cannot resolve install dir".into(),
+        };
+        return;
+    };
+    let evt_tx = app.evt_tx.clone();
+    let logger = app.log.clone();
+    let tag = latest.clone();
+    tokio::spawn(async move {
+        let event = match crate::update::run_installer(&tag, &install_dir).await {
+            Ok(()) => WorkerEvent::UpdateInstalled { tag },
+            Err(error) => {
+                logger.warn("update", format!("installer error: {error}"));
+                WorkerEvent::UpdateInstallFailed { error }
+            }
+        };
+        let _ = evt_tx.send(event);
+    });
+}
+
+fn apply_update_dismiss(app: &mut App) {
+    let Some(Overlay::UpdateAvailable { latest, .. }) = app.overlay.take() else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if let Err(err) = app.user_config.record_check(now, Some(latest.clone())) {
+        app.log
+            .warn("update", format!("persisting dismissal failed: {err}"));
+    } else {
+        app.log.info("update", format!("user dismissed {latest}"));
     }
 }
 

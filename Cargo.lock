@@ -2744,7 +2744,7 @@ dependencies = [
 
 [[package]]
 name = "rowdy"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2762,7 +2762,9 @@ dependencies = [
  "rand 0.10.1",
  "ratatui",
  "ratatui-textarea",
+ "reqwest",
  "rpassword",
+ "semver",
  "serde",
  "serde_json",
  "sqlformat",
