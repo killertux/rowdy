@@ -1370,29 +1370,53 @@ mod tests {
         use crate::keybindings::keymap::{Context, Keymap};
         let m = Keymap::defaults();
         assert_eq!(
-            m.lookup_key(Context::GlobalImmediate, KeyCode::Char(':'), KeyModifiers::NONE),
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char(':'),
+                KeyModifiers::NONE
+            ),
             Some(BindableAction::OpenCommand)
         );
         assert_eq!(
-            m.lookup_key(Context::GlobalImmediate, KeyCode::Char('='), KeyModifiers::NONE),
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char('='),
+                KeyModifiers::NONE
+            ),
             Some(BindableAction::FormatBuffer)
         );
         assert_eq!(
-            m.lookup_key(Context::GlobalImmediate, KeyCode::Char('<'), KeyModifiers::NONE),
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char('<'),
+                KeyModifiers::NONE
+            ),
             Some(BindableAction::GrowSchema)
         );
         assert_eq!(
-            m.lookup_key(Context::GlobalImmediate, KeyCode::Char('>'), KeyModifiers::NONE),
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char('>'),
+                KeyModifiers::NONE
+            ),
             Some(BindableAction::ShrinkSchema)
         );
         assert_eq!(
-            m.lookup_key(Context::GlobalImmediate, KeyCode::Char('a'), KeyModifiers::NONE),
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char('a'),
+                KeyModifiers::NONE
+            ),
             None
         );
         // Chord-arming keys are absent from any keymap context — only
         // the hardcoded `translate_global` branch handles them.
         assert_eq!(
-            m.lookup_key(Context::GlobalImmediate, KeyCode::Char(' '), KeyModifiers::NONE),
+            m.lookup_key(
+                Context::GlobalImmediate,
+                KeyCode::Char(' '),
+                KeyModifiers::NONE
+            ),
             None
         );
         let _ = ctrl;

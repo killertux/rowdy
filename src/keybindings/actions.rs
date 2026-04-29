@@ -217,7 +217,9 @@ impl BindableAction {
             Self::GrowSchema => "Grow schema panel width",
             Self::ShrinkSchema => "Shrink schema panel width",
             Self::OpenCompletionPopover => "Open SQL autocomplete popover",
-            Self::RunPromptOrSelection => "Run selection (Visual) / prompt to run statement (Normal)",
+            Self::RunPromptOrSelection => {
+                "Run selection (Visual) / prompt to run statement (Normal)"
+            }
             Self::RunStatementUnderCursor => "Run the statement under the cursor — no prompt",
             Self::CancelQuery => "Cancel the in-flight query",
             Self::ExpandLatestResult => "Expand the latest result to full view",
@@ -277,7 +279,9 @@ impl BindableAction {
             // Magnitudes mirror the existing literals.
             Self::GrowSchema => Action::ResizeSchema(2),
             Self::ShrinkSchema => Action::ResizeSchema(-2),
-            Self::OpenCompletionPopover => Action::Completion(crate::action::CompletionAction::Open),
+            Self::OpenCompletionPopover => {
+                Action::Completion(crate::action::CompletionAction::Open)
+            }
 
             Self::RunPromptOrSelection => {
                 if editor_in_visual {
@@ -317,9 +321,7 @@ impl BindableAction {
             Self::ResultLineEnd => Action::ResultNav(ResultNavAction::LineEnd),
             Self::ResultBottom => Action::ResultNav(ResultNavAction::Bottom),
 
-            Self::ChatEnterInsert => {
-                Action::FocusPanel(crate::state::focus::Focus::ChatComposer)
-            }
+            Self::ChatEnterInsert => Action::FocusPanel(crate::state::focus::Focus::ChatComposer),
             Self::ChatScrollUp => Action::Chat(ChatAction::ScrollUp(1)),
             Self::ChatScrollDown => Action::Chat(ChatAction::ScrollDown(1)),
             Self::ChatPageUp => Action::Chat(ChatAction::ScrollUp(8)),
@@ -338,7 +340,11 @@ mod tests {
     fn parse_and_as_str_round_trip_every_variant() {
         for &v in BindableAction::all() {
             let s = v.as_str();
-            assert_eq!(BindableAction::parse(s), Some(v), "round-trip failed for {s}");
+            assert_eq!(
+                BindableAction::parse(s),
+                Some(v),
+                "round-trip failed for {s}"
+            );
         }
     }
 

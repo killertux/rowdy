@@ -107,7 +107,8 @@ mod tests {
     fn round_trip_with_overrides() {
         let mut f = KeybindingsFile::default();
         f.leader.insert("r".into(), "cancel-query".into());
-        f.leader.insert("R".into(), "run-statement-under-cursor".into());
+        f.leader
+            .insert("R".into(), "run-statement-under-cursor".into());
         f.schema.insert("o".into(), "schema-toggle".into());
 
         let text = toml::to_string_pretty(&f).unwrap();

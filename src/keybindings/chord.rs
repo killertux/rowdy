@@ -150,7 +150,9 @@ fn parse_named(inner: &str) -> Result<KeyChord, ChordParseError> {
             // Reject other ASCII modifier-shapes; let the named-key
             // resolver handle the remainder.
             [_, b'-', ..] if rest.len() >= 3 && !rest.starts_with(char::is_alphabetic) => {
-                return Err(ChordParseError::UnknownModifier(rest.chars().next().unwrap()));
+                return Err(ChordParseError::UnknownModifier(
+                    rest.chars().next().unwrap(),
+                ));
             }
             _ => break,
         }

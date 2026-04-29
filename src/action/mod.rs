@@ -746,10 +746,8 @@ fn apply_source(app: &mut App) {
         None => (std::sync::Arc::new(Keymap::defaults()), None),
     };
 
-    let theme_kind = crate::user_config::effective_theme(
-        new_project.state().theme,
-        new_user.state().theme,
-    );
+    let theme_kind =
+        crate::user_config::effective_theme(new_project.state().theme, new_user.state().theme);
     let width = crate::user_config::effective_schema_width(
         new_project.state().schema_width,
         new_user.state().schema_width,
@@ -2239,10 +2237,7 @@ mod tests {
         assert_eq!(app.llm_keystore.is_some(), llm_was_some);
         assert_eq!(app.active_connection, active);
         // PendingChord reset (R.7).
-        assert_eq!(
-            app.pending,
-            crate::state::focus::PendingChord::None
-        );
+        assert_eq!(app.pending, crate::state::focus::PendingChord::None);
     }
 
     #[test]

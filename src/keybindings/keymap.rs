@@ -91,7 +91,11 @@ impl std::fmt::Display for MergeError {
             Self::Chord { context, raw, err } => {
                 write!(f, "[{}] invalid chord {raw:?}: {err}", context.as_key())
             }
-            Self::Action { context, chord, raw } => write!(
+            Self::Action {
+                context,
+                chord,
+                raw,
+            } => write!(
                 f,
                 "[{}] {chord:?}: unknown action {raw:?}",
                 context.as_key()
@@ -175,10 +179,7 @@ impl Keymap {
     }
 
     #[allow(dead_code)] // help-popover follow-up consumer (PRD US-011).
-    pub fn iter_context(
-        &self,
-        ctx: Context,
-    ) -> impl Iterator<Item = (&Chord, &BindableAction)> {
+    pub fn iter_context(&self, ctx: Context) -> impl Iterator<Item = (&Chord, &BindableAction)> {
         self.binds.get(&ctx).into_iter().flat_map(|t| t.iter())
     }
 }
@@ -236,16 +237,28 @@ const DEFAULTS: &[(Context, &str, BindableAction)] = &[
     (Context::ChatNormal, "k", BindableAction::ChatScrollUp),
     (Context::ChatNormal, "j", BindableAction::ChatScrollDown),
     (Context::ChatNormal, "<PageUp>", BindableAction::ChatPageUp),
-    (Context::ChatNormal, "<PageDown>", BindableAction::ChatPageDown),
+    (
+        Context::ChatNormal,
+        "<PageDown>",
+        BindableAction::ChatPageDown,
+    ),
     (Context::ChatNormal, "<Home>", BindableAction::ChatTop),
     (Context::ChatNormal, "<End>", BindableAction::ChatBottom),
     (Context::ChatNormal, "G", BindableAction::ChatBottom),
     // --- Chat insert (help-only; only the chat-specific actions, not
     // the composer's text input or Enter-submit) ---
     (Context::ChatInsert, "<C-Up>", BindableAction::ChatScrollUp),
-    (Context::ChatInsert, "<C-Down>", BindableAction::ChatScrollDown),
+    (
+        Context::ChatInsert,
+        "<C-Down>",
+        BindableAction::ChatScrollDown,
+    ),
     (Context::ChatInsert, "<PageUp>", BindableAction::ChatPageUp),
-    (Context::ChatInsert, "<PageDown>", BindableAction::ChatPageDown),
+    (
+        Context::ChatInsert,
+        "<PageDown>",
+        BindableAction::ChatPageDown,
+    ),
 ];
 
 #[cfg(test)]

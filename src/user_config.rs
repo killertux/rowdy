@@ -216,10 +216,7 @@ mod tests {
             schema_width: None,
         };
         let project_theme: Option<ThemeKind> = None;
-        assert_eq!(
-            effective_theme(project_theme, user.theme),
-            ThemeKind::Light
-        );
+        assert_eq!(effective_theme(project_theme, user.theme), ThemeKind::Light);
     }
 
     #[test]
@@ -230,10 +227,7 @@ mod tests {
             schema_width: None,
         };
         let project_theme = Some(ThemeKind::Light);
-        assert_eq!(
-            effective_theme(project_theme, user.theme),
-            ThemeKind::Light
-        );
+        assert_eq!(effective_theme(project_theme, user.theme), ThemeKind::Light);
     }
 
     #[test]
@@ -268,8 +262,7 @@ mod tests {
         project_store.set_theme(ThemeKind::Dark).unwrap();
 
         // Project file got `theme = "dark"`.
-        let project_text =
-            fs::read_to_string(project_dir.join(crate::config::FILE_NAME)).unwrap();
+        let project_text = fs::read_to_string(project_dir.join(crate::config::FILE_NAME)).unwrap();
         assert!(
             project_text.contains("theme = \"dark\""),
             "project config should record dark, got: {project_text}"

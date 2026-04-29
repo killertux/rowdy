@@ -108,9 +108,8 @@ async fn run_app() -> Result<i32> {
     // project-scoped.
     let user_dir = user_config::user_data_dir();
     let user_config = match &user_dir {
-        Some(dir) => user_config::UserConfigStore::load(dir).with_context(|| {
-            format!("loading user config from {}", dir.display())
-        })?,
+        Some(dir) => user_config::UserConfigStore::load(dir)
+            .with_context(|| format!("loading user config from {}", dir.display()))?,
         None => user_config::UserConfigStore::empty(std::path::Path::new(".")),
     };
 
