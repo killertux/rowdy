@@ -20,6 +20,21 @@ pub struct CommandCompletionPopover<'a> {
 
 impl Widget for CommandCompletionPopover<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        // Paint an opaque background across the whole popover rect
+        // first. `Block::style().bg(...)` ought to do this on its own
+        // but in practice ratatui leaves cells with no glyph alone, so
+        // unselected line tails and the row beyond the last hit would
+        // bleed the editor through. One explicit fill keeps it crisp.
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_bg(self.theme.bg);
+                    cell.set_fg(self.theme.fg);
+                    cell.set_symbol(" ");
+                }
+            }
+        }
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.border).bg(self.theme.bg))
@@ -29,6 +44,9 @@ impl Widget for CommandCompletionPopover<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
+        // Pad each hit to the inner width so the selection highlight
+        // covers the whole row instead of just the text glyphs.
+        let pad_to = inner.width as usize;
         let lines: Vec<Line<'_>> = self
             .completion
             .hits
@@ -43,9 +61,16 @@ impl Widget for CommandCompletionPopover<'_> {
                 } else {
                     Style::default().fg(self.theme.fg).bg(self.theme.bg)
                 };
-                Line::from(Span::styled(format!(" {cmd} "), style))
+                let mut text = format!(" {cmd}");
+                let cur = text.chars().count();
+                if cur < pad_to {
+                    text.extend(std::iter::repeat_n(' ', pad_to - cur));
+                }
+                Line::from(Span::styled(text, style))
             })
             .collect();
-        Paragraph::new(lines).render(inner, buf);
+        Paragraph::new(lines)
+            .style(Style::default().bg(self.theme.bg))
+            .render(inner, buf);
     }
 }
