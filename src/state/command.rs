@@ -18,6 +18,7 @@ pub struct CommandBuffer {
 const REGISTRY: &[&str] = &[
     "quit", "q", "help", "?", "width", "run", "r", "cancel", "expand", "e", "collapse", "c",
     "close", "hide", "theme", "export", "format", "fmt", "reload", "conn", "conns", "chat",
+    "update",
 ];
 
 /// Snapshot of the autocomplete popover state. Built fresh on every
@@ -138,6 +139,16 @@ mod tests {
         assert!(c.hits.contains(&"e"));
         assert!(c.hits.contains(&"expand"));
         assert!(c.hits.contains(&"export"));
+    }
+
+    #[test]
+    fn completion_includes_update() {
+        let c = CommandCompletion::for_input("up").expect("hits");
+        assert!(
+            c.hits.contains(&"update"),
+            ":update must be discoverable via the autocomplete popover; got {:?}",
+            c.hits
+        );
     }
 
     #[test]

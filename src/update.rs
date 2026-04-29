@@ -134,6 +134,48 @@ pub fn parse_version(tag: &str) -> Option<Version> {
     Version::parse(trimmed).ok()
 }
 
+/// User-initiated `:update` check. Bypasses the 24h throttle and the
+/// dismissal record (the user is asking now, so we always answer),
+/// and reports an explicit "already up to date" or failure event so
+/// the bottom bar can confirm something happened. The sibling
+/// `spawn_check` is the silent, auto-throttled startup variant.
+pub fn spawn_manual_check(
+    evt_tx: tokio::sync::mpsc::UnboundedSender<WorkerEvent>,
+    current_version: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let event = match resolve_manual_check(&current_version).await {
+            Ok(ManualOutcome::NewerAvailable(latest)) => WorkerEvent::UpdateAvailable {
+                current: current_version,
+                latest,
+            },
+            Ok(ManualOutcome::AlreadyLatest) => WorkerEvent::UpdateUpToDate {
+                current: current_version,
+            },
+            Err(error) => WorkerEvent::UpdateCheckFailed { error },
+        };
+        let _ = evt_tx.send(event);
+    })
+}
+
+enum ManualOutcome {
+    NewerAvailable(String),
+    AlreadyLatest,
+}
+
+async fn resolve_manual_check(current_version: &str) -> Result<ManualOutcome, String> {
+    let latest_tag = fetch_latest_tag().await.map_err(|e| e.to_string())?;
+    let current = parse_version(current_version)
+        .ok_or_else(|| format!("cannot parse compiled version {current_version:?}"))?;
+    let latest = parse_version(&latest_tag)
+        .ok_or_else(|| format!("server returned malformed tag {latest_tag:?}"))?;
+    if latest > current {
+        Ok(ManualOutcome::NewerAvailable(latest_tag))
+    } else {
+        Ok(ManualOutcome::AlreadyLatest)
+    }
+}
+
 /// Re-run the install script for a specific tag, dropping the new
 /// binary into `install_dir`. Returns `Err` with a user-presentable
 /// reason on non-zero exit (typically a permissions error if rowdy is

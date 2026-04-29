@@ -52,6 +52,11 @@ pub enum Action {
     /// User pressed `n`/`Esc` on the auto-update prompt. Persists the
     /// dismissed tag so we don't re-prompt for the same version.
     UpdateDismiss,
+    /// `:update` — explicit user-initiated check. Bypasses the 24h
+    /// throttle and the dismissal record so the user can re-trigger
+    /// a prompt they previously dismissed, and surfaces an "already
+    /// on the latest" notice when no new release is found.
+    CheckForUpdate,
     RunStatementUnderCursor,
     RunSelection,
     CancelQuery,
@@ -387,6 +392,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::ConfirmRunCancel => confirm_run_cancel(app),
         Action::UpdateAccept => apply_update_accept(app),
         Action::UpdateDismiss => apply_update_dismiss(app),
+        Action::CheckForUpdate => apply_check_for_update(app),
         Action::RunStatementUnderCursor => run_statement_under_cursor(app),
         Action::RunSelection => run_selection(app),
         Action::CancelQuery => cancel_query(app),
@@ -808,6 +814,7 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         C::Source => apply(app, Action::Source),
         C::Conn(sub) => dispatch_conn(app, sub),
         C::Chat(sub) => dispatch_chat(app, sub),
+        C::Update => apply(app, Action::CheckForUpdate),
     }
 }
 
@@ -1298,7 +1305,27 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
         }
         WorkerEvent::UpdateInstalled { tag } => on_update_installed(app, tag),
         WorkerEvent::UpdateInstallFailed { error } => on_update_install_failed(app, error),
+        WorkerEvent::UpdateUpToDate { current } => on_update_up_to_date(app, current),
+        WorkerEvent::UpdateCheckFailed { error } => on_update_check_failed(app, error),
     }
+}
+
+fn on_update_up_to_date(app: &mut App, current: String) {
+    app.log.info(
+        "update",
+        format!("manual check: rowdy v{current} is the latest"),
+    );
+    app.status = QueryStatus::Notice {
+        msg: format!("✓ rowdy v{current} is the latest"),
+    };
+}
+
+fn on_update_check_failed(app: &mut App, error: String) {
+    app.log
+        .warn("update", format!("manual check failed: {error}"));
+    app.status = QueryStatus::Failed {
+        error: format!("update check: {error}"),
+    };
 }
 
 fn on_update_available(app: &mut App, current: String, latest: String) {
@@ -1396,6 +1423,17 @@ fn apply_update_accept(app: &mut App) {
         };
         let _ = evt_tx.send(event);
     });
+}
+
+fn apply_check_for_update(app: &mut App) {
+    app.status = QueryStatus::Notice {
+        msg: "checking for updates…".into(),
+    };
+    // Drop any stale auto-check that hasn't been promoted yet — the
+    // manual check is authoritative and will re-stash if a newer
+    // release is still available.
+    app.pending_update_prompt = None;
+    crate::update::spawn_manual_check(app.evt_tx.clone(), env!("CARGO_PKG_VERSION").to_string());
 }
 
 fn apply_update_dismiss(app: &mut App) {

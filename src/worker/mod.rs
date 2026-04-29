@@ -142,6 +142,17 @@ pub enum WorkerEvent {
     UpdateInstallFailed {
         error: String,
     },
+    /// `:update` finished and we're already on the latest release —
+    /// surface a notice so the user knows the check happened.
+    UpdateUpToDate {
+        current: String,
+    },
+    /// `:update` failed to talk to GitHub (network, JSON, etc.).
+    /// Distinct from `UpdateInstallFailed` so the bottom-bar copy can
+    /// say "update check failed" vs "update failed".
+    UpdateCheckFailed {
+        error: String,
+    },
 }
 
 /// Phase markers for cache prime / lazy loads. `Tables` carries the
