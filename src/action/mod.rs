@@ -1245,8 +1245,16 @@ fn apply_nav_step(
                 cursor.jump_to(cursor.row, visible[visual + 1]);
             }
         }
-        ResultNavAction::Up => cursor.move_in(-1, 0, max_rows, 1),
-        ResultNavAction::Down => cursor.move_in(1, 0, max_rows, 1),
+        ResultNavAction::Up => {
+            if cursor.row > 0 {
+                cursor.row -= 1;
+            }
+        }
+        ResultNavAction::Down => {
+            if cursor.row + 1 < max_rows {
+                cursor.row += 1;
+            }
+        }
         ResultNavAction::LineStart => cursor.jump_to(cursor.row, visible[0]),
         ResultNavAction::LineEnd => cursor.jump_to(cursor.row, *visible.last().unwrap()),
         ResultNavAction::Top => cursor.jump_to(0, cursor.col),
@@ -2274,6 +2282,37 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn nav_up_down_preserves_column() {
+        // Regression: Up/Down used to call `move_in(±1, 0, max_rows, 1)`,
+        // which clamps `col` to `0..1` and snapped the cursor to col 0
+        // on every vertical move regardless of the visible permutation.
+        let mut cursor = ResultCursor { row: 5, col: 3 };
+        let visible = vec![0, 1, 2, 3, 4];
+
+        apply_nav_step(&mut cursor, ResultNavAction::Up, 10, &visible);
+        assert_eq!((cursor.row, cursor.col), (4, 3));
+
+        apply_nav_step(&mut cursor, ResultNavAction::Down, 10, &visible);
+        assert_eq!((cursor.row, cursor.col), (5, 3));
+
+        // At the top: Up is a no-op, col still preserved.
+        cursor = ResultCursor { row: 0, col: 2 };
+        apply_nav_step(&mut cursor, ResultNavAction::Up, 10, &visible);
+        assert_eq!((cursor.row, cursor.col), (0, 2));
+
+        // At the bottom: Down is a no-op, col still preserved.
+        cursor = ResultCursor { row: 9, col: 2 };
+        apply_nav_step(&mut cursor, ResultNavAction::Down, 10, &visible);
+        assert_eq!((cursor.row, cursor.col), (9, 2));
+
+        // Reordered visible permutation: physical col 4 stays put on Up.
+        cursor = ResultCursor { row: 3, col: 4 };
+        let reordered = vec![2, 4, 0, 1, 3];
+        apply_nav_step(&mut cursor, ResultNavAction::Up, 10, &reordered);
+        assert_eq!((cursor.row, cursor.col), (2, 4));
     }
 
     #[test]
