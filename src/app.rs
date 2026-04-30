@@ -160,14 +160,16 @@ impl App {
         // `effective_schema_width`.
         let project = config.state();
         let user = user_config.state();
-        let theme_kind = crate::user_config::effective_theme(project.theme, user.theme);
+        let theme_name =
+            crate::user_config::effective_theme(project.theme.as_deref(), user.theme.as_deref());
         let width = crate::user_config::effective_schema_width(
             project.schema_width,
             user.schema_width,
             DEFAULT_SCHEMA_WIDTH,
         );
         let schema = SchemaPanel::new(width);
-        let theme = Theme::for_kind(theme_kind);
+        let theme = Theme::by_name(&theme_name)
+            .unwrap_or_else(|| Theme::for_kind(crate::ui::theme::ThemeKind::Dark));
         Self {
             editor: EditorPanel::new(),
             schema,

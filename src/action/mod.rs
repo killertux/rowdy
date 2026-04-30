@@ -760,14 +760,17 @@ fn apply_source(app: &mut App) {
         None => (std::sync::Arc::new(Keymap::defaults()), None),
     };
 
-    let theme_kind =
-        crate::user_config::effective_theme(new_project.state().theme, new_user.state().theme);
+    let theme_name = crate::user_config::effective_theme(
+        new_project.state().theme.as_deref(),
+        new_user.state().theme.as_deref(),
+    );
     let width = crate::user_config::effective_schema_width(
         new_project.state().schema_width,
         new_user.state().schema_width,
         crate::app::DEFAULT_SCHEMA_WIDTH,
     );
-    app.theme = crate::ui::theme::Theme::for_kind(theme_kind);
+    app.theme = crate::ui::theme::Theme::by_name(&theme_name)
+        .unwrap_or_else(|| crate::ui::theme::Theme::for_kind(crate::ui::theme::ThemeKind::Dark));
     app.schema.width = width;
 
     app.config = new_project;
@@ -794,7 +797,7 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         C::Collapse => apply(app, Action::CollapseResult),
         C::CloseResult => apply(app, Action::DismissResult),
         C::Theme(ThemeChoice::Toggle) => apply(app, Action::ToggleTheme),
-        C::Theme(ThemeChoice::Set(kind)) => apply_theme(app, kind),
+        C::Theme(ThemeChoice::Set(name)) => apply_theme_named(app, &name),
         C::Export { fmt, target } => apply(
             app,
             Action::Export {
@@ -972,13 +975,28 @@ fn set_schema_width(app: &mut App, value: u16) {
     persist_schema_width(app);
 }
 
+/// `:theme toggle` — flip between the canonical `dark` and `light`
+/// theme files. Custom themes preserve their `kind`, so toggling from
+/// e.g. `gruberDarker` (kind = dark) lands on `light`.
 fn toggle_theme(app: &mut App) {
-    apply_theme(app, app.theme.kind.toggled());
+    let next = match app.theme.kind.toggled() {
+        ThemeKind::Dark => "dark",
+        ThemeKind::Light => "light",
+    };
+    apply_theme_named(app, next);
 }
 
-fn apply_theme(app: &mut App, kind: ThemeKind) {
-    app.theme = Theme::for_kind(kind);
-    if let Err(err) = app.config.set_theme(kind) {
+/// Resolve `:theme <name>` against the bundled registry. Unknown names
+/// surface as a status-bar error rather than aborting the command loop.
+fn apply_theme_named(app: &mut App, name: &str) {
+    let Some(theme) = Theme::by_name(name) else {
+        app.status = QueryStatus::Failed {
+            error: format!("unknown theme: {name}"),
+        };
+        return;
+    };
+    app.theme = theme;
+    if let Err(err) = app.config.set_theme(name) {
         app.log.warn("config", format!("save theme failed: {err}"));
     }
 }

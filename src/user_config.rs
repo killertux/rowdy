@@ -13,8 +13,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ui::theme::ThemeKind;
-
 pub const FILE_NAME: &str = "config.toml";
 pub const DIR_NAME: &str = ".rowdy";
 
@@ -25,10 +23,16 @@ pub fn user_data_dir() -> Option<PathBuf> {
     std::env::home_dir().map(|h| h.join(DIR_NAME))
 }
 
-/// Resolve effective theme using project-overrides-user precedence.
-/// Defaulted to `ThemeKind::Dark` when neither store pins a value.
-pub fn effective_theme(project: Option<ThemeKind>, user: Option<ThemeKind>) -> ThemeKind {
-    project.or(user).unwrap_or(ThemeKind::Dark)
+/// Default theme name used when neither store pins one. Matches a file
+/// in `themes/` (`themes/dark.toml`).
+pub const DEFAULT_THEME_NAME: &str = "dark";
+
+/// Resolve effective theme name using project-overrides-user precedence.
+/// Returns `DEFAULT_THEME_NAME` when neither store pins a value. The
+/// caller is responsible for resolving the name into a [`Theme`] via
+/// `Theme::by_name`, falling back to the default theme on miss.
+pub fn effective_theme(project: Option<&str>, user: Option<&str>) -> String {
+    project.or(user).unwrap_or(DEFAULT_THEME_NAME).to_string()
 }
 
 /// Same precedence for the schema panel width.
@@ -44,8 +48,11 @@ pub fn effective_schema_width(project: Option<u16>, user: Option<u16>, default: 
 /// did not pin them.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserConfig {
+    /// Theme file stem (e.g. `"dark"`, `"light"`, or any user-shipped
+    /// `themes/<name>.toml`). Unknown names fall back softly to the
+    /// compiled default at App seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub theme: Option<ThemeKind>,
+    pub theme: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_width: Option<u16>,
     /// Master switch for the startup auto-update check. `None` is
@@ -189,7 +196,7 @@ mod tests {
     #[test]
     fn round_trip_user_config_with_values() {
         let cfg = UserConfig {
-            theme: Some(ThemeKind::Light),
+            theme: Some("light".into()),
             schema_width: Some(48),
             check_for_updates: Some(false),
             last_update_check_at: Some(1_730_000_000),
@@ -248,22 +255,20 @@ mod tests {
     #[test]
     fn effective_theme_project_overrides_user() {
         // Both pinned ⇒ project wins.
-        assert_eq!(
-            effective_theme(Some(ThemeKind::Light), Some(ThemeKind::Dark)),
-            ThemeKind::Light
-        );
+        assert_eq!(effective_theme(Some("light"), Some("dark")), "light");
         // Only user pinned ⇒ user wins.
-        assert_eq!(
-            effective_theme(None, Some(ThemeKind::Light)),
-            ThemeKind::Light
-        );
+        assert_eq!(effective_theme(None, Some("light")), "light");
         // Only project pinned ⇒ project wins.
-        assert_eq!(
-            effective_theme(Some(ThemeKind::Light), None),
-            ThemeKind::Light
-        );
+        assert_eq!(effective_theme(Some("light"), None), "light");
         // Neither pinned ⇒ compiled default.
-        assert_eq!(effective_theme(None, None), ThemeKind::Dark);
+        assert_eq!(effective_theme(None, None), DEFAULT_THEME_NAME);
+    }
+
+    #[test]
+    fn effective_theme_passes_through_custom_name() {
+        // Any string flows through — resolution to a real theme happens
+        // at the call site, not here.
+        assert_eq!(effective_theme(Some("gruberDarker"), None), "gruberDarker");
     }
 
     #[test]
@@ -278,27 +283,33 @@ mod tests {
     fn layered_user_light_no_project_pin_yields_light() {
         // A.1: user theme=light, project does not pin theme.
         let user = UserConfig {
-            theme: Some(ThemeKind::Light),
+            theme: Some("light".into()),
             ..Default::default()
         };
-        let project_theme: Option<ThemeKind> = None;
-        assert_eq!(effective_theme(project_theme, user.theme), ThemeKind::Light);
+        let project_theme: Option<String> = None;
+        assert_eq!(
+            effective_theme(project_theme.as_deref(), user.theme.as_deref()),
+            "light"
+        );
     }
 
     #[test]
     fn layered_project_overrides_user_theme() {
         // A.2: user dark + project light → project wins.
         let user = UserConfig {
-            theme: Some(ThemeKind::Dark),
+            theme: Some("dark".into()),
             ..Default::default()
         };
-        let project_theme = Some(ThemeKind::Light);
-        assert_eq!(effective_theme(project_theme, user.theme), ThemeKind::Light);
+        let project_theme = Some("light".to_string());
+        assert_eq!(
+            effective_theme(project_theme.as_deref(), user.theme.as_deref()),
+            "light"
+        );
     }
 
     #[test]
     fn layered_neither_pinned_yields_default_and_no_dir_created() {
-        // A.3: neither file pins theme → default Dark; loader does
+        // A.3: neither file pins theme → compiled default; loader does
         // not auto-create the user dir.
         let parent = tempdir();
         let user_dir = parent.join(".rowdy-not-created");
@@ -306,8 +317,11 @@ mod tests {
         let user_store = UserConfigStore::load(&user_dir).unwrap();
         assert!(!user_dir.exists(), "load() must not create user dir");
         let user = user_store.state();
-        let project_theme: Option<ThemeKind> = None;
-        assert_eq!(effective_theme(project_theme, user.theme), ThemeKind::Dark);
+        let project_theme: Option<String> = None;
+        assert_eq!(
+            effective_theme(project_theme.as_deref(), user.theme.as_deref()),
+            DEFAULT_THEME_NAME
+        );
     }
 
     #[test]
@@ -325,7 +339,7 @@ mod tests {
 
         // Project store is empty; set theme via the runtime mutator.
         let mut project_store = ConfigStore::load(&project_dir).unwrap();
-        project_store.set_theme(ThemeKind::Dark).unwrap();
+        project_store.set_theme("dark").unwrap();
 
         // Project file got `theme = "dark"`.
         let project_text = fs::read_to_string(project_dir.join(crate::config::FILE_NAME)).unwrap();

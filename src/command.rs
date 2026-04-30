@@ -7,7 +7,6 @@
 //! text here lets us unit-test it.
 
 use crate::export::ExportFormat;
-use crate::ui::theme::ThemeKind;
 
 /// One parsed `:` command. Variants mirror the user-visible vocabulary,
 /// not the underlying `Action` enum — many commands feed into existing
@@ -73,10 +72,14 @@ pub enum FormatScope {
     All,
 }
 
+/// `:theme` outcome. `Set` carries the theme file's stem (e.g. `"dark"`,
+/// `"light"`, or any custom `themes/*.toml` name). The dispatcher
+/// validates the name against the bundled registry; the parser stays
+/// permissive so adding a new theme file is enough.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThemeChoice {
     Toggle,
-    Set(ThemeKind),
+    Set(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,9 +155,7 @@ fn parse_width(args: &[&str]) -> Result<Command, String> {
 fn parse_theme(args: &[&str]) -> Result<Command, String> {
     let choice = match args.first().copied() {
         None | Some("toggle") => ThemeChoice::Toggle,
-        Some(name) => ThemeKind::parse(name)
-            .map(ThemeChoice::Set)
-            .ok_or_else(|| format!("unknown theme: {name} (use dark|light|toggle)"))?,
+        Some(name) => ThemeChoice::Set(name.to_string()),
     };
     Ok(Command::Theme(choice))
 }
@@ -300,13 +301,18 @@ mod tests {
         );
         assert_eq!(
             parse("theme dark"),
-            Ok(Some(Command::Theme(ThemeChoice::Set(ThemeKind::Dark))))
+            Ok(Some(Command::Theme(ThemeChoice::Set("dark".into()))))
         );
         assert_eq!(
             parse("theme light"),
-            Ok(Some(Command::Theme(ThemeChoice::Set(ThemeKind::Light))))
+            Ok(Some(Command::Theme(ThemeChoice::Set("light".into()))))
         );
-        assert!(parse("theme neon").is_err());
+        // Unknown names parse successfully — the dispatcher emits the
+        // "unknown theme" status message after consulting the registry.
+        assert_eq!(
+            parse("theme neon"),
+            Ok(Some(Command::Theme(ThemeChoice::Set("neon".into()))))
+        );
     }
 
     #[test]
