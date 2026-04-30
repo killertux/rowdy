@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::llm::LlmBackendKind;
-use crate::ui::theme::ThemeKind;
 
 pub const FILE_NAME: &str = "config.toml";
 
@@ -16,10 +15,14 @@ pub const FILE_NAME: &str = "config.toml";
 /// `ciphertext` (encrypted store) — never both.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
-    /// `None` when the field is not pinned by the project config —
-    /// defaults to user config (then compiled default) at App seed.
+    /// Theme file stem (e.g. `"dark"`, `"light"`, or any user-shipped
+    /// `themes/<name>.toml`). `None` falls back to the user config and
+    /// then the compiled default at App seed. Unknown names are
+    /// resolved softly to the default theme — the config file itself
+    /// stays valid TOML so users can experiment without breaking
+    /// startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub theme: Option<ThemeKind>,
+    pub theme: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_width: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,11 +173,11 @@ impl ConfigStore {
         self.state.crypto.is_some()
     }
 
-    pub fn set_theme(&mut self, theme: ThemeKind) -> io::Result<()> {
-        if self.state.theme == Some(theme) {
+    pub fn set_theme(&mut self, theme: &str) -> io::Result<()> {
+        if self.state.theme.as_deref() == Some(theme) {
             return Ok(());
         }
-        self.state.theme = Some(theme);
+        self.state.theme = Some(theme.to_string());
         self.flush()
     }
 
@@ -257,32 +260,6 @@ impl ConfigStore {
     }
 }
 
-// ThemeKind needs serde derives so it can travel through Config. Lower-case
-// in the file ("dark" / "light").
-mod theme_serde {
-    use super::ThemeKind;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    impl Serialize for ThemeKind {
-        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-            match self {
-                ThemeKind::Dark => "dark",
-                ThemeKind::Light => "light",
-            }
-            .serialize(s)
-        }
-    }
-
-    impl<'de> Deserialize<'de> for ThemeKind {
-        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-            let s = String::deserialize(d)?;
-            ThemeKind::parse(&s).ok_or_else(|| {
-                serde::de::Error::custom(format!("unknown theme: {s} (use dark|light)"))
-            })
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,7 +278,7 @@ mod tests {
     #[test]
     fn config_with_crypto_and_connections_round_trips() {
         let cfg = Config {
-            theme: Some(ThemeKind::Light),
+            theme: Some("light".into()),
             schema_width: Some(50),
             crypto: Some(CryptoBlock {
                 salt: "AAAA".into(),
@@ -403,10 +380,20 @@ mod tests {
     fn missing_optional_blocks_deserialize_to_none_and_empty() {
         let text = "theme = \"dark\"\nschema_width = 36\n";
         let cfg: Config = toml::from_str(text).unwrap();
-        assert_eq!(cfg.theme, Some(ThemeKind::Dark));
+        assert_eq!(cfg.theme.as_deref(), Some("dark"));
         assert_eq!(cfg.schema_width, Some(36));
         assert!(cfg.crypto.is_none());
         assert!(cfg.connections.is_empty());
+    }
+
+    #[test]
+    fn unknown_theme_name_round_trips() {
+        // The config schema is permissive — any string survives parse.
+        // Resolution happens at App seed, where unknown names fall back
+        // to the default theme without aborting startup.
+        let text = "theme = \"gruberDarker\"\n";
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert_eq!(cfg.theme.as_deref(), Some("gruberDarker"));
     }
 
     #[test]
