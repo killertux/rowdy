@@ -16,19 +16,21 @@
 
 use futures::StreamExt;
 use llm::LLMProvider;
-use llm::chat::{ChatMessage as LlmChatMessage, StreamChunk};
+use llm::chat::{ChatMessage as LlmChatMessage, StreamChunk, Tool};
 use llm::{FunctionCall, ToolCall};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::llm::tools;
 use crate::state::chat::{ChatBlock, ChatMessage, ChatRole};
 use crate::worker::{IntrospectTarget, WorkerEvent};
 
 /// Cap on tool-call rounds in a single turn so a misbehaving model can't
-/// pin the worker.
-const MAX_TOOL_ROUNDS: usize = 8;
+/// pin the worker. Sized to comfortably fit codebase-exploration tasks
+/// (grep → read → grep → describe → write_buffer chains can run 6-8
+/// rounds on their own); 20 leaves headroom without letting a runaway
+/// loop stall the chat indefinitely.
+const MAX_TOOL_ROUNDS: usize = 20;
 
 /// One streaming-delta event surfaced into the main event loop.
 #[derive(Debug)]
@@ -61,6 +63,10 @@ pub struct ChatTurn {
     pub client: Box<dyn LLMProvider>,
     pub history: Vec<ChatMessage>,
     pub evt_tx: UnboundedSender<WorkerEvent>,
+    /// Tool catalog the LLM sees. Built by the action layer at submit
+    /// time, filtered by the user's `ReadToolsMode` preference (Off
+    /// strips the fs read tools from the list entirely).
+    pub tools: Vec<Tool>,
 }
 
 /// A tool call whose execution is paused until an introspection result
@@ -72,6 +78,21 @@ pub struct ChatTurn {
 #[derive(Debug)]
 pub struct PendingChatTool {
     pub target: IntrospectTarget,
+    pub call_id: String,
+    pub tool_name: String,
+    pub args_json: String,
+    pub reply: oneshot::Sender<ToolReply>,
+}
+
+/// A filesystem read tool paused waiting for explicit user approval.
+/// Created in `action::chat::on_tool_request` when
+/// [`crate::user_config::ReadToolsMode::Ask`] is active and the LLM
+/// tried to call `read_file`, `list_directory`, or `grep_files`.
+/// Drained by the `ToolApproveAccept`/`Deny` action handlers — accept
+/// replays into the regular `finalize_tool` path; deny replies with a
+/// refusal payload so the LLM can recover instead of waiting forever.
+#[derive(Debug)]
+pub struct PendingApprovalTool {
     pub call_id: String,
     pub tool_name: String,
     pub args_json: String,
@@ -91,15 +112,15 @@ async fn run_turn(turn: ChatTurn) {
         client,
         history,
         evt_tx,
+        tools,
     } = turn;
 
     let mut messages: Vec<LlmChatMessage> = history.iter().map(translate_message).collect();
     let mut full_text = String::new();
 
     for round in 0..=MAX_TOOL_ROUNDS {
-        let tools_owned = tools::all();
         let stream_result = client
-            .chat_stream_with_tools(&messages, Some(tools_owned.as_slice()))
+            .chat_stream_with_tools(&messages, Some(tools.as_slice()))
             .await;
         let mut stream = match stream_result {
             Ok(s) => s,

@@ -87,6 +87,7 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
             Overlay::Help { .. } => translate_help_key(key),
             Overlay::LlmSettings(state) => translate_llm_settings_key(state, key),
             Overlay::UpdateAvailable { .. } => translate_update_key(key),
+            Overlay::ConfirmToolUse { .. } => translate_tool_confirm_key(key),
         };
     }
     match &app.screen {
@@ -249,6 +250,19 @@ fn translate_update_key(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(Action::UpdateAccept),
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::UpdateDismiss),
+        _ => None,
+    }
+}
+
+/// Chat fs-tool approval prompt: same key set as the update overlay so
+/// muscle memory transfers. y/Enter approves the pending tool call;
+/// n/Esc denies it (the LLM gets a refusal payload and keeps going).
+fn translate_tool_confirm_key(key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            Some(Action::ToolApproveAccept)
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::ToolApproveDeny),
         _ => None,
     }
 }

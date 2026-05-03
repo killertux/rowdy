@@ -126,6 +126,17 @@ pub enum WorkerEvent {
         args_json: String,
         reply: tokio::sync::oneshot::Sender<crate::llm::worker::ToolReply>,
     },
+    /// A filesystem read tool finished off-thread (via
+    /// `tokio::task::spawn_blocking`). The spawned task already replied
+    /// to the LLM oneshot — this event exists purely to update the
+    /// chat panel's tool-result block from the main loop, which owns
+    /// `app.chat`.
+    ChatFsToolDone {
+        call_id: String,
+        name: String,
+        display: String,
+        error: Option<String>,
+    },
     /// Background update check found a newer release. UI shows the
     /// "y/n" prompt.
     UpdateAvailable {

@@ -19,6 +19,7 @@ const BACKEND_LABEL: &str = "Backend:  ";
 const MODEL_LABEL: &str = "Model:    ";
 const BASE_URL_LABEL: &str = "Base URL: ";
 const API_KEY_LABEL: &str = "API key:  ";
+const READ_TOOLS_LABEL: &str = "Read fs:  ";
 
 pub struct LlmSettingsForm<'a> {
     pub state: &'a LlmSettingsState,
@@ -54,6 +55,7 @@ impl Widget for LlmSettingsForm<'_> {
             Constraint::Length(1), // model
             Constraint::Length(1), // base url
             Constraint::Length(1), // api key
+            Constraint::Length(1), // auto-approve toggle
             Constraint::Length(1), // blank
             Constraint::Length(2), // hint / error (wrapped)
             Constraint::Length(2), // help (wrapped)
@@ -85,6 +87,7 @@ impl Widget for LlmSettingsForm<'_> {
             self.state.focus == LlmSettingsField::ApiKey,
             self.theme,
         );
+        render_read_tools_row(buf, chunks[4], self.state, self.theme);
 
         let hint_line = match &self.state.error {
             Some(err) => Line::from(Span::styled(
@@ -100,15 +103,81 @@ impl Widget for LlmSettingsForm<'_> {
         };
         Paragraph::new(hint_line)
             .wrap(Wrap { trim: true })
-            .render(chunks[5], buf);
+            .render(chunks[6], buf);
 
         Paragraph::new(Line::from(Span::styled(
-            "Tab cycles · ←/→ or h/l change provider · Enter saves · Esc cancels",
+            "Tab cycles · ←/→ toggles · Enter saves · Esc cancels",
             Style::default().fg(self.theme.fg_dim).bg(self.theme.bg),
         )))
         .wrap(Wrap { trim: true })
-        .render(chunks[6], buf);
+        .render(chunks[7], buf);
     }
+}
+
+fn render_read_tools_row(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &LlmSettingsState,
+    theme: &Theme,
+) {
+    let focused = state.focus == LlmSettingsField::ReadToolsMode;
+    let label_style = Style::default()
+        .fg(if focused { theme.header_fg } else { theme.fg })
+        .bg(theme.bg)
+        .add_modifier(Modifier::BOLD);
+    Paragraph::new(Line::from(Span::styled(
+        READ_TOOLS_LABEL.to_string(),
+        label_style,
+    )))
+    .render(area, buf);
+
+    let label_cols = READ_TOOLS_LABEL.chars().count() as u16;
+    let inner = Rect {
+        x: area.x + label_cols,
+        y: area.y,
+        width: area.width.saturating_sub(label_cols),
+        height: 1,
+    };
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let modes = [
+        crate::user_config::ReadToolsMode::Off,
+        crate::user_config::ReadToolsMode::Ask,
+        crate::user_config::ReadToolsMode::Auto,
+    ];
+    for (i, mode) in modes.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(
+                "  ",
+                Style::default().fg(theme.fg_dim).bg(theme.bg),
+            ));
+        }
+        let active = *mode == state.read_tools_mode;
+        let style = if active && focused {
+            Style::default()
+                .fg(theme.selection_fg)
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD)
+        } else if active {
+            Style::default()
+                .fg(theme.header_fg)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg_dim).bg(theme.bg)
+        };
+        spans.push(Span::styled(mode.label().to_string(), style));
+    }
+    let hint = match state.read_tools_mode {
+        crate::user_config::ReadToolsMode::Off => "  · agent can't read project files",
+        crate::user_config::ReadToolsMode::Ask => "  · y/n prompt before each read",
+        crate::user_config::ReadToolsMode::Auto => "  · reads run without prompting",
+    };
+    spans.push(Span::styled(
+        hint.to_string(),
+        Style::default().fg(theme.fg_dim).bg(theme.bg),
+    ));
+    Paragraph::new(Line::from(spans)).render(inner, buf);
 }
 
 fn render_backend_row(buf: &mut Buffer, area: Rect, state: &LlmSettingsState, theme: &Theme) {
@@ -193,8 +262,8 @@ fn render_text_field(
 
 pub fn inner_box(area: Rect) -> Option<Rect> {
     let width = area.width.min(80);
-    let height = 13.min(area.height);
-    if width < 50 || height < 9 {
+    let height = 14.min(area.height);
+    if width < 50 || height < 10 {
         return None;
     }
     let x = area.x + (area.width.saturating_sub(width)) / 2;

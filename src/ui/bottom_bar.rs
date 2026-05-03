@@ -56,6 +56,10 @@ impl Widget for BottomBar<'_> {
                 render_update(current, latest, area, buf, &self.app.theme);
                 return;
             }
+            Some(Overlay::ConfirmToolUse { name, args_json, .. }) => {
+                render_tool_confirm(name, args_json, area, buf, &self.app.theme);
+                return;
+            }
             None => {}
         }
         match &self.app.screen {
@@ -157,6 +161,73 @@ fn render_update(current: &str, latest: &str, area: Rect, buf: &mut Buffer, them
         ),
     ]);
     line.render(area, buf);
+}
+
+/// "Chat wants to read X — y to allow / n to deny" prompt fired when
+/// the LLM calls a fs read tool while `ReadToolsMode::Ask` is active.
+/// `args_json` is the raw JSON the model emitted; we pull the most
+/// telling field (path/pattern) for the headline so the user can decide
+/// without reading JSON.
+fn render_tool_confirm(
+    name: &str,
+    args_json: &str,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+) {
+    let summary = summarise_tool_args(name, args_json);
+    let action = match name {
+        "read_file" => "read",
+        "list_directory" => "list",
+        "grep_files" => "search",
+        _ => "use",
+    };
+    let line = Line::from(vec![
+        Span::styled("🔒 ", Style::default().fg(theme.status_running).bg(theme.bg)),
+        Span::styled(
+            format!("chat wants to {action} {summary}"),
+            Style::default()
+                .fg(theme.fg)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  y to allow · n/Esc to deny",
+            Style::default().fg(theme.fg_dim).bg(theme.bg),
+        ),
+    ]);
+    line.render(area, buf);
+}
+
+fn summarise_tool_args(name: &str, args_json: &str) -> String {
+    let parsed: serde_json::Value = serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
+    match name {
+        "read_file" => parsed
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|p| format!("{p:?}"))
+            .unwrap_or_else(|| "<missing path>".into()),
+        "list_directory" => parsed
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|p| !p.is_empty())
+            .map(|p| format!("{p:?}"))
+            .unwrap_or_else(|| "the project root".into()),
+        "grep_files" => {
+            let pattern = parsed
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<missing>");
+            let path = parsed
+                .get("path")
+                .and_then(|v| v.as_str())
+                .filter(|p| !p.is_empty())
+                .map(|p| format!(" in {p:?}"))
+                .unwrap_or_default();
+            format!("for {pattern:?}{path}")
+        }
+        _ => name.to_string(),
+    }
 }
 
 fn paint_background(area: Rect, buf: &mut Buffer, theme: &Theme) {

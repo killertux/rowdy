@@ -49,6 +49,18 @@ pub enum Overlay {
     /// the latest tag in user-config so we don't re-prompt for the
     /// same version.
     UpdateAvailable { current: String, latest: String },
+    /// Chat agent asked to use a filesystem read tool while
+    /// `ReadToolsMode::Ask` is active. The actual `oneshot::Sender`
+    /// the worker is waiting on lives in `app.pending_approval_tools`
+    /// (overlays must stay `Debug`-able and clonable-ish, so the
+    /// sender doesn't fit here directly). On y/Enter the action layer
+    /// drains the pending entry and runs the tool; on n/Esc it sends
+    /// a refusal back to the LLM so the turn doesn't stall.
+    ConfirmToolUse {
+        call_id: String,
+        name: String,
+        args_json: String,
+    },
 }
 
 /// Why the confirm-run overlay opened. Drives the headline at the top

@@ -11,7 +11,7 @@ use crate::connections::ConnectionStore;
 use crate::datasource::DriverKind;
 use crate::keybindings::keymap::Keymap;
 use crate::llm::keystore::LlmKeyStore;
-use crate::llm::worker::PendingChatTool;
+use crate::llm::worker::{PendingApprovalTool, PendingChatTool};
 use crate::log::Logger;
 use crate::state::chat::ChatPanel;
 use crate::state::completion::CompletionState;
@@ -129,6 +129,30 @@ pub struct App {
     /// Drained by `action::chat::complete_pending_for_target` when the
     /// matching `WorkerEvent::SchemaLoaded` / `SchemaFailed` lands.
     pub pending_chat_tools: Vec<PendingChatTool>,
+    /// Tool calls paused waiting for the user's y/n on an
+    /// `Overlay::ConfirmToolUse` prompt. One pending entry at a time
+    /// (the chat worker awaits each tool oneshot before consuming the
+    /// next stream chunk), but the queue shape mirrors `pending_chat_tools`
+    /// for consistency.
+    pub pending_approval_tools: Vec<PendingApprovalTool>,
+    /// Focus snapshot taken the first time an approval prompt yanks the
+    /// user out of the chat composer. Restored once the queue empties so
+    /// back-to-back approvals don't bounce focus on every keystroke and
+    /// the user lands back where they were typing.
+    pub focus_before_approval: Option<Focus>,
+    /// Snapshot of the directory `rowdy` was launched from. The fs read
+    /// tools (`read_file`, `list_directory`, `grep_files`) confine
+    /// themselves to this subtree; storing it on `App` instead of calling
+    /// `current_dir()` per tool means a future `cd` from inside an
+    /// embedded shell can't shift the jail mid-session.
+    pub project_root: PathBuf,
+    /// Concatenated `AGENTS.md` chain from the project anchor (`.git`
+    /// dir, walking up from `project_root`) down to `project_root`,
+    /// or `None` if no `AGENTS.md` is found in the chain. Loaded at
+    /// startup and refreshed by `:source`. Injected into the chat
+    /// system prompt so the LLM picks up project-specific conventions
+    /// without the user having to repeat them every turn.
+    pub agents_md: Option<String>,
     /// User explicitly dismissed the inline result preview (`Q` /
     /// `:close`). Reset by every `dispatch_query`. The expanded-view
     /// path bypasses this; we only gate the inline split.
@@ -170,6 +194,19 @@ impl App {
         let schema = SchemaPanel::new(width);
         let theme = Theme::by_name(&theme_name)
             .unwrap_or_else(|| Theme::for_kind(crate::ui::theme::ThemeKind::Dark));
+        // Resolve once up front so both the struct field and the
+        // `agents_md::load` call below see the same path. If
+        // `current_dir` fails (extremely rare — the OS gave us no
+        // cwd), fall back to `data_dir.parent()` so the fs tools have
+        // *something* to jail against; the resolver still rejects
+        // anything outside the chosen root.
+        let project_root = std::env::current_dir().unwrap_or_else(|_| {
+            data_dir
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| data_dir.clone())
+        });
+        let agents_md = crate::llm::agents_md::load(&project_root, &log);
         Self {
             editor: EditorPanel::new(),
             schema,
@@ -197,7 +234,7 @@ impl App {
             llm_keystore: None,
             active_connection: None,
             active_dialect: None,
-            data_dir,
+            data_dir: data_dir.clone(),
             editor_dirty: false,
             pending_save_at: None,
             schema_cache,
@@ -205,6 +242,10 @@ impl App {
             completion_snoozed_at: None,
             layout: LayoutCache::default(),
             pending_chat_tools: Vec::new(),
+            pending_approval_tools: Vec::new(),
+            focus_before_approval: None,
+            project_root,
+            agents_md,
             preview_hidden: false,
             pending_update_prompt: None,
         }
