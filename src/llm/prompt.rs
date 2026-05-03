@@ -181,10 +181,7 @@ fn active_context(app: &App) -> String {
             .unwrap_or_default();
         lines.push(format!("- connection: {name}{dialect}"));
     }
-    lines.push(format!(
-        "- project root: {}",
-        app.project_root.display()
-    ));
+    lines.push(format!("- project root: {}", app.project_root.display()));
     let mode = app.user_config.state().read_tools.unwrap_or_default();
     match mode {
         crate::user_config::ReadToolsMode::Off => {
@@ -204,9 +201,7 @@ fn active_context(app: &App) -> String {
             );
         }
         crate::user_config::ReadToolsMode::Auto => {
-            lines.push(
-                "- read_file / list_directory / grep_files run without prompting.".into(),
-            );
+            lines.push("- read_file / list_directory / grep_files run without prompting.".into());
         }
     }
     lines.join("\n")

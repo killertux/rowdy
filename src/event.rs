@@ -259,9 +259,7 @@ fn translate_update_key(key: KeyEvent) -> Option<Action> {
 /// n/Esc denies it (the LLM gets a refusal payload and keeps going).
 fn translate_tool_confirm_key(key: KeyEvent) -> Option<Action> {
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-            Some(Action::ToolApproveAccept)
-        }
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(Action::ToolApproveAccept),
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::ToolApproveDeny),
         _ => None,
     }

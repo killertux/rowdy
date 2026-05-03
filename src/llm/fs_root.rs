@@ -168,10 +168,10 @@ mod tests {
     #[test]
     fn rejects_path_escaping_root() {
         let root = tempdir();
-        let outside = root.parent().unwrap().join(format!(
-            "rowdy-outside-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let outside = root
+            .parent()
+            .unwrap()
+            .join(format!("rowdy-outside-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("secret.txt"), "x").unwrap();
         // Climb out via `..`.

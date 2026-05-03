@@ -30,11 +30,7 @@ pub fn open(app: &mut App) {
         .unwrap_or_else(LlmSettingsState::new_create);
     // Seed the read-tools mode from user-config so the modal reflects
     // the live value the chat gate is using.
-    prefill.read_tools_mode = app
-        .user_config
-        .state()
-        .read_tools
-        .unwrap_or_default();
+    prefill.read_tools_mode = app.user_config.state().read_tools.unwrap_or_default();
     app.overlay = Some(Overlay::LlmSettings(prefill));
 }
 
@@ -134,10 +130,8 @@ pub fn apply(app: &mut App, action: LlmSettingsAction) {
             app.log
                 .warn("llm", format!("read-tools mode persist failed: {err}"));
         } else {
-            app.log.info(
-                "llm",
-                format!("filesystem read tools → {}", mode.label()),
-            );
+            app.log
+                .info("llm", format!("filesystem read tools → {}", mode.label()));
         }
     }
     if do_submit {
@@ -331,16 +325,10 @@ mod tests {
         );
         // Right arrow again wraps to Off.
         apply(&mut app, LlmSettingsAction::CycleBackend(1));
-        assert_eq!(
-            app.user_config.state().read_tools,
-            Some(ReadToolsMode::Off)
-        );
+        assert_eq!(app.user_config.state().read_tools, Some(ReadToolsMode::Off));
         // Right arrow again brings us back to Ask.
         apply(&mut app, LlmSettingsAction::CycleBackend(1));
-        assert_eq!(
-            app.user_config.state().read_tools,
-            Some(ReadToolsMode::Ask)
-        );
+        assert_eq!(app.user_config.state().read_tools, Some(ReadToolsMode::Ask));
     }
 
     #[test]
@@ -383,10 +371,7 @@ mod tests {
                 shift: false,
             }),
         );
-        assert_eq!(
-            app.user_config.state().read_tools,
-            Some(ReadToolsMode::Off)
-        );
+        assert_eq!(app.user_config.state().read_tools, Some(ReadToolsMode::Off));
         // Jump to Auto via Shift+a / 'A'.
         apply(
             &mut app,
@@ -411,10 +396,7 @@ mod tests {
                 shift: false,
             }),
         );
-        assert_eq!(
-            app.user_config.state().read_tools,
-            Some(ReadToolsMode::Ask)
-        );
+        assert_eq!(app.user_config.state().read_tools, Some(ReadToolsMode::Ask));
     }
 
     #[test]

@@ -56,7 +56,9 @@ impl Widget for BottomBar<'_> {
                 render_update(current, latest, area, buf, &self.app.theme);
                 return;
             }
-            Some(Overlay::ConfirmToolUse { name, args_json, .. }) => {
+            Some(Overlay::ConfirmToolUse {
+                name, args_json, ..
+            }) => {
                 render_tool_confirm(name, args_json, area, buf, &self.app.theme);
                 return;
             }
@@ -168,13 +170,7 @@ fn render_update(current: &str, latest: &str, area: Rect, buf: &mut Buffer, them
 /// `args_json` is the raw JSON the model emitted; we pull the most
 /// telling field (path/pattern) for the headline so the user can decide
 /// without reading JSON.
-fn render_tool_confirm(
-    name: &str,
-    args_json: &str,
-    area: Rect,
-    buf: &mut Buffer,
-    theme: &Theme,
-) {
+fn render_tool_confirm(name: &str, args_json: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
     let summary = summarise_tool_args(name, args_json);
     let action = match name {
         "read_file" => "read",
@@ -183,7 +179,10 @@ fn render_tool_confirm(
         _ => "use",
     };
     let line = Line::from(vec![
-        Span::styled("🔒 ", Style::default().fg(theme.status_running).bg(theme.bg)),
+        Span::styled(
+            "🔒 ",
+            Style::default().fg(theme.status_running).bg(theme.bg),
+        ),
         Span::styled(
             format!("chat wants to {action} {summary}"),
             Style::default()
@@ -200,7 +199,8 @@ fn render_tool_confirm(
 }
 
 fn summarise_tool_args(name: &str, args_json: &str) -> String {
-    let parsed: serde_json::Value = serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
+    let parsed: serde_json::Value =
+        serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
     match name {
         "read_file" => parsed
             .get("path")

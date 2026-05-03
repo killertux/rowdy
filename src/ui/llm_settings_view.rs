@@ -114,12 +114,7 @@ impl Widget for LlmSettingsForm<'_> {
     }
 }
 
-fn render_read_tools_row(
-    buf: &mut Buffer,
-    area: Rect,
-    state: &LlmSettingsState,
-    theme: &Theme,
-) {
+fn render_read_tools_row(buf: &mut Buffer, area: Rect, state: &LlmSettingsState, theme: &Theme) {
     let focused = state.focus == LlmSettingsField::ReadToolsMode;
     let label_style = Style::default()
         .fg(if focused { theme.header_fg } else { theme.fg })

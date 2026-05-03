@@ -303,12 +303,7 @@ pub fn try_promote_pending_tool_confirm(app: &mut App) {
 /// Snapshot the prior focus on first demote so back-to-back prompts
 /// don't keep clobbering it; restore happens in `clear_approval_overlay`
 /// once the queue empties.
-fn present_approval_overlay(
-    app: &mut App,
-    call_id: String,
-    name: String,
-    args_json: String,
-) {
+fn present_approval_overlay(app: &mut App, call_id: String, name: String, args_json: String) {
     if matches!(app.focus, Focus::ChatComposer) && app.focus_before_approval.is_none() {
         app.focus_before_approval = Some(app.focus);
         app.focus = Focus::Chat;
@@ -488,8 +483,7 @@ pub fn on_fs_tool_done(
     display: String,
     error: Option<String>,
 ) {
-    app.chat
-        .append_tool_result(call_id, name, display, error);
+    app.chat.append_tool_result(call_id, name, display, error);
 }
 
 fn queue_tool_for_introspect(app: &mut App, pending: PendingChatTool) {
@@ -723,7 +717,10 @@ mod tests {
         assert!(app.overlay.is_none());
         assert!(app.pending_approval_tools.is_empty());
         let reply = rx.await.unwrap();
-        assert_eq!(reply.result.get("text").and_then(|s| s.as_str()), Some("ok"));
+        assert_eq!(
+            reply.result.get("text").and_then(|s| s.as_str()),
+            Some("ok")
+        );
     }
 
     #[tokio::test]
@@ -764,7 +761,11 @@ mod tests {
         assert!(app.overlay.is_none());
         assert!(app.pending_approval_tools.is_empty());
         let reply = rx.await.unwrap();
-        let err = reply.result.get("error").and_then(|s| s.as_str()).unwrap_or("");
+        let err = reply
+            .result
+            .get("error")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
         assert!(err.contains("denied"), "got: {err}");
     }
 

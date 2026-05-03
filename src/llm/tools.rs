@@ -672,10 +672,7 @@ fn read_file_at(project_root: &Path, args: &Value) -> Value {
 }
 
 fn list_directory_at(project_root: &Path, args: &Value) -> Value {
-    let path_arg = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let path_arg = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let resolved = match fs_root::resolve(project_root, path_arg, true) {
         Ok(p) => p,
         Err(msg) => return err(msg),
@@ -723,9 +720,7 @@ fn list_directory_at(project_root: &Path, args: &Value) -> Value {
     let mut json = serde_json::json!({
         "entries": entries,
     });
-    if truncated
-        && let Some(obj) = json.as_object_mut()
-    {
+    if truncated && let Some(obj) = json.as_object_mut() {
         obj.insert(
             "note".into(),
             Value::String(format!(
@@ -1502,21 +1497,18 @@ mod tests {
             "CREATE TABLE users (id INT);\nCREATE TABLE orders (id INT);\n",
         )
         .unwrap();
-        stdfs::write(
-            root.join("seed.sql"),
-            "INSERT INTO users VALUES (1);\n",
-        )
-        .unwrap();
+        stdfs::write(root.join("seed.sql"), "INSERT INTO users VALUES (1);\n").unwrap();
         stdfs::write(root.join(".env"), "DATABASE_URL=postgres://u@h/db").unwrap();
 
         let v = grep_files_at(&root, &serde_json::json!({"pattern": "(?i)create table"}));
         let matches = v.get("matches").and_then(|m| m.as_array()).unwrap();
         assert_eq!(matches.len(), 2, "got: {matches:?}");
-        assert!(matches.iter().all(|m| m
-            .get("path")
-            .and_then(|p| p.as_str())
-            .map(|p| p.ends_with("schema.sql"))
-            .unwrap_or(false)));
+        assert!(matches.iter().all(|m| {
+            m.get("path")
+                .and_then(|p| p.as_str())
+                .map(|p| p.ends_with("schema.sql"))
+                .unwrap_or(false)
+        }));
         // The .env match must NOT appear.
         let v2 = grep_files_at(&root, &serde_json::json!({"pattern": "DATABASE_URL"}));
         let m2 = v2.get("matches").and_then(|m| m.as_array()).unwrap();
