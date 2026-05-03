@@ -36,6 +36,19 @@ pub enum BindableAction {
     ToggleTheme,
     SetRightPanelSchema,
     SetRightPanelChat,
+    /// `<Space>n` cycles to the next per-connection editor session.
+    /// Other `:session` subcommands stay command-only — keep the
+    /// keybinding surface conservative and let users add their own
+    /// chord overrides if they want.
+    SessionNext,
+    /// `<Space>!` … `<Space>(` jump straight to session `N` (1..=9).
+    /// The shifted-digit gesture mirrors Vim's quickfix nav and gives
+    /// users a single-chord switch when they know the index they
+    /// want — no need to spell out `:session N`. Bound with
+    /// `<S-1>` in the README's chord notation, but on every layout we
+    /// support that key produces the corresponding shifted symbol
+    /// (`!`, `@`, …), which is how the keymap stores it.
+    SessionSwitch(u8),
 
     // Schema panel.
     SchemaUp,
@@ -87,6 +100,16 @@ impl BindableAction {
             "toggle-theme" => Self::ToggleTheme,
             "set-right-panel-schema" => Self::SetRightPanelSchema,
             "set-right-panel-chat" => Self::SetRightPanelChat,
+            "next-session" => Self::SessionNext,
+            "session-switch-1" => Self::SessionSwitch(1),
+            "session-switch-2" => Self::SessionSwitch(2),
+            "session-switch-3" => Self::SessionSwitch(3),
+            "session-switch-4" => Self::SessionSwitch(4),
+            "session-switch-5" => Self::SessionSwitch(5),
+            "session-switch-6" => Self::SessionSwitch(6),
+            "session-switch-7" => Self::SessionSwitch(7),
+            "session-switch-8" => Self::SessionSwitch(8),
+            "session-switch-9" => Self::SessionSwitch(9),
 
             "schema-up" => Self::SchemaUp,
             "schema-down" => Self::SchemaDown,
@@ -135,6 +158,22 @@ impl BindableAction {
             Self::ToggleTheme => "toggle-theme",
             Self::SetRightPanelSchema => "set-right-panel-schema",
             Self::SetRightPanelChat => "set-right-panel-chat",
+            Self::SessionNext => "next-session",
+            Self::SessionSwitch(1) => "session-switch-1",
+            Self::SessionSwitch(2) => "session-switch-2",
+            Self::SessionSwitch(3) => "session-switch-3",
+            Self::SessionSwitch(4) => "session-switch-4",
+            Self::SessionSwitch(5) => "session-switch-5",
+            Self::SessionSwitch(6) => "session-switch-6",
+            Self::SessionSwitch(7) => "session-switch-7",
+            Self::SessionSwitch(8) => "session-switch-8",
+            Self::SessionSwitch(9) => "session-switch-9",
+            // Out-of-range payload — every constructor we expose
+            // (parse, all, the keymap defaults) is gated to 1..=9, so
+            // hitting this arm means a programmer error elsewhere
+            // rather than a user-facing bug. Round-trip through
+            // `parse` returns `None` for the placeholder string.
+            Self::SessionSwitch(_) => "session-switch-invalid",
 
             Self::SchemaUp => "schema-up",
             Self::SchemaDown => "schema-down",
@@ -180,6 +219,16 @@ impl BindableAction {
             Self::ToggleTheme,
             Self::SetRightPanelSchema,
             Self::SetRightPanelChat,
+            Self::SessionNext,
+            Self::SessionSwitch(1),
+            Self::SessionSwitch(2),
+            Self::SessionSwitch(3),
+            Self::SessionSwitch(4),
+            Self::SessionSwitch(5),
+            Self::SessionSwitch(6),
+            Self::SessionSwitch(7),
+            Self::SessionSwitch(8),
+            Self::SessionSwitch(9),
             Self::SchemaUp,
             Self::SchemaDown,
             Self::SchemaCollapseOrAscend,
@@ -226,6 +275,17 @@ impl BindableAction {
             Self::ToggleTheme => "Toggle Dark / Light theme",
             Self::SetRightPanelSchema => "Switch right panel to schema (and focus it)",
             Self::SetRightPanelChat => "Switch right panel to chat (and focus it)",
+            Self::SessionNext => "Cycle to the next per-connection editor session",
+            Self::SessionSwitch(1) => "Switch directly to session 1",
+            Self::SessionSwitch(2) => "Switch directly to session 2",
+            Self::SessionSwitch(3) => "Switch directly to session 3",
+            Self::SessionSwitch(4) => "Switch directly to session 4",
+            Self::SessionSwitch(5) => "Switch directly to session 5",
+            Self::SessionSwitch(6) => "Switch directly to session 6",
+            Self::SessionSwitch(7) => "Switch directly to session 7",
+            Self::SessionSwitch(8) => "Switch directly to session 8",
+            Self::SessionSwitch(9) => "Switch directly to session 9",
+            Self::SessionSwitch(_) => "Switch directly to session N (invalid index)",
             Self::SchemaUp => "Schema: move selection up",
             Self::SchemaDown => "Schema: move selection down",
             Self::SchemaCollapseOrAscend => "Schema: collapse node or move to parent",
@@ -296,6 +356,10 @@ impl BindableAction {
             Self::ToggleTheme => Action::ToggleTheme,
             Self::SetRightPanelSchema => Action::SetRightPanel(RightPanelMode::Schema),
             Self::SetRightPanelChat => Action::SetRightPanel(RightPanelMode::Chat),
+            Self::SessionNext => Action::Session(crate::action::SessionAction::Next),
+            Self::SessionSwitch(n) => {
+                Action::Session(crate::action::SessionAction::Switch(n as usize))
+            }
 
             Self::SchemaUp => Action::Schema(crate::action::SchemaAction::Up),
             Self::SchemaDown => Action::Schema(crate::action::SchemaAction::Down),

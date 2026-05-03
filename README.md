@@ -131,11 +131,16 @@ doesn't exist. It holds:
   execute / cancel / errors / session save+load). URL passwords are
   redacted. Only the 5 most recent log files are kept; older ones are
   deleted at the start of the next launch.
-- `sessions/<connection-name>/session_0.sql` — the editor buffer for each
-  saved connection. Auto-saved 800ms after the last edit and reloaded on
-  the next connect. Connection names are sanitised for path safety, so
-  two names that differ only in path-unsafe characters share a session
-  for now.
+- `sessions/<connection-name>/session_<N>.sql` — editor buffers for
+  each saved connection, indexed from `0`. Each connection starts with
+  `session_0.sql`; create more with `:session new` and switch between
+  them with `:session next`/`prev`/`<N>` or `<Space>n`. The active
+  buffer is auto-saved 800ms after the last edit and reloaded on the
+  next connect (or session switch). Indices may have holes after
+  deletion (`session_0.sql` + `session_2.sql` is fine without a
+  `session_1.sql`). Connection names are sanitised for path safety,
+  so two names that differ only in path-unsafe characters share a
+  sessions directory for now.
 - `chats/<connection-name>/session.jsonl` — the LLM chat history for
   each saved connection. Append-only JSONL; one `ChatMessage` per line.
   System messages are filtered out on append so we don't persist tool
@@ -227,6 +232,8 @@ Rebind chords *under* them (e.g. `<Space>r`) instead.
 | `leader`          | `toggle-theme`                  | Toggle Dark / Light theme                                  |
 | `leader`          | `set-right-panel-schema`        | Switch right panel to schema (and focus)                   |
 | `leader`          | `set-right-panel-chat`          | Switch right panel to chat (and focus)                     |
+| `leader`          | `next-session`                  | Cycle to the next per-connection editor session            |
+| `leader`          | `session-switch-1` … `-9`       | Jump straight to session N (default chord: `<Space>` then the shifted digit `!@#$%^&*(`) |
 | `schema`          | `schema-up` / `schema-down`     | Move selection                                             |
 | `schema`          | `schema-collapse-or-ascend`     | Collapse node or ascend                                    |
 | `schema`          | `schema-expand-or-descend`      | Expand node or descend                                     |
@@ -421,6 +428,8 @@ normal mode. Not in any insert mode (Esc out first).
 | `<Space> t` | Toggle Dark / Light theme                                        |
 | `<Space> S` | Switch right panel to schema (and focus it)                      |
 | `<Space> C` | Switch right panel to chat (and focus it, in normal mode)        |
+| `<Space> n` | Cycle to the next per-connection editor session                  |
+| `<Space> Shift+1`…`<Space> Shift+9` | Switch directly to session 1…9 (US layout: `<Space> !` … `<Space> (`) |
 | `=`         | Format SQL (Visual: selection; Normal: whole buffer)             |
 | `Ctrl+Space`| Open SQL autocomplete popover (works in any editor mode)         |
 
@@ -712,6 +721,11 @@ After pressing `:`.
 | `:chat`                      | Toggle the right panel between schema and chat (focus follows) |
 | `:chat clear`                | Wipe the chat log and the persisted session for this connection |
 | `:chat settings`, `:chat config` | Open the LLM provider modal (backend / model / API key)     |
+| `:session`, `:session list`  | Show the connection's session indices and the active one (bottom bar) |
+| `:session next` \| `prev`    | Cycle through the connection's sessions (`<Space>n` does next)  |
+| `:session new`               | Create a fresh session at the lowest unused index and switch to it |
+| `:session <N>`               | Switch to session `<N>` (must already exist)                    |
+| `:session delete <N>`        | Delete session `<N>` (refuses if it's the only remaining one)   |
 
 ### Connection list
 
@@ -889,19 +903,14 @@ Next likely steps, roughly ordered:
 
 ### Authoring
 
-- **Autocomplete — bound subqueries / derived tables.** Currently
-  FROM/JOIN aliases against base tables and CTE names resolve, but
-  CTE *bodies* and `FROM (SELECT …) sub` derived tables don't yield
-  column completions. Parsing those into a binding scope is the next
-  step; auto-alias suggestion and configurable trigger thresholds
-  are smaller follow-ups.
-- **A real SQL lexer** for statement splitting (the current `;` splitter is
-  intentionally naive — see the TODO at `state/editor.rs`).
-- **Multiple sessions per connection.** Each connection has a single
-  `session_0.sql` buffer today — picking a connection swaps the editor
-  to that one buffer. A tabbed model (`session_0.sql`, `session_1.sql`,
-  …) would let users keep a long-running migration draft separate from
-  ad-hoc queries against the same database.
+- **Autocomplete — `SELECT *` recursion in CTE / derived bodies.**
+  Today the projection extractor pulls named columns and aliased
+  expressions out of `WITH x AS (SELECT id, name FROM users) SELECT
+  x.|`-style bodies, but `SELECT *` falls through with an empty
+  column list. Threading the schema cache through `classify` so the
+  extractor can resolve `*` against a single-base-table FROM is the
+  next step. Auto-alias suggestion and configurable trigger
+  thresholds are smaller follow-ups.
 
 ### Result view
 

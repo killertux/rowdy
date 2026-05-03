@@ -252,6 +252,23 @@ const DEFAULTS: &[(Context, &str, BindableAction)] = &[
     (Context::Leader, "t", BindableAction::ToggleTheme),
     (Context::Leader, "S", BindableAction::SetRightPanelSchema),
     (Context::Leader, "C", BindableAction::SetRightPanelChat),
+    (Context::Leader, "n", BindableAction::SessionNext),
+    // Direct-jump to sessions 1..=9 via `<Space>` then a shifted
+    // digit. We register the shifted symbols (`!`, `@`, …) rather
+    // than `<S-1>` notation because every keyboard delivers the
+    // shifted forms identically: crossterm reports `Char('!')`, and
+    // `normalize_chord` strips the SHIFT bit so the literal matches.
+    // Layout caveat: these are US-shift mappings; users on other
+    // layouts can override via `keybindings.toml`.
+    (Context::Leader, "!", BindableAction::SessionSwitch(1)),
+    (Context::Leader, "@", BindableAction::SessionSwitch(2)),
+    (Context::Leader, "#", BindableAction::SessionSwitch(3)),
+    (Context::Leader, "$", BindableAction::SessionSwitch(4)),
+    (Context::Leader, "%", BindableAction::SessionSwitch(5)),
+    (Context::Leader, "^", BindableAction::SessionSwitch(6)),
+    (Context::Leader, "&", BindableAction::SessionSwitch(7)),
+    (Context::Leader, "*", BindableAction::SessionSwitch(8)),
+    (Context::Leader, "(", BindableAction::SessionSwitch(9)),
     // --- Schema panel ---
     (Context::Schema, "j", BindableAction::SchemaDown),
     (Context::Schema, "k", BindableAction::SchemaUp),
@@ -351,6 +368,38 @@ mod tests {
                 m.lookup_key(Context::Leader, KeyCode::Char(lower), KeyModifiers::NONE),
                 Some(expected),
                 "lowercase {lower} (no SHIFT) must not resolve as Shift+{upper}",
+            );
+        }
+    }
+
+    #[test]
+    fn shifted_digits_route_to_session_switch_in_leader() {
+        // The Shift+1..=9 gesture binds to the shifted symbols on a
+        // US keyboard; whether the terminal also reports SHIFT or not
+        // shouldn't matter (the normalizer strips it for `Char`).
+        let m = Keymap::defaults();
+        for (sym, n) in [
+            ('!', 1u8),
+            ('@', 2),
+            ('#', 3),
+            ('$', 4),
+            ('%', 5),
+            ('^', 6),
+            ('&', 7),
+            ('*', 8),
+            ('(', 9),
+        ] {
+            // Plain delivery — most terminals.
+            assert_eq!(
+                m.lookup_key(Context::Leader, KeyCode::Char(sym), KeyModifiers::NONE),
+                Some(BindableAction::SessionSwitch(n)),
+                "Shift+{n} ({sym} + NONE) must resolve",
+            );
+            // SHIFT-bearing delivery — kitty / iTerm enhanced.
+            assert_eq!(
+                m.lookup_key(Context::Leader, KeyCode::Char(sym), KeyModifiers::SHIFT),
+                Some(BindableAction::SessionSwitch(n)),
+                "Shift+{n} ({sym} + SHIFT) must resolve",
             );
         }
     }

@@ -100,6 +100,16 @@ pub struct App {
     /// Base `.rowdy/` directory — used to resolve session files and any
     /// other on-disk state.
     pub data_dir: PathBuf,
+    /// Index of the currently active session within the active
+    /// connection. Defaults to `0`; only meaningful when
+    /// `active_connection.is_some()`. The corresponding on-disk file
+    /// is `<data_dir>/sessions/<name>/session_<index>.sql`.
+    pub active_session_index: usize,
+    /// Sorted list of session indices that exist on disk for the
+    /// active connection. Refreshed on connect, on `:session new`,
+    /// and on `:session delete`. Always non-empty: `[0]` when no
+    /// session file has been written yet.
+    pub session_indices: Vec<usize>,
     /// Set whenever the editor buffer changes after a connection is active.
     /// Cleared by the debounced save (or the shutdown flush).
     pub editor_dirty: bool,
@@ -250,6 +260,8 @@ impl App {
             active_connection: None,
             active_dialect: None,
             data_dir: data_dir.clone(),
+            active_session_index: 0,
+            session_indices: vec![0],
             editor_dirty: false,
             pending_save_at: None,
             schema_cache,

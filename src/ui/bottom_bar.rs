@@ -74,7 +74,7 @@ impl Widget for BottomBar<'_> {
             } => {
                 render_yank_format_prompt(area, buf, &self.app.theme);
             }
-            _ => render_status(&self.app.status, area, buf, &self.app.theme),
+            _ => render_status(self.app, area, buf, &self.app.theme),
         }
     }
 }
@@ -239,13 +239,26 @@ fn paint_background(area: Rect, buf: &mut Buffer, theme: &Theme) {
     }
 }
 
-fn render_status(status: &QueryStatus, area: Rect, buf: &mut Buffer, theme: &Theme) {
-    let (icon_color, text) = describe(status, theme);
-    let line = Line::from(vec![
-        Span::styled("● ", Style::default().fg(icon_color).bg(theme.bg)),
-        Span::styled(text, Style::default().fg(theme.fg).bg(theme.bg)),
-    ]);
-    line.render(area, buf);
+fn render_status(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    let (icon_color, text) = describe(&app.status, theme);
+    let mut spans = vec![Span::styled(
+        "● ",
+        Style::default().fg(icon_color).bg(theme.bg),
+    )];
+    // `[sN]` indicator — only when there's an active connection; the
+    // editor isn't reachable without one, so the marker would just
+    // be noise on the splash / auth / connection-list screens.
+    if app.active_connection.is_some() {
+        spans.push(Span::styled(
+            format!("[s{}] ", app.active_session_index),
+            Style::default().fg(theme.fg_dim).bg(theme.bg),
+        ));
+    }
+    spans.push(Span::styled(
+        text,
+        Style::default().fg(theme.fg).bg(theme.bg),
+    ));
+    Line::from(spans).render(area, buf);
 }
 
 fn describe(status: &QueryStatus, theme: &Theme) -> (Color, String) {

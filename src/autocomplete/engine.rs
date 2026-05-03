@@ -105,6 +105,21 @@ fn collect_columns_from_binding(
     cache: &SchemaCache,
     binding: &TableBinding,
 ) {
+    // Synthesised columns from a CTE / derived-table body skip the
+    // schema cache — the projection extractor already gave us the
+    // exact list this scope exposes.
+    if let Some(cols) = &binding.synthetic_columns {
+        for name in cols {
+            out.push(CompletionItem {
+                label: name.clone(),
+                kind: CompletionKind::Column,
+                detail: Some(format!("from {}", binding.table)),
+                insert: name.clone(),
+                trail: InsertTrail::None,
+            });
+        }
+        return;
+    }
     let key = (
         binding.catalog.clone(),
         binding.schema.clone(),
@@ -345,6 +360,7 @@ mod tests {
             schema: "main".into(),
             table: table.to_string(),
             is_cte: false,
+            synthetic_columns: None,
         }
     }
 
@@ -580,6 +596,35 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_columns_short_circuit_cache_lookup() {
+        // No cache entry for the binding's (catalog, schema, table)
+        // — but synthetic_columns is populated. The engine must
+        // surface those names instead of falling through to an empty
+        // result.
+        let cache = SchemaCache::new();
+        let bindings = vec![TableBinding {
+            catalog: String::new(),
+            schema: String::new(),
+            table: "u".into(),
+            is_cte: true,
+            synthetic_columns: Some(vec!["id".into(), "email".into()]),
+        }];
+        let items = compute_sqlite(
+            &CompletionContext::Column {
+                qualifier: Some(bindings[0].clone()),
+            },
+            &cache,
+            "",
+            &bindings,
+        );
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // Empty-needle path sorts kind-then-alphabetical, so the
+        // exact order is alphabetised.
+        assert_eq!(labels, vec!["email", "id"]);
+        assert!(items.iter().all(|i| i.kind == CompletionKind::Column));
+    }
+
+    #[test]
     fn cte_binding_surfaces_in_table_context() {
         let cache = SchemaCache::new();
         let bindings = vec![TableBinding {
@@ -587,6 +632,7 @@ mod tests {
             schema: String::new(),
             table: "recent".into(),
             is_cte: true,
+            synthetic_columns: None,
         }];
         let items = compute(
             &CompletionContext::Table { schema: None },
