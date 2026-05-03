@@ -616,9 +616,14 @@ fn translate_llm_settings_key(state: &LlmSettingsState, key: KeyEvent) -> Option
     }
     let mods = key.modifiers;
     let bare = mods.is_empty();
-    let on_backend = state.focus == LlmSettingsField::Backend;
+    // Radio rows (Backend, ReadToolsMode) cycle on ←/→ / [ ] / h / l.
+    // Text fields swallow those keys for normal editing instead.
+    let on_radio_row = matches!(
+        state.focus,
+        LlmSettingsField::Backend | LlmSettingsField::ReadToolsMode
+    );
 
-    // Ctrl+U clears the focused TextArea (no-op when focus is Backend).
+    // Ctrl+U clears the focused TextArea (no-op when focus is a radio row).
     if key.code == KeyCode::Char('u') && mods.contains(KeyModifiers::CONTROL) {
         return Some(Action::LlmSettings(LlmSettingsAction::ClearField));
     }
@@ -627,16 +632,16 @@ fn translate_llm_settings_key(state: &LlmSettingsState, key: KeyEvent) -> Option
         (KeyCode::Enter, true) => Some(Action::LlmSettings(LlmSettingsAction::Submit)),
         (KeyCode::Tab, _) => Some(Action::LlmSettings(LlmSettingsAction::CycleField)),
         (KeyCode::BackTab, _) => Some(Action::LlmSettings(LlmSettingsAction::CycleFieldBack)),
-        // Backend cycling — only fires when the Backend field is active so
-        // the user can use ← / → / `[` / `]` / h / l normally inside text
-        // fields.
+        // Cycle the focused radio row. The action handler dispatches
+        // `CycleBackend` to `cycle_backend` or `cycle_read_tools_mode`
+        // based on `state.focus`, so the same key is reused for both.
         (KeyCode::Left, true) | (KeyCode::Char('['), true) | (KeyCode::Char('h'), true)
-            if on_backend =>
+            if on_radio_row =>
         {
             Some(Action::LlmSettings(LlmSettingsAction::CycleBackend(-1)))
         }
         (KeyCode::Right, true) | (KeyCode::Char(']'), true) | (KeyCode::Char('l'), true)
-            if on_backend =>
+            if on_radio_row =>
         {
             Some(Action::LlmSettings(LlmSettingsAction::CycleBackend(1)))
         }
@@ -1609,7 +1614,7 @@ mod tests {
     // ----- translate_llm_settings_key ----------------------------------
 
     #[test]
-    fn llm_settings_arrows_cycle_backend_only_on_backend_field() {
+    fn llm_settings_arrows_cycle_radio_rows_only() {
         let mut state = LlmSettingsState::new_create();
         // Default focus is Backend — arrows cycle.
         assert!(matches_action(
@@ -1635,8 +1640,8 @@ mod tests {
             &translate_llm_settings_key(&state, key(KeyCode::Char('['))),
             "Input"
         ));
-        // h/l also passthrough on non-Backend fields so users can type
-        // them into the Model / API key textareas.
+        // h/l also passthrough on text fields so users can type them
+        // into the Model / API key textareas.
         assert!(matches_action(
             &translate_llm_settings_key(&state, key(KeyCode::Char('h'))),
             "Input"
@@ -1649,6 +1654,26 @@ mod tests {
         assert!(matches_action(
             &translate_llm_settings_key(&state, key(KeyCode::Char('['))),
             "CycleBackend(-1)"
+        ));
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Char('h'))),
+            "CycleBackend(-1)"
+        ));
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Char('l'))),
+            "CycleBackend(1)"
+        ));
+        // ReadToolsMode is a radio row too — same keys must fire
+        // CycleBackend (the action layer routes it to
+        // `cycle_read_tools_mode` based on focus).
+        state.focus = LlmSettingsField::ReadToolsMode;
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Left)),
+            "CycleBackend(-1)"
+        ));
+        assert!(matches_action(
+            &translate_llm_settings_key(&state, key(KeyCode::Right)),
+            "CycleBackend(1)"
         ));
         assert!(matches_action(
             &translate_llm_settings_key(&state, key(KeyCode::Char('h'))),
