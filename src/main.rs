@@ -354,6 +354,7 @@ async fn run(
         // after the modal screens (Auth / ConnectionList / Connecting)
         // close, not blocking them.
         action::try_promote_pending_update(app);
+        action::chat::try_promote_pending_tool_confirm(app);
         terminal.draw(|f| ui::render(app, f))?;
         // Read the deadlines once per iteration so the sleeps are rebuilt
         // each loop with whatever the latest edit pushed them to.

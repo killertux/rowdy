@@ -10,6 +10,7 @@ use ratatui_textarea::TextArea;
 
 use crate::config::LlmProviderEntry;
 use crate::llm::LlmBackendKind;
+use crate::user_config::ReadToolsMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmSettingsField {
@@ -17,6 +18,11 @@ pub enum LlmSettingsField {
     Model,
     BaseUrl,
     ApiKey,
+    /// 3-state radio for the chat agent's filesystem read tools:
+    /// off / ask / auto. Persisted to user-config (not
+    /// provider-specific) but exposed in this modal so the user has
+    /// one place to manage chat-related preferences.
+    ReadToolsMode,
 }
 
 impl LlmSettingsField {
@@ -25,16 +31,18 @@ impl LlmSettingsField {
             Self::Backend => Self::Model,
             Self::Model => Self::BaseUrl,
             Self::BaseUrl => Self::ApiKey,
-            Self::ApiKey => Self::Backend,
+            Self::ApiKey => Self::ReadToolsMode,
+            Self::ReadToolsMode => Self::Backend,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Backend => Self::ApiKey,
+            Self::Backend => Self::ReadToolsMode,
             Self::Model => Self::Backend,
             Self::BaseUrl => Self::Model,
             Self::ApiKey => Self::BaseUrl,
+            Self::ReadToolsMode => Self::ApiKey,
         }
     }
 }
@@ -50,6 +58,11 @@ pub struct LlmSettingsState {
     /// Original entry name when editing, so submit can detect rename and
     /// preserve the AAD-bound ciphertext semantics.
     pub original_name: Option<String>,
+    /// Live value of the read-tools-mode radio. Seeded from
+    /// `UserConfig::read_tools` on `open()`; flushed back through
+    /// `UserConfigStore::set_read_tools_mode` whenever it changes so
+    /// the user doesn't need to remember to "save settings" twice.
+    pub read_tools_mode: ReadToolsMode,
 }
 
 impl LlmSettingsState {
@@ -64,6 +77,7 @@ impl LlmSettingsState {
             focus: LlmSettingsField::Backend,
             error: None,
             original_name: None,
+            read_tools_mode: ReadToolsMode::default(),
         }
     }
 
@@ -84,16 +98,25 @@ impl LlmSettingsState {
         state
     }
 
-    /// Mutable handle on whichever TextArea is currently focused. Backend
-    /// and the form-wide focus aren't TextAreas, so that arm panics — the
-    /// caller is responsible for filtering `Backend` before calling this.
+    /// Cycle the read-tools radio in `delta` direction (1 advances
+    /// off → ask → auto, -1 reverses). Returns the new mode so the
+    /// caller can persist it without re-reading `self`.
+    pub fn cycle_read_tools_mode(&mut self, delta: i32) -> ReadToolsMode {
+        self.read_tools_mode = self.read_tools_mode.cycled(delta);
+        self.read_tools_mode
+    }
+
+    /// Mutable handle on whichever TextArea is currently focused.
+    /// Backend and ReadToolsMode aren't TextAreas, so those arms
+    /// panic — the caller is responsible for filtering them before
+    /// calling this.
     pub fn current_input_mut(&mut self) -> &mut TextArea<'static> {
         match self.focus {
             LlmSettingsField::Model => &mut self.model,
             LlmSettingsField::BaseUrl => &mut self.base_url,
             LlmSettingsField::ApiKey => &mut self.api_key,
-            LlmSettingsField::Backend => {
-                panic!("current_input_mut called while focus == Backend")
+            LlmSettingsField::Backend | LlmSettingsField::ReadToolsMode => {
+                panic!("current_input_mut called while focus == {:?}", self.focus)
             }
         }
     }

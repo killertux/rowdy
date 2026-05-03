@@ -11,6 +11,8 @@
 
 #![allow(dead_code)]
 
+pub mod agents_md;
+pub mod fs_root;
 pub mod keystore;
 pub mod prompt;
 pub mod provider;

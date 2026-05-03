@@ -13,6 +13,56 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// How the chat agent's filesystem read tools (`read_file`,
+/// `list_directory`, `grep_files`) are gated.
+///
+/// - [`Off`] strips the tools from the LLM's tool list entirely; the
+///   model can't see them and won't try to call them. Use this when
+///   you don't want the agent reading project files at all.
+/// - [`Ask`] (the default) registers the tools but pauses each call
+///   on a y/n approval overlay before executing. Trades a few
+///   keystrokes for predictability.
+/// - [`Auto`] registers the tools and runs them without prompting. Use
+///   when you trust the model to read what it needs.
+///
+/// Persisted lower-case in `~/.rowdy/config.toml` so future variants
+/// don't break round-trips.
+///
+/// [`Off`]: ReadToolsMode::Off
+/// [`Ask`]: ReadToolsMode::Ask
+/// [`Auto`]: ReadToolsMode::Auto
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadToolsMode {
+    Off,
+    #[default]
+    Ask,
+    Auto,
+}
+
+impl ReadToolsMode {
+    /// Cycle through the three states. `delta = 1` advances forward
+    /// (Off → Ask → Auto → Off), `delta = -1` reverses. Wraps in both
+    /// directions.
+    pub fn cycled(self, delta: i32) -> Self {
+        let order = [Self::Off, Self::Ask, Self::Auto];
+        let idx = order.iter().position(|m| *m == self).unwrap_or(1) as i32;
+        let n = order.len() as i32;
+        order[((idx + delta).rem_euclid(n)) as usize]
+    }
+
+    /// Short label used in the settings row and the system-prompt
+    /// active-context block. Stable across builds — UI style changes
+    /// build on top.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 pub const FILE_NAME: &str = "config.toml";
 pub const DIR_NAME: &str = ".rowdy";
 
@@ -69,6 +119,11 @@ pub struct UserConfig {
     /// pester them; a *newer* release lifts the suppression.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_dismissed_version: Option<String>,
+    /// Three-state gate for the chat agent's filesystem read tools.
+    /// `None` resolves to [`ReadToolsMode::Ask`] (the default — see
+    /// [`ReadToolsMode`]). Toggleable from the `:chat settings` modal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_tools: Option<ReadToolsMode>,
 }
 
 /// Owns the on-disk user config. Vanilla runs never touch the
@@ -128,6 +183,14 @@ impl UserConfigStore {
         if dismissed_version.is_some() {
             self.state.last_dismissed_version = dismissed_version;
         }
+        self.flush()
+    }
+
+    /// Persist the chat-side filesystem-read-tools mode. Triggered by
+    /// the `:chat settings` modal. We always flush eagerly so the next
+    /// launch picks up the user's preference.
+    pub fn set_read_tools_mode(&mut self, mode: ReadToolsMode) -> io::Result<()> {
+        self.state.read_tools = Some(mode);
         self.flush()
     }
 
@@ -201,12 +264,55 @@ mod tests {
             check_for_updates: Some(false),
             last_update_check_at: Some(1_730_000_000),
             last_dismissed_version: Some("v0.7.0".into()),
+            read_tools: Some(ReadToolsMode::Auto),
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let parsed: UserConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed, cfg);
         // Default `Option::None` fields are skipped on serialise.
         assert!(!text.contains("None"));
+    }
+
+    #[test]
+    fn read_tools_mode_round_trips_each_variant() {
+        for mode in [ReadToolsMode::Off, ReadToolsMode::Ask, ReadToolsMode::Auto] {
+            let cfg = UserConfig {
+                read_tools: Some(mode),
+                ..Default::default()
+            };
+            let text = toml::to_string_pretty(&cfg).unwrap();
+            let parsed: UserConfig = toml::from_str(&text).unwrap();
+            assert_eq!(parsed.read_tools, Some(mode));
+        }
+    }
+
+    #[test]
+    fn read_tools_mode_default_is_ask() {
+        // The whole point of having a default: a fresh install gets
+        // a sane, conservative gate. Ask is conservative — the user
+        // sees every fs read before it happens.
+        assert_eq!(ReadToolsMode::default(), ReadToolsMode::Ask);
+    }
+
+    #[test]
+    fn read_tools_mode_cycles_forward_and_back() {
+        assert_eq!(ReadToolsMode::Off.cycled(1), ReadToolsMode::Ask);
+        assert_eq!(ReadToolsMode::Ask.cycled(1), ReadToolsMode::Auto);
+        assert_eq!(ReadToolsMode::Auto.cycled(1), ReadToolsMode::Off);
+        assert_eq!(ReadToolsMode::Off.cycled(-1), ReadToolsMode::Auto);
+        assert_eq!(ReadToolsMode::Auto.cycled(-1), ReadToolsMode::Ask);
+        assert_eq!(ReadToolsMode::Ask.cycled(-1), ReadToolsMode::Off);
+    }
+
+    #[test]
+    fn set_read_tools_mode_persists() {
+        let dir = tempdir();
+        for mode in [ReadToolsMode::Off, ReadToolsMode::Ask, ReadToolsMode::Auto] {
+            let mut store = UserConfigStore::load(&dir).unwrap();
+            store.set_read_tools_mode(mode).unwrap();
+            let reloaded = UserConfigStore::load(&dir).unwrap();
+            assert_eq!(reloaded.state().read_tools, Some(mode));
+        }
     }
 
     #[test]

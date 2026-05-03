@@ -5,7 +5,7 @@ use ratatui::crossterm::event::Event as CtEvent;
 use ratatui_textarea::{Input, TextArea};
 
 mod auth;
-mod chat;
+pub mod chat;
 mod completion;
 mod conn_form;
 mod conn_list;
@@ -129,6 +129,13 @@ pub enum Action {
     SetRightPanel(RightPanelMode),
     /// `:chat settings` modal interactions.
     LlmSettings(LlmSettingsAction),
+    /// User pressed `y`/`Y`/`Enter` on an `Overlay::ConfirmToolUse`
+    /// prompt — run the paused fs read tool.
+    ToolApproveAccept,
+    /// User pressed `n`/`N`/`Esc` on the prompt — refuse the call;
+    /// the action layer replies to the LLM with `{"error": "user
+    /// denied access"}` so the turn keeps moving.
+    ToolApproveDeny,
 }
 
 /// What a click or scroll-wheel was aimed at. Translated from
@@ -430,6 +437,8 @@ pub fn apply(app: &mut App, action: Action) {
         Action::ToggleRightPanel => chat::toggle_right_panel(app),
         Action::SetRightPanel(mode) => chat::set_right_panel(app, mode),
         Action::LlmSettings(a) => llm_settings::apply(app, a),
+        Action::ToolApproveAccept => chat::on_tool_approve_accept(app),
+        Action::ToolApproveDeny => chat::on_tool_approve_deny(app),
     }
 }
 
@@ -777,11 +786,25 @@ fn apply_source(app: &mut App) {
     app.user_config = new_user;
     app.keymap = new_keymap;
 
+    // Re-read AGENTS.md from the project tree so edits to project
+    // conventions land in the next chat turn without a restart. Loaded
+    // *after* the configs above so a fresh `app.log` clone isn't
+    // strictly required — `agents_md::load` only borrows.
+    let new_agents_md = crate::llm::agents_md::load(&app.project_root, &app.log);
+    let agents_md_loaded = new_agents_md.is_some();
+    app.agents_md = new_agents_md;
+
     app.status = match keymap_err {
         Some(err) => QueryStatus::Failed { error: err },
-        None => QueryStatus::Notice {
-            msg: "sourced user config + project config + keybindings".into(),
-        },
+        None => {
+            let mut parts: Vec<&str> = vec!["user config", "project config", "keybindings"];
+            if agents_md_loaded {
+                parts.push("AGENTS.md");
+            }
+            QueryStatus::Notice {
+                msg: format!("sourced {}", parts.join(" + ")),
+            }
+        }
     };
 }
 
@@ -1318,6 +1341,12 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
             args_json,
             reply,
         } => chat::on_tool_request(app, call_id, name, args_json, reply),
+        WorkerEvent::ChatFsToolDone {
+            call_id,
+            name,
+            display,
+            error,
+        } => chat::on_fs_tool_done(app, call_id, name, display, error),
         WorkerEvent::UpdateAvailable { current, latest } => {
             on_update_available(app, current, latest)
         }
