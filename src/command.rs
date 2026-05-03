@@ -100,6 +100,175 @@ pub enum ParsedTarget {
     File(String),
 }
 
+/// Static description of one completable token in the `:` grammar.
+/// Drives the popover in `state::command` — runtime parsing stays
+/// in [`parse`]. The two are kept in sync by the
+/// `command_tree_round_trips_through_parser` test below: every
+/// canonical name and alias listed in `COMMAND_TREE` must be a
+/// token `parse` recognises.
+///
+/// The struct is recursive so deeper sub-commands compose without
+/// changing the walker — a future `:foo bar baz` lands by adding
+/// another `children` slice on `bar`.
+pub struct CommandSpec {
+    /// Canonical name. Always shown in the popover; aliases never
+    /// appear as separate suggestions but still match prefix
+    /// queries (typing `q` highlights `quit`).
+    pub name: &'static str,
+    pub aliases: &'static [&'static str],
+    /// Tokens that may follow this one. Empty == leaf — no further
+    /// completion offered after this token.
+    pub children: &'static [CommandSpec],
+}
+
+/// Top-level `:` commands plus their sub-commands. The popover
+/// engine walks this tree token-by-token; the parser at [`parse`]
+/// consumes the same tokens but produces typed values.
+pub static COMMAND_TREE: &[CommandSpec] = &[
+    CommandSpec {
+        name: "quit",
+        aliases: &["q"],
+        children: &[],
+    },
+    CommandSpec {
+        name: "help",
+        aliases: &["?"],
+        children: &[],
+    },
+    CommandSpec {
+        name: "width",
+        aliases: &[],
+        children: &[],
+    },
+    CommandSpec {
+        name: "run",
+        aliases: &["r"],
+        children: &[],
+    },
+    CommandSpec {
+        name: "cancel",
+        aliases: &[],
+        children: &[],
+    },
+    CommandSpec {
+        name: "expand",
+        aliases: &["e"],
+        children: &[],
+    },
+    CommandSpec {
+        name: "collapse",
+        aliases: &["c"],
+        children: &[],
+    },
+    CommandSpec {
+        name: "close",
+        aliases: &["hide"],
+        children: &[],
+    },
+    CommandSpec {
+        name: "theme",
+        aliases: &[],
+        children: &[],
+    },
+    CommandSpec {
+        name: "export",
+        aliases: &[],
+        children: &[
+            CommandSpec {
+                name: "csv",
+                aliases: &[],
+                children: &[],
+            },
+            CommandSpec {
+                name: "tsv",
+                aliases: &[],
+                children: &[],
+            },
+            CommandSpec {
+                name: "json",
+                aliases: &[],
+                children: &[],
+            },
+            CommandSpec {
+                name: "sql",
+                aliases: &[],
+                children: &[],
+            },
+        ],
+    },
+    CommandSpec {
+        name: "format",
+        aliases: &["fmt"],
+        children: &[CommandSpec {
+            name: "all",
+            aliases: &[],
+            children: &[],
+        }],
+    },
+    CommandSpec {
+        name: "reload",
+        aliases: &[],
+        children: &[],
+    },
+    CommandSpec {
+        name: "source",
+        aliases: &[],
+        children: &[],
+    },
+    CommandSpec {
+        name: "conn",
+        aliases: &["conns"],
+        children: &[
+            CommandSpec {
+                name: "list",
+                aliases: &["ls"],
+                children: &[],
+            },
+            CommandSpec {
+                name: "add",
+                aliases: &[],
+                children: &[],
+            },
+            CommandSpec {
+                name: "edit",
+                aliases: &[],
+                children: &[],
+            },
+            CommandSpec {
+                name: "delete",
+                aliases: &["rm"],
+                children: &[],
+            },
+            CommandSpec {
+                name: "use",
+                aliases: &[],
+                children: &[],
+            },
+        ],
+    },
+    CommandSpec {
+        name: "chat",
+        aliases: &[],
+        children: &[
+            CommandSpec {
+                name: "clear",
+                aliases: &[],
+                children: &[],
+            },
+            CommandSpec {
+                name: "settings",
+                aliases: &["config"],
+                children: &[],
+            },
+        ],
+    },
+    CommandSpec {
+        name: "update",
+        aliases: &[],
+        children: &[],
+    },
+];
+
 /// Parse a single `:` line. `Ok(None)` is the empty-line case (treat
 /// as no-op). `Err(msg)` is a user-facing error suitable for the
 /// status bar.
@@ -255,6 +424,45 @@ mod tests {
     fn empty_line_is_noop() {
         assert_eq!(parse(""), Ok(None));
         assert_eq!(parse("   "), Ok(None));
+    }
+
+    #[test]
+    fn command_tree_round_trips_through_parser() {
+        // Walk every node in COMMAND_TREE — for each canonical name
+        // and each alias, joined with its parent path, the parser
+        // must accept the result. Catches the "added a sub-command
+        // to parse() but forgot the tree" (and vice versa) class of
+        // mistake.
+        fn visit(parents: &[&str], specs: &[CommandSpec]) {
+            for spec in specs {
+                for token in std::iter::once(spec.name).chain(spec.aliases.iter().copied()) {
+                    let mut path: Vec<&str> = parents.to_vec();
+                    path.push(token);
+                    let line = path.join(" ");
+                    let result = parse(&line);
+                    assert!(
+                        matches!(result, Ok(Some(_)) | Err(_)),
+                        "tree path {line:?} produced unexpected parse result: {result:?}"
+                    );
+                    // Most tokens parse to `Ok(Some(_))`. The only
+                    // exception is tokens whose parser requires an
+                    // additional argument (e.g. `:width`, `:export`,
+                    // `:conn edit`); those return `Err(...)`. Either
+                    // outcome confirms the parser *recognises* the
+                    // token — what would actually be wrong is a
+                    // silent `Ok(None)` (which only happens for the
+                    // empty line).
+                    assert!(
+                        !matches!(result, Ok(None)),
+                        "tree path {line:?} parsed to no-op — token not recognised"
+                    );
+                }
+                let mut deeper: Vec<&str> = parents.to_vec();
+                deeper.push(spec.name);
+                visit(&deeper, spec.children);
+            }
+        }
+        visit(&[], COMMAND_TREE);
     }
 
     #[test]

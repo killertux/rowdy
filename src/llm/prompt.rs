@@ -130,10 +130,11 @@ output.";
 
 /// Compose the active system prompt. Phase 3 is mostly static; phase 4
 /// expands `active_context` with the connection name, dialect, and the
-/// currently-selected schema node. AGENTS.md content (loaded by
-/// [`crate::llm::agents_md::load`]) layers between the static guardrails
-/// and the runtime context — it represents project conventions the user
-/// wrote down, but it can't override the safety-critical guardrails.
+/// currently-selected schema node. AGENTS.md content (lazy-loaded into
+/// [`crate::llm::agents_md::AgentsMdCache`]) layers between the static
+/// guardrails and the runtime context — it represents project
+/// conventions the user wrote down, but it can't override the
+/// safety-critical guardrails.
 pub fn build_system_prompt(app: &App) -> String {
     let mut out = String::with_capacity(2048);
     out.push_str(IDENTITY);
@@ -144,7 +145,8 @@ pub fn build_system_prompt(app: &App) -> String {
     out.push_str("\n\n");
     out.push_str(GUARDRAILS);
 
-    if let Some(agents) = app.agents_md.as_deref() {
+    let agents_md = app.agents_md.read().unwrap().rendered();
+    if let Some(agents) = agents_md.as_deref() {
         out.push_str("\n\n");
         out.push_str(AGENTS_MD_PREAMBLE);
         out.push_str("\n<<<\n");
@@ -292,7 +294,17 @@ mod tests {
             dir.clone(),
             cache,
         );
-        app.agents_md = agents_md.map(str::to_string);
+        // App::new seeds against the real `current_dir()`; redirect
+        // its agents_md cache to `dir` so this test owns the
+        // discovery surface end-to-end.
+        app.project_root = dir.clone();
+        let mut md = app.agents_md.write().unwrap();
+        md.clear();
+        if let Some(body) = agents_md {
+            std::fs::write(dir.join("AGENTS.md"), body).unwrap();
+        }
+        md.seed_root(&dir, &Logger::discard());
+        drop(md);
         app
     }
 

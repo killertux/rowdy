@@ -75,7 +75,6 @@ impl ChatMessage {
         }
     }
 
-    #[allow(dead_code)] // used by phase 3's system-prompt seeding.
     pub fn system_text(text: impl Into<String>) -> Self {
         Self {
             role: ChatRole::System,

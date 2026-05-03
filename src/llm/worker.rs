@@ -32,6 +32,18 @@ use crate::worker::{IntrospectTarget, WorkerEvent};
 /// loop stall the chat indefinitely.
 const MAX_TOOL_ROUNDS: usize = 20;
 
+/// How many times to (re)attempt the initial `chat_stream_with_tools`
+/// call before giving up and surfacing the error. Covers transient
+/// network blips and provider-side hiccups (DNS, TLS handshake,
+/// short-lived 5xx). Mid-stream errors deliberately don't retry —
+/// we may have already painted partial assistant text and silently
+/// re-streaming would produce duplicates.
+const MAX_STREAM_ATTEMPTS: u8 = 3;
+/// Backoff before retry N (1-indexed). 250ms / 500ms keeps a wedged
+/// connection from blowing up the user's session while still bounding
+/// the total wait under a second on permanent failures.
+const STREAM_RETRY_BACKOFF_MS: [u64; (MAX_STREAM_ATTEMPTS - 1) as usize] = [250, 500];
+
 /// One streaming-delta event surfaced into the main event loop.
 #[derive(Debug)]
 pub enum ChatDelta {
@@ -119,13 +131,10 @@ async fn run_turn(turn: ChatTurn) {
     let mut full_text = String::new();
 
     for round in 0..=MAX_TOOL_ROUNDS {
-        let stream_result = client
-            .chat_stream_with_tools(&messages, Some(tools.as_slice()))
-            .await;
-        let mut stream = match stream_result {
+        let mut stream = match open_stream_with_retry(&*client, &messages, &tools).await {
             Ok(s) => s,
             Err(err) => {
-                send_error(&evt_tx, err.to_string());
+                send_error(&evt_tx, err);
                 return;
             }
         };
@@ -213,6 +222,43 @@ async fn run_turn(turn: ChatTurn) {
                 .build(),
         );
     }
+}
+
+/// Open the LLM stream, retrying transient failures up to
+/// `MAX_STREAM_ATTEMPTS` total tries. Returns the final error message
+/// (annotated with the attempt count) when every attempt fails, so the
+/// surfaced error tells the user this wasn't a one-shot blip.
+///
+/// Only the *initial* connect retries — once we've started consuming
+/// chunks we don't restart, since partial deltas have already painted
+/// into the chat panel.
+async fn open_stream_with_retry(
+    client: &dyn LLMProvider,
+    messages: &[LlmChatMessage],
+    tools: &[Tool],
+) -> Result<
+    std::pin::Pin<
+        Box<dyn futures::stream::Stream<Item = Result<StreamChunk, llm::error::LLMError>> + Send>,
+    >,
+    String,
+> {
+    let mut last_err: Option<String> = None;
+    for attempt in 1..=MAX_STREAM_ATTEMPTS {
+        match client.chat_stream_with_tools(messages, Some(tools)).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) => {
+                last_err = Some(err.to_string());
+                if attempt < MAX_STREAM_ATTEMPTS {
+                    let backoff = STREAM_RETRY_BACKOFF_MS[(attempt - 1) as usize];
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                }
+            }
+        }
+    }
+    Err(format!(
+        "chat stream failed after {MAX_STREAM_ATTEMPTS} attempts: {}",
+        last_err.unwrap_or_else(|| "unknown error".into())
+    ))
 }
 
 fn send_error(evt_tx: &UnboundedSender<WorkerEvent>, msg: String) {

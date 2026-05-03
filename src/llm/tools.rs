@@ -43,7 +43,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::UTF8;
@@ -485,6 +485,39 @@ pub fn dispatch_fs(project_root: &Path, name: &str, args_json: &str) -> Value {
         LIST_DIRECTORY => list_directory_at(project_root, &args),
         GREP_FILES => grep_files_at(project_root, &args),
         _ => err(format!("not an fs read tool: {name}")),
+    }
+}
+
+/// Canonical directory the named fs tool would have operated on, for
+/// AGENTS.md auto-discovery (see `crate::llm::agents_md`). Returns
+/// `None` when:
+/// - `name` isn't an fs read tool,
+/// - args parse fails / `path` arg is missing,
+/// - `fs_root::resolve` refuses the path (jail escape, `.env*`,
+///   missing file), or
+/// - `read_file`'s resolved target has no parent (degenerate root).
+///
+/// Re-resolves `path` rather than threading the canonical path back
+/// out of `dispatch_fs` so the existing dispatch signature stays
+/// untouched. `fs_root::resolve` is purely lexical + canonicalize, so
+/// the duplicate cost is negligible.
+pub fn fs_target_dir(project_root: &Path, name: &str, args_json: &str) -> Option<PathBuf> {
+    if !is_fs_read_tool(name) {
+        return None;
+    }
+    let args: Value = serde_json::from_str(args_json).ok()?;
+    let path_arg = match name {
+        READ_FILE => args.get("path").and_then(|v| v.as_str())?,
+        LIST_DIRECTORY | GREP_FILES => args.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+        _ => return None,
+    };
+    let resolved = fs_root::resolve(project_root, path_arg, true).ok()?;
+    if resolved.is_dir() {
+        Some(resolved)
+    } else {
+        // read_file resolves to a file — anchor the AGENTS.md walk on
+        // its parent directory.
+        resolved.parent().map(Path::to_path_buf)
     }
 }
 
@@ -1537,6 +1570,47 @@ mod tests {
         let matches = v.get("matches").and_then(|m| m.as_array()).unwrap();
         assert_eq!(matches.len(), 50);
         assert_eq!(v.get("truncated").and_then(|b| b.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn fs_target_dir_resolves_each_fs_tool() {
+        let root = fs_tempdir();
+        stdfs::create_dir_all(root.join("api")).unwrap();
+        stdfs::write(root.join("api").join("users.rs"), "x").unwrap();
+
+        // read_file → parent of the resolved file.
+        let target = fs_target_dir(&root, READ_FILE, r#"{"path":"api/users.rs"}"#)
+            .expect("read_file resolves");
+        assert!(target.ends_with("api"), "got: {target:?}");
+
+        // list_directory → the dir itself.
+        let target = fs_target_dir(&root, LIST_DIRECTORY, r#"{"path":"api"}"#)
+            .expect("list_directory resolves");
+        assert!(target.ends_with("api"));
+
+        // grep_files default path → project root.
+        let target =
+            fs_target_dir(&root, GREP_FILES, r#"{"pattern":"x"}"#).expect("grep root resolves");
+        assert_eq!(target, root);
+
+        // grep_files with explicit path → that path.
+        let target = fs_target_dir(&root, GREP_FILES, r#"{"pattern":"x","path":"api"}"#)
+            .expect("grep subdir resolves");
+        assert!(target.ends_with("api"));
+    }
+
+    #[test]
+    fn fs_target_dir_returns_none_for_bad_input() {
+        let root = fs_tempdir();
+
+        // Non-fs tool name.
+        assert!(fs_target_dir(&root, READ_BUFFER, r#"{"path":"x"}"#).is_none());
+        // Missing path on read_file.
+        assert!(fs_target_dir(&root, READ_FILE, "{}").is_none());
+        // Path resolves outside root via .env refusal.
+        assert!(fs_target_dir(&root, READ_FILE, r#"{"path":".env"}"#).is_none());
+        // Path doesn't exist.
+        assert!(fs_target_dir(&root, READ_FILE, r#"{"path":"missing.txt"}"#).is_none());
     }
 
     #[test]

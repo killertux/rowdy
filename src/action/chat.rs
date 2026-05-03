@@ -6,6 +6,8 @@
 //! so the loop is exercisable end-to-end without a real provider. Phase 3
 //! replaces `submit` with a tokio task that streams from the `llm` crate.
 
+use std::sync::Arc;
+
 use tokio::sync::oneshot;
 
 use crate::action::{ChatAction, copy_from, cut_from, paste_into};
@@ -442,6 +444,8 @@ fn spawn_fs_tool(
 ) {
     let project_root = app.project_root.clone();
     let evt_tx = app.evt_tx.clone();
+    let agents_md = Arc::clone(&app.agents_md);
+    let log = app.log.clone();
     let call_id = call_id.to_string();
     let name = name.to_string();
     let args_json = args_json.to_string();
@@ -455,6 +459,23 @@ fn spawn_fs_tool(
             .map(str::to_string);
         let display = serde_json::to_string(&result).unwrap_or_else(|_| "{}".into());
 
+        // Lazy AGENTS.md discovery: walk the touched directory's
+        // chain up to project_root and load any AGENTS.md we
+        // haven't seen. Only runs when the resolved target was
+        // valid (out-of-jail / missing-path resolves to None and
+        // the cache stays untouched). The freshly-loaded paths ride
+        // the ChatFsToolDone event back to the main loop, which
+        // surfaces a per-load chat notice.
+        let agents_md_loaded =
+            if let Some(target_dir) = tools::fs_target_dir(&project_root, &name, &args_json) {
+                match agents_md.write() {
+                    Ok(mut cache) => cache.discover_for(&project_root, &target_dir, &log),
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+
         // Update the UI through the main loop — `app.chat` isn't safe
         // to touch from a blocking task. The event handler in
         // `on_fs_tool_done` mirrors the inline `append_tool_result`
@@ -464,6 +485,7 @@ fn spawn_fs_tool(
             name: name.clone(),
             display: display.clone(),
             error,
+            agents_md_loaded,
         });
 
         // Reply to the LLM worker. Receiver might be gone (turn was
@@ -475,14 +497,23 @@ fn spawn_fs_tool(
 
 /// Main-loop handler for [`WorkerEvent::ChatFsToolDone`]. Appends the
 /// tool-result block onto the chat panel — same shape `finalize_tool`
-/// emits for the synchronous tools.
+/// emits for the synchronous tools — and surfaces a small system
+/// notice for any AGENTS.md the fs tool's directory walk loaded.
+/// Notices are pushed before the tool result so they land
+/// chronologically just above the read that triggered them.
 pub fn on_fs_tool_done(
     app: &mut App,
     call_id: String,
     name: String,
     display: String,
     error: Option<String>,
+    agents_md_loaded: Vec<String>,
 ) {
+    for path in &agents_md_loaded {
+        app.chat.push_message(ChatMessage::system_text(format!(
+            "Loaded AGENTS.md ({path})"
+        )));
+    }
     app.chat.append_tool_result(call_id, name, display, error);
 }
 

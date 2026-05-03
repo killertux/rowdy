@@ -146,13 +146,15 @@ pub struct App {
     /// `current_dir()` per tool means a future `cd` from inside an
     /// embedded shell can't shift the jail mid-session.
     pub project_root: PathBuf,
-    /// Concatenated `AGENTS.md` chain from the project anchor (`.git`
-    /// dir, walking up from `project_root`) down to `project_root`,
-    /// or `None` if no `AGENTS.md` is found in the chain. Loaded at
-    /// startup and refreshed by `:source`. Injected into the chat
-    /// system prompt so the LLM picks up project-specific conventions
-    /// without the user having to repeat them every turn.
-    pub agents_md: Option<String>,
+    /// Lazy `AGENTS.md` cache. Seeded at startup with the AGENTS.md
+    /// living directly at `project_root` (no walk above the cwd).
+    /// Grows on demand: every chat fs read tool (`read_file`,
+    /// `list_directory`, `grep_files`) walks the touched directory's
+    /// chain *up to* `project_root` and loads any AGENTS.md it finds
+    /// in not-yet-visited directories. Cleared and re-seeded by
+    /// `:source`. Rendered into the chat system prompt fresh on each
+    /// turn so newly discovered content lands without a restart.
+    pub agents_md: Arc<RwLock<crate::llm::agents_md::AgentsMdCache>>,
     /// User explicitly dismissed the inline result preview (`Q` /
     /// `:close`). Reset by every `dispatch_query`. The expanded-view
     /// path bypasses this; we only gate the inline split.
@@ -206,11 +208,24 @@ impl App {
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| data_dir.clone())
         });
-        let agents_md = crate::llm::agents_md::load(&project_root, &log);
+        let agents_md = Arc::new(RwLock::new(crate::llm::agents_md::AgentsMdCache::new()));
+        let agents_md_seeded = agents_md.write().unwrap().seed_root(&project_root, &log);
+        // Pre-populate the chat history with a system notice for
+        // each AGENTS.md picked up at startup so users get
+        // visibility on which files are influencing the agent's
+        // behavior. Notices are in-memory only (not persisted) —
+        // they reflect *this* session's load, not the connection's
+        // chat transcript.
+        let mut chat = crate::state::chat::ChatPanel::new();
+        for path in &agents_md_seeded {
+            chat.push_message(crate::state::chat::ChatMessage::system_text(format!(
+                "Loaded AGENTS.md ({path})"
+            )));
+        }
         Self {
             editor: EditorPanel::new(),
             schema,
-            chat: ChatPanel::new(),
+            chat,
             right_panel: RightPanelMode::default(),
             status: QueryStatus::Idle,
             results: Vec::new(),
