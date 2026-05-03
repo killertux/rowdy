@@ -1,5 +1,7 @@
 use edtui::{EditorEventHandler, EditorMode, EditorState, Highlight, Index2, Lines};
 use ratatui::style::{Color, Style};
+use sqlparser::dialect::GenericDialect;
+use sqlparser::tokenizer::{Token, Tokenizer};
 
 pub struct EditorPanel {
     pub state: EditorState,
@@ -64,16 +66,20 @@ pub struct StatementCursor {
 
 pub fn current_statement_with_cursor(state: &EditorState) -> StatementCursor {
     let chars: Vec<char> = state.lines.flatten(&Some('\n'));
+    let buffer: String = chars.iter().collect();
     let cursor_char_in_buffer = cursor_to_offset(state).min(chars.len());
-    let stmt_start_char = chars[..cursor_char_in_buffer]
+    let semis = statement_terminator_char_offsets(&buffer, &chars);
+    let stmt_start_char = semis
         .iter()
-        .rposition(|c| *c == ';')
-        .map(|i| i + 1)
+        .copied()
+        .filter(|&p| p < cursor_char_in_buffer)
+        .max()
+        .map(|p| p + 1)
         .unwrap_or(0);
-    let stmt_end_char = chars[cursor_char_in_buffer..]
+    let stmt_end_char = semis
         .iter()
-        .position(|c| *c == ';')
-        .map(|i| cursor_char_in_buffer + i)
+        .copied()
+        .find(|&p| p >= cursor_char_in_buffer)
         .unwrap_or(chars.len());
     let statement: String = chars[stmt_start_char..stmt_end_char].iter().collect();
     let cursor_byte_in_stmt: usize = chars[stmt_start_char..cursor_char_in_buffer]
@@ -101,14 +107,11 @@ pub struct StatementRange {
 }
 
 /// Returns the SQL statement containing the cursor.
-///
-/// TODO: this is a naive `;` splitter — it will mis-split semicolons inside
-/// strings, identifiers, and comments. Replace with a real lexer once the
-/// rest of the execution path is solid.
 pub fn statement_under_cursor(state: &EditorState) -> Option<StatementRange> {
     let chars: Vec<char> = state.lines.flatten(&Some('\n'));
+    let buffer: String = chars.iter().collect();
     let cursor_offset = cursor_to_offset(state);
-    let (seg_start, seg_end) = segment_bounds(&chars, cursor_offset);
+    let (seg_start, seg_end) = segment_bounds(&buffer, &chars, cursor_offset);
 
     let segment_chars = &chars[seg_start..seg_end];
     let leading_ws = leading_whitespace(segment_chars);
@@ -227,7 +230,7 @@ fn cursor_to_offset(state: &EditorState) -> usize {
     offset + state.cursor.col
 }
 
-fn segment_bounds(chars: &[char], cursor: usize) -> (usize, usize) {
+fn segment_bounds(buffer: &str, chars: &[char], cursor: usize) -> (usize, usize) {
     let cursor = cursor.min(chars.len());
     // edtui Normal-mode cursors at end-of-line sit at `col == row.len`,
     // which flattens to a newline (or end-of-buffer) — one past the
@@ -242,17 +245,74 @@ fn segment_bounds(chars: &[char], cursor: usize) -> (usize, usize) {
     } else {
         cursor
     };
-    let start = chars[..cursor]
+    let semis = statement_terminator_char_offsets(buffer, chars);
+    let start = semis
         .iter()
-        .rposition(|c| *c == ';')
-        .map(|i| i + 1)
+        .copied()
+        .filter(|&p| p < cursor)
+        .max()
+        .map(|p| p + 1)
         .unwrap_or(0);
-    let end = chars[cursor..]
+    let end = semis
         .iter()
-        .position(|c| *c == ';')
-        .map(|i| cursor + i)
+        .copied()
+        .find(|&p| p >= cursor)
         .unwrap_or(chars.len());
     (start, end)
+}
+
+/// Char-indexed positions of every `;` that actually terminates a
+/// statement — i.e. one outside of string literals, line/block
+/// comments, and quoted identifiers. Uses sqlparser's tokenizer so
+/// dialect-aware quoting (Postgres dollar-strings, MySQL backticks,
+/// `"`-quoted Postgres identifiers, …) doesn't pollute the boundary
+/// list.
+///
+/// On tokenizer error — typically a half-typed string or comment —
+/// we fall back to the char-level `;` scan. Mid-typing is normal in
+/// an editor, and a hard error here would freeze the splitter
+/// (`<Space>r` couldn't pick a statement, the autocomplete couldn't
+/// scope its bindings) until the buffer balances out.
+fn statement_terminator_char_offsets(buffer: &str, chars: &[char]) -> Vec<usize> {
+    let dialect = GenericDialect {};
+    let Ok(tokens) = Tokenizer::new(&dialect, buffer).tokenize_with_location() else {
+        return chars
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| **c == ';')
+            .map(|(i, _)| i)
+            .collect();
+    };
+
+    // Tokenizer locations are (line, column) 1-indexed in *chars*.
+    // Walk the buffer once tracking (line, col, char_idx) and emit
+    // the char index whenever the position matches a recorded
+    // SemiColon-token start.
+    let semi_locs: std::collections::BTreeSet<(u64, u64)> = tokens
+        .iter()
+        .filter(|t| matches!(t.token, Token::SemiColon))
+        .map(|t| (t.span.start.line, t.span.start.column))
+        .collect();
+
+    if semi_locs.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(semi_locs.len());
+    let mut line: u64 = 1;
+    let mut col: u64 = 1;
+    for (char_idx, ch) in buffer.chars().enumerate() {
+        if semi_locs.contains(&(line, col)) {
+            out.push(char_idx);
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    out
 }
 
 fn leading_whitespace(chars: &[char]) -> usize {
@@ -418,6 +478,70 @@ mod tests {
         let mut state = EditorState::new(Lines::from(buffer));
         state.cursor = Index2::new(row, col);
         state
+    }
+
+    #[test]
+    fn statement_under_cursor_handles_string_with_semicolon() {
+        // The naive splitter cut the buffer at the ';' inside the
+        // string literal. The lexer keeps the string intact.
+        let state = state_with("SELECT ';'; SELECT 1;", 0, 3);
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "SELECT ';'");
+    }
+
+    #[test]
+    fn statement_under_cursor_handles_line_comment() {
+        // `;` inside a `--` comment doesn't terminate the
+        // statement that begins after the newline.
+        let state = state_with("-- a; b\nSELECT 1;", 1, 2);
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "-- a; b\nSELECT 1");
+    }
+
+    #[test]
+    fn statement_under_cursor_handles_block_comment() {
+        let state = state_with("/* x; y */ SELECT 1;", 0, 14);
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "/* x; y */ SELECT 1");
+    }
+
+    #[test]
+    fn statement_under_cursor_handles_quoted_identifier() {
+        // Backtick quoting (MySQL flavour). The `;` inside the
+        // identifier no longer terminates the statement.
+        let state = state_with("SELECT `col;name` FROM t;", 0, 8);
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "SELECT `col;name` FROM t");
+    }
+
+    #[test]
+    fn statement_under_cursor_handles_double_quoted_identifier() {
+        // Postgres / SQLite use `"..."` for identifiers; `;` inside
+        // is still part of the name, not a terminator.
+        let state = state_with("SELECT \"col;name\" FROM t;", 0, 8);
+        let range = statement_under_cursor(&state).expect("statement");
+        assert_eq!(range.text, "SELECT \"col;name\" FROM t");
+    }
+
+    #[test]
+    fn statement_under_cursor_falls_back_on_tokenizer_error() {
+        // Unterminated string — tokenizer errors, fallback kicks in.
+        // We don't promise correctness on this buffer (the naive
+        // scan still mis-splits the string), only that we don't
+        // freeze: a statement comes back, the editor stays
+        // responsive.
+        let state = state_with("SELECT 'unterminated", 0, 5);
+        let _ = statement_under_cursor(&state); // must not panic
+    }
+
+    #[test]
+    fn current_statement_with_cursor_handles_string_with_semicolon() {
+        // The autocomplete classifier uses this entry point — same
+        // lexer-awareness applies, so `WHERE x = ';' AND |` doesn't
+        // get clipped at the literal's `;`.
+        let state = state_with("SELECT * FROM t WHERE x = ';' AND y = 1;", 0, 35);
+        let cur = current_statement_with_cursor(&state);
+        assert_eq!(cur.statement, "SELECT * FROM t WHERE x = ';' AND y = 1");
     }
 
     #[test]
