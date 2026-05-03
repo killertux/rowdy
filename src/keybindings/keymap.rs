@@ -252,6 +252,7 @@ const DEFAULTS: &[(Context, &str, BindableAction)] = &[
     (Context::Leader, "t", BindableAction::ToggleTheme),
     (Context::Leader, "S", BindableAction::SetRightPanelSchema),
     (Context::Leader, "C", BindableAction::SetRightPanelChat),
+    (Context::Leader, "n", BindableAction::SessionNext),
     // --- Schema panel ---
     (Context::Schema, "j", BindableAction::SchemaDown),
     (Context::Schema, "k", BindableAction::SchemaUp),

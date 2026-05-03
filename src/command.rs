@@ -42,6 +42,7 @@ pub enum Command {
     Source,
     Conn(ConnSubcommand),
     Chat(ChatSubcommand),
+    Session(SessionSubcommand),
     /// `:update` — manual check against the GitHub release API,
     /// independent of the 24h startup throttle and any prior
     /// dismissal. Newer release → standard "y/n" prompt; same
@@ -89,6 +90,20 @@ pub enum ConnSubcommand {
     Edit(String),
     Delete(String),
     Use(String),
+}
+
+/// `:session` subcommands. Bare `:session` and `:session list` are
+/// the same — show the current set in the bottom bar. `Switch(N)`
+/// is the bare-numeric form `:session 2`; `Delete(N)` is
+/// `:session delete 1`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionSubcommand {
+    List,
+    Next,
+    Prev,
+    New,
+    Switch(usize),
+    Delete(usize),
 }
 
 /// Path target as parsed — `~` / `~/` is **not** expanded here so the
@@ -263,6 +278,37 @@ pub static COMMAND_TREE: &[CommandSpec] = &[
         ],
     },
     CommandSpec {
+        name: "session",
+        aliases: &["sess"],
+        children: &[
+            CommandSpec {
+                name: "list",
+                aliases: &["ls"],
+                children: &[],
+            },
+            CommandSpec {
+                name: "next",
+                aliases: &[],
+                children: &[],
+            },
+            CommandSpec {
+                name: "prev",
+                aliases: &[],
+                children: &[],
+            },
+            CommandSpec {
+                name: "new",
+                aliases: &[],
+                children: &[],
+            },
+            CommandSpec {
+                name: "delete",
+                aliases: &["rm"],
+                children: &[],
+            },
+        ],
+    },
+    CommandSpec {
         name: "update",
         aliases: &[],
         children: &[],
@@ -294,6 +340,7 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
         "source" => Command::Source,
         "conn" | "conns" => Command::Conn(parse_conn(&args)?),
         "chat" => Command::Chat(parse_chat(&args)?),
+        "session" | "sess" => Command::Session(parse_session(&args)?),
         "update" => Command::Update,
         _ => return Err(format!("unknown command: {cmd}")),
     };
@@ -365,6 +412,46 @@ fn parse_target(rest: &[&str]) -> Result<ParsedTarget, String> {
         Some(">") if rest.len() == 1 => return Err("missing path after `>`".into()),
         Some(">") => ParsedTarget::File(rest[1..].join(" ")),
         Some(_) => ParsedTarget::File(rest.join(" ")),
+    })
+}
+
+fn parse_session(args: &[&str]) -> Result<SessionSubcommand, String> {
+    let Some(first) = args.first().copied() else {
+        return Ok(SessionSubcommand::List);
+    };
+    // Bare numeric subcommand: `:session 2` → Switch(2).
+    if let Ok(n) = first.parse::<usize>() {
+        // Reject extra args after a numeric subcommand to keep the
+        // grammar predictable — `:session 2 garbage` is most likely
+        // a typo, not a feature request.
+        if args.len() > 1 {
+            return Err(format!(
+                "unexpected args after :session {n}: {}",
+                args[1..].join(" ")
+            ));
+        }
+        return Ok(SessionSubcommand::Switch(n));
+    }
+    Ok(match first {
+        "list" | "ls" => SessionSubcommand::List,
+        "next" => SessionSubcommand::Next,
+        "prev" | "previous" => SessionSubcommand::Prev,
+        "new" => SessionSubcommand::New,
+        "delete" | "rm" => {
+            let n_str = args
+                .get(1)
+                .copied()
+                .ok_or_else(|| "usage: :session delete <index>".to_string())?;
+            let n: usize = n_str.parse().map_err(|_| {
+                format!("invalid session index: {n_str} (usage: :session delete <index>)")
+            })?;
+            SessionSubcommand::Delete(n)
+        }
+        other => {
+            return Err(format!(
+                "unknown :session subcommand: {other} (use list/next/prev/new/<index>/delete <index>)"
+            ));
+        }
     })
 }
 
@@ -750,6 +837,82 @@ mod tests {
             parse("chat config"),
             Ok(Some(Command::Chat(ChatSubcommand::Settings)))
         );
+    }
+
+    #[test]
+    fn session_bare_is_list() {
+        assert_eq!(
+            parse("session"),
+            Ok(Some(Command::Session(SessionSubcommand::List)))
+        );
+        assert_eq!(
+            parse("sess"),
+            Ok(Some(Command::Session(SessionSubcommand::List)))
+        );
+        assert_eq!(
+            parse("session list"),
+            Ok(Some(Command::Session(SessionSubcommand::List)))
+        );
+        assert_eq!(
+            parse("session ls"),
+            Ok(Some(Command::Session(SessionSubcommand::List)))
+        );
+    }
+
+    #[test]
+    fn session_named_subcommands() {
+        assert_eq!(
+            parse("session next"),
+            Ok(Some(Command::Session(SessionSubcommand::Next)))
+        );
+        assert_eq!(
+            parse("session prev"),
+            Ok(Some(Command::Session(SessionSubcommand::Prev)))
+        );
+        assert_eq!(
+            parse("session previous"),
+            Ok(Some(Command::Session(SessionSubcommand::Prev)))
+        );
+        assert_eq!(
+            parse("session new"),
+            Ok(Some(Command::Session(SessionSubcommand::New)))
+        );
+    }
+
+    #[test]
+    fn session_numeric_subcommand_is_switch() {
+        assert_eq!(
+            parse("session 0"),
+            Ok(Some(Command::Session(SessionSubcommand::Switch(0))))
+        );
+        assert_eq!(
+            parse("session 7"),
+            Ok(Some(Command::Session(SessionSubcommand::Switch(7))))
+        );
+    }
+
+    #[test]
+    fn session_numeric_with_extra_args_errors() {
+        assert!(matches!(parse("session 2 garbage"), Err(msg) if msg.contains("unexpected args")));
+    }
+
+    #[test]
+    fn session_delete_requires_index() {
+        assert_eq!(
+            parse("session delete 1"),
+            Ok(Some(Command::Session(SessionSubcommand::Delete(1))))
+        );
+        assert_eq!(
+            parse("session rm 2"),
+            Ok(Some(Command::Session(SessionSubcommand::Delete(2))))
+        );
+        assert!(matches!(parse("session delete"), Err(msg) if msg.contains("usage:")));
+        assert!(matches!(parse("session delete foo"), Err(msg) if msg.contains("invalid")));
+    }
+
+    #[test]
+    fn session_unknown_subcommand_errors() {
+        assert!(matches!(parse("session yikes"), Err(msg) if msg.contains("unknown")));
     }
 
     #[test]

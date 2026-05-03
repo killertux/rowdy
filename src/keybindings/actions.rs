@@ -36,6 +36,11 @@ pub enum BindableAction {
     ToggleTheme,
     SetRightPanelSchema,
     SetRightPanelChat,
+    /// `<Space>n` cycles to the next per-connection editor session.
+    /// Other `:session` subcommands stay command-only — keep the
+    /// keybinding surface conservative and let users add their own
+    /// chord overrides if they want.
+    SessionNext,
 
     // Schema panel.
     SchemaUp,
@@ -87,6 +92,7 @@ impl BindableAction {
             "toggle-theme" => Self::ToggleTheme,
             "set-right-panel-schema" => Self::SetRightPanelSchema,
             "set-right-panel-chat" => Self::SetRightPanelChat,
+            "next-session" => Self::SessionNext,
 
             "schema-up" => Self::SchemaUp,
             "schema-down" => Self::SchemaDown,
@@ -135,6 +141,7 @@ impl BindableAction {
             Self::ToggleTheme => "toggle-theme",
             Self::SetRightPanelSchema => "set-right-panel-schema",
             Self::SetRightPanelChat => "set-right-panel-chat",
+            Self::SessionNext => "next-session",
 
             Self::SchemaUp => "schema-up",
             Self::SchemaDown => "schema-down",
@@ -180,6 +187,7 @@ impl BindableAction {
             Self::ToggleTheme,
             Self::SetRightPanelSchema,
             Self::SetRightPanelChat,
+            Self::SessionNext,
             Self::SchemaUp,
             Self::SchemaDown,
             Self::SchemaCollapseOrAscend,
@@ -226,6 +234,7 @@ impl BindableAction {
             Self::ToggleTheme => "Toggle Dark / Light theme",
             Self::SetRightPanelSchema => "Switch right panel to schema (and focus it)",
             Self::SetRightPanelChat => "Switch right panel to chat (and focus it)",
+            Self::SessionNext => "Cycle to the next per-connection editor session",
             Self::SchemaUp => "Schema: move selection up",
             Self::SchemaDown => "Schema: move selection down",
             Self::SchemaCollapseOrAscend => "Schema: collapse node or move to parent",
@@ -296,6 +305,7 @@ impl BindableAction {
             Self::ToggleTheme => Action::ToggleTheme,
             Self::SetRightPanelSchema => Action::SetRightPanel(RightPanelMode::Schema),
             Self::SetRightPanelChat => Action::SetRightPanel(RightPanelMode::Chat),
+            Self::SessionNext => Action::Session(crate::action::SessionAction::Next),
 
             Self::SchemaUp => Action::Schema(crate::action::SchemaAction::Up),
             Self::SchemaDown => Action::Schema(crate::action::SchemaAction::Down),

@@ -129,6 +129,10 @@ pub enum Action {
     SetRightPanel(RightPanelMode),
     /// `:chat settings` modal interactions.
     LlmSettings(LlmSettingsAction),
+    /// Editor-session lifecycle: `<Space>n` cycles to the next
+    /// session; `:session new`/`prev`/`next`/`<N>`/`delete <N>` route
+    /// through this same enum.
+    Session(SessionAction),
     /// User pressed `y`/`Y`/`Enter` on an `Overlay::ConfirmToolUse`
     /// prompt — run the paused fs read tool.
     ToolApproveAccept,
@@ -316,6 +320,24 @@ pub enum CommandAction {
     CompletionAccept,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SessionAction {
+    /// Print "sessions: 0, 1 (active 0)" to the bottom bar.
+    List,
+    /// Cycle to the next index in `app.session_indices`, wrapping.
+    Next,
+    /// Cycle to the previous index, wrapping.
+    Prev,
+    /// Pick the lowest unused index, create the file, switch to it.
+    New,
+    /// Switch to a specific index. Refuses on out-of-range.
+    Switch(usize),
+    /// Delete the file at `index`. Refuses on the only remaining
+    /// session; if the active one is deleted, falls back to the
+    /// previous index in the list.
+    Delete(usize),
+}
+
 #[derive(Debug)]
 pub enum SchemaAction {
     Down,
@@ -437,6 +459,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::ToggleRightPanel => chat::toggle_right_panel(app),
         Action::SetRightPanel(mode) => chat::set_right_panel(app, mode),
         Action::LlmSettings(a) => llm_settings::apply(app, a),
+        Action::Session(s) => dispatch_session(app, s),
         Action::ToolApproveAccept => chat::on_tool_approve_accept(app),
         Action::ToolApproveDeny => chat::on_tool_approve_deny(app),
     }
@@ -853,7 +876,24 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         C::Source => apply(app, Action::Source),
         C::Conn(sub) => dispatch_conn(app, sub),
         C::Chat(sub) => dispatch_chat(app, sub),
+        C::Session(sub) => apply(app, Action::Session(session_subcommand_to_action(sub))),
         C::Update => apply(app, Action::CheckForUpdate),
+    }
+}
+
+/// `:session …` ↔ `Action::Session(...)` translation. Keeps the
+/// command parser independent of `SessionAction` (which lives next
+/// to the dispatcher) so adding a new subcommand only touches
+/// `command.rs` + this conversion + the dispatcher.
+fn session_subcommand_to_action(sub: command::SessionSubcommand) -> SessionAction {
+    use command::SessionSubcommand as S;
+    match sub {
+        S::List => SessionAction::List,
+        S::Next => SessionAction::Next,
+        S::Prev => SessionAction::Prev,
+        S::New => SessionAction::New,
+        S::Switch(n) => SessionAction::Switch(n),
+        S::Delete(n) => SessionAction::Delete(n),
     }
 }
 
@@ -1550,7 +1590,11 @@ fn on_connected(app: &mut App, name: String) {
     // and re-fire the catalog load.
     app.schema = SchemaPanel::new(app.schema.width);
     app.results.clear();
-    load_session(app, &name);
+    app.session_indices = session::list_indices(&app.data_dir, &name);
+    // `list_indices` always returns at least `[0]`, so the unwrap-by-index
+    // is safe; default to session 0 on connect.
+    app.active_session_index = app.session_indices[0];
+    load_session(app, &name, app.active_session_index);
     load_chat_session(app, &name);
     app.schema.begin_root_load();
     let _ = app.cmd_tx.send(WorkerCommand::Introspect {
@@ -2304,8 +2348,9 @@ pub(super) fn schedule_session_save(app: &mut App) {
     app.pending_save_at = Some(tokio::time::Instant::now() + SESSION_DEBOUNCE);
 }
 
-/// Write the current editor buffer to the active connection's session
-/// file. Best-effort: failures are logged and swallowed so a flaky disk
+/// Write the current editor buffer to the active connection's
+/// active session file (`session_<active_session_index>.sql`).
+/// Best-effort: failures are logged and swallowed so a flaky disk
 /// can't break the editor.
 pub(crate) fn flush_session(app: &mut App) {
     let Some(name) = app.active_connection.clone() else {
@@ -2313,7 +2358,7 @@ pub(crate) fn flush_session(app: &mut App) {
         app.pending_save_at = None;
         return;
     };
-    let path = session::path_for(&app.data_dir, &name);
+    let path = session::path_for(&app.data_dir, &name, app.active_session_index);
     let text = app.editor.text();
     match session::save(&path, &text) {
         Ok(()) => app.log.info("session", format!("saved {}", path.display())),
@@ -2325,11 +2370,173 @@ pub(crate) fn flush_session(app: &mut App) {
     app.pending_save_at = None;
 }
 
-/// Load the session for `name` into the editor. Treats a missing file as
-/// an empty buffer — first save will create it. Resets the dirty/timer
-/// state so the load itself doesn't trigger another save.
-fn load_session(app: &mut App, name: &str) {
-    let path = session::path_for(&app.data_dir, name);
+/// Route a `SessionAction` against the active connection. No-ops with a
+/// status notice when there's no connection — the editor isn't
+/// reachable in those modes, but the early return keeps an
+/// accidentally-bound `<Space>n` from silently doing nothing.
+fn dispatch_session(app: &mut App, action: SessionAction) {
+    let Some(name) = app.active_connection.clone() else {
+        app.status = QueryStatus::Failed {
+            error: "no active connection".into(),
+        };
+        return;
+    };
+    match action {
+        SessionAction::List => session_list_status(app),
+        SessionAction::Next => session_switch_relative(app, &name, 1),
+        SessionAction::Prev => session_switch_relative(app, &name, -1),
+        SessionAction::New => session_create_and_switch(app, &name),
+        SessionAction::Switch(n) => session_switch_to_index(app, &name, n),
+        SessionAction::Delete(n) => session_delete(app, &name, n),
+    }
+}
+
+fn session_list_status(app: &mut App) {
+    let list: Vec<String> = app.session_indices.iter().map(usize::to_string).collect();
+    app.status = QueryStatus::Notice {
+        msg: format!(
+            "sessions: {} (active {})",
+            list.join(", "),
+            app.active_session_index
+        ),
+    };
+}
+
+fn session_switch_relative(app: &mut App, name: &str, delta: i32) {
+    if app.session_indices.len() < 2 {
+        app.status = QueryStatus::Notice {
+            msg: format!(
+                "only one session ({}) — use `:session new` to create another",
+                app.active_session_index
+            ),
+        };
+        return;
+    }
+    let pos = app
+        .session_indices
+        .iter()
+        .position(|&i| i == app.active_session_index)
+        .unwrap_or(0) as i32;
+    let len = app.session_indices.len() as i32;
+    let next_pos = (pos + delta).rem_euclid(len) as usize;
+    let target = app.session_indices[next_pos];
+    session_switch_to_existing(app, name, target);
+}
+
+fn session_create_and_switch(app: &mut App, name: &str) {
+    let new_index = session::next_free_index(&app.session_indices);
+    // Touch the new file so subsequent `list_indices` calls (and any
+    // external `ls`) see it. An empty session file round-trips
+    // through `load` as an empty buffer.
+    let path = session::path_for(&app.data_dir, name, new_index);
+    if let Err(err) = session::save(&path, "") {
+        app.log.warn(
+            "session",
+            format!("create {} failed: {err}", path.display()),
+        );
+        app.status = QueryStatus::Failed {
+            error: format!("create session {new_index} failed: {err}"),
+        };
+        return;
+    }
+    flush_session(app);
+    app.session_indices.push(new_index);
+    app.session_indices.sort_unstable();
+    app.active_session_index = new_index;
+    load_session(app, name, new_index);
+    app.status = QueryStatus::Notice {
+        msg: format!("created session {new_index}"),
+    };
+}
+
+fn session_switch_to_index(app: &mut App, name: &str, target: usize) {
+    if !app.session_indices.contains(&target) {
+        app.status = QueryStatus::Failed {
+            error: format!(
+                "no session {target} (existing: {})",
+                app.session_indices
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        return;
+    }
+    if target == app.active_session_index {
+        // No-op switches still refresh the indicator so the user
+        // gets a confirmation of where they are.
+        app.status = QueryStatus::Notice {
+            msg: format!("session {target} (already active)"),
+        };
+        return;
+    }
+    session_switch_to_existing(app, name, target);
+}
+
+fn session_switch_to_existing(app: &mut App, name: &str, target: usize) {
+    flush_session(app);
+    app.active_session_index = target;
+    load_session(app, name, target);
+    app.status = QueryStatus::Notice {
+        msg: format!("switched to session {target}"),
+    };
+}
+
+fn session_delete(app: &mut App, name: &str, target: usize) {
+    if !app.session_indices.contains(&target) {
+        app.status = QueryStatus::Failed {
+            error: format!("no session {target} to delete"),
+        };
+        return;
+    }
+    if app.session_indices.len() == 1 {
+        app.status = QueryStatus::Failed {
+            error: "can't delete the only remaining session".into(),
+        };
+        return;
+    }
+    let active_being_deleted = app.active_session_index == target;
+    if let Err(err) = session::delete(&app.data_dir, name, target) {
+        app.log
+            .warn("session", format!("delete {target} failed: {err}"));
+        app.status = QueryStatus::Failed {
+            error: format!("delete session {target} failed: {err}"),
+        };
+        return;
+    }
+    app.session_indices.retain(|&i| i != target);
+    if active_being_deleted {
+        // The buffer the user was editing belonged to the deleted
+        // file — discard it (deliberately *not* flushing) and load
+        // the previous index in the list. `session_indices` is
+        // guaranteed non-empty here because we refused on len==1.
+        let fallback = app
+            .session_indices
+            .iter()
+            .copied()
+            .rev()
+            .find(|&i| i < target)
+            .unwrap_or(app.session_indices[0]);
+        // Suppress the pending debounced save for the just-killed
+        // index — without this clear the next tick would re-write
+        // the file we just deleted.
+        app.editor_dirty = false;
+        app.pending_save_at = None;
+        app.active_session_index = fallback;
+        load_session(app, name, fallback);
+    }
+    app.status = QueryStatus::Notice {
+        msg: format!("deleted session {target}"),
+    };
+}
+
+/// Load the session at `index` for `name` into the editor. Treats a
+/// missing file as an empty buffer — first save will create it.
+/// Resets the dirty/timer state so the load itself doesn't trigger
+/// another save.
+fn load_session(app: &mut App, name: &str, index: usize) {
+    let path = session::path_for(&app.data_dir, name, index);
     match session::load(&path) {
         Ok(text) => {
             app.editor.replace_text(&text);
