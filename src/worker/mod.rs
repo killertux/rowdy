@@ -130,12 +130,16 @@ pub enum WorkerEvent {
     /// `tokio::task::spawn_blocking`). The spawned task already replied
     /// to the LLM oneshot — this event exists purely to update the
     /// chat panel's tool-result block from the main loop, which owns
-    /// `app.chat`.
+    /// `app.chat`. `agents_md_loaded` carries the relative-path
+    /// headers (e.g. `src/llm/AGENTS.md`) of any AGENTS.md files the
+    /// fs tool's directory walk discovered, so the main loop can
+    /// surface a per-load chat notice.
     ChatFsToolDone {
         call_id: String,
         name: String,
         display: String,
         error: Option<String>,
+        agents_md_loaded: Vec<String>,
     },
     /// Background update check found a newer release. UI shows the
     /// "y/n" prompt.

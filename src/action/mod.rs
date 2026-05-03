@@ -786,13 +786,26 @@ fn apply_source(app: &mut App) {
     app.user_config = new_user;
     app.keymap = new_keymap;
 
-    // Re-read AGENTS.md from the project tree so edits to project
-    // conventions land in the next chat turn without a restart. Loaded
-    // *after* the configs above so a fresh `app.log` clone isn't
-    // strictly required — `agents_md::load` only borrows.
-    let new_agents_md = crate::llm::agents_md::load(&app.project_root, &app.log);
-    let agents_md_loaded = new_agents_md.is_some();
-    app.agents_md = new_agents_md;
+    // Reset the AGENTS.md cache and re-seed against `project_root`.
+    // Subdirectory AGENTS.md files discovered earlier this session
+    // are dropped — they'll be re-loaded the next time the agent
+    // reads from those subdirs. Only the root file is checked here
+    // since `:source` is a "reset point" and we don't walk anywhere
+    // else proactively. Each freshly-loaded file gets a system-role
+    // notice in the chat history so the user sees confirmation
+    // alongside the existing status-line token.
+    let newly_loaded = {
+        let mut cache = app.agents_md.write().unwrap();
+        cache.clear();
+        cache.seed_root(&app.project_root, &app.log)
+    };
+    for path in &newly_loaded {
+        app.chat
+            .push_message(crate::state::chat::ChatMessage::system_text(format!(
+                "Loaded AGENTS.md ({path})"
+            )));
+    }
+    let agents_md_loaded = !newly_loaded.is_empty();
 
     app.status = match keymap_err {
         Some(err) => QueryStatus::Failed { error: err },
@@ -1346,7 +1359,8 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
             name,
             display,
             error,
-        } => chat::on_fs_tool_done(app, call_id, name, display, error),
+            agents_md_loaded,
+        } => chat::on_fs_tool_done(app, call_id, name, display, error, agents_md_loaded),
         WorkerEvent::UpdateAvailable { current, latest } => {
             on_update_available(app, current, latest)
         }
