@@ -236,6 +236,14 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 desc: "Switch right panel to chat (and focus it)",
             },
             HelpEntry {
+                keys: "<Space> n",
+                desc: "Cycle to the next per-connection editor session",
+            },
+            HelpEntry {
+                keys: "<Space> Shift+1..9",
+                desc: "Jump straight to session 1..9 — US-shifted digits ! @ # $ % ^ & * (",
+            },
+            HelpEntry {
                 keys: "=",
                 desc: "Format the statement under the cursor (or Visual selection)",
             },
@@ -681,6 +689,26 @@ const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 keys: ":conn use <name>",
                 desc: "Switch active connection",
+            },
+            HelpEntry {
+                keys: ":session, :session list",
+                desc: "Show the connection's session indices and the active one",
+            },
+            HelpEntry {
+                keys: ":session next, :session prev",
+                desc: "Cycle through the connection's sessions (<Space> n does next)",
+            },
+            HelpEntry {
+                keys: ":session new",
+                desc: "Create a fresh session at the lowest unused index and switch to it",
+            },
+            HelpEntry {
+                keys: ":session <N>",
+                desc: "Switch to session <N> (must already exist)",
+            },
+            HelpEntry {
+                keys: ":session delete <N>",
+                desc: "Delete session <N> (refuses if it's the only remaining one)",
             },
             HelpEntry {
                 keys: ":update",
