@@ -233,6 +233,7 @@ Rebind chords *under* them (e.g. `<Space>r`) instead.
 | `leader`          | `set-right-panel-schema`        | Switch right panel to schema (and focus)                   |
 | `leader`          | `set-right-panel-chat`          | Switch right panel to chat (and focus)                     |
 | `leader`          | `next-session`                  | Cycle to the next per-connection editor session            |
+| `leader`          | `session-switch-1` … `-9`       | Jump straight to session N (default chord: `<Space>` then the shifted digit `!@#$%^&*(`) |
 | `schema`          | `schema-up` / `schema-down`     | Move selection                                             |
 | `schema`          | `schema-collapse-or-ascend`     | Collapse node or ascend                                    |
 | `schema`          | `schema-expand-or-descend`      | Expand node or descend                                     |
@@ -428,6 +429,7 @@ normal mode. Not in any insert mode (Esc out first).
 | `<Space> S` | Switch right panel to schema (and focus it)                      |
 | `<Space> C` | Switch right panel to chat (and focus it, in normal mode)        |
 | `<Space> n` | Cycle to the next per-connection editor session                  |
+| `<Space> Shift+1`…`<Space> Shift+9` | Switch directly to session 1…9 (US layout: `<Space> !` … `<Space> (`) |
 | `=`         | Format SQL (Visual: selection; Normal: whole buffer)             |
 | `Ctrl+Space`| Open SQL autocomplete popover (works in any editor mode)         |
 
