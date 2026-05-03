@@ -58,18 +58,24 @@ pub enum CompletionContext {
 
 /// What a `<qualifier>.<partial>` resolves to: a specific
 /// `(catalog, schema, table)` triple that the engine can look up in
-/// the column cache. CTE bindings are tagged so the engine can route
-/// them differently (column completion against a CTE returns nothing
-/// until we parse the CTE body).
+/// the column cache. CTE / derived-table bindings can carry their
+/// own synthesised column list, short-circuiting the cache lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableBinding {
     pub catalog: String,
     pub schema: String,
     pub table: String,
-    /// `true` for `WITH <name> AS (…)` bindings. Phase 4 surfaces
-    /// these as CTE table candidates; column completion against them
-    /// returns empty pending Phase 5 (parse the CTE body).
+    /// `true` for `WITH <name> AS (…)` bindings. CTE names surface in
+    /// table-context completions even when no columns can be
+    /// extracted from the body.
     pub is_cte: bool,
+    /// Column names parsed out of a CTE / derived-table body. When
+    /// `Some`, the engine emits these directly instead of consulting
+    /// the schema cache. `None` is the default for base-table
+    /// bindings and for bodies whose projection couldn't be reduced
+    /// to a name list (e.g. `SELECT *`, complex expressions without
+    /// an `AS` alias).
+    pub synthetic_columns: Option<Vec<String>>,
 }
 
 impl TableBinding {
@@ -295,6 +301,46 @@ fn collect_bindings(
         }
         i += 1;
         skip_trivia(&toks, &mut i);
+        // Derived table: `FROM ( SELECT … ) [AS] alias`. The body's
+        // projection becomes the binding's synthetic_columns; the
+        // alias is the binding key.
+        if matches!(toks.get(i), Some(Token::LParen)) {
+            let body_start = i + 1;
+            if !skip_balanced_parens(&toks, &mut i) {
+                continue;
+            }
+            let body_end = i.saturating_sub(1);
+            let synthetic_columns = extract_projection_columns(&toks[body_start..body_end]);
+            skip_trivia(&toks, &mut i);
+            if let Some(Token::Word(w)) = toks.get(i)
+                && w.keyword == Keyword::AS
+            {
+                i += 1;
+                skip_trivia(&toks, &mut i);
+            }
+            // Derived tables MUST be aliased. If they're not, drop
+            // the body silently — the SQL is malformed and there's
+            // no qualifier the user could type to access it.
+            let Some(Token::Word(alias_word)) = toks.get(i) else {
+                continue;
+            };
+            if is_table_terminator(alias_word) {
+                continue;
+            }
+            let alias = alias_word.value.clone();
+            i += 1;
+            out.insert(
+                alias.clone(),
+                TableBinding {
+                    catalog: String::new(),
+                    schema: String::new(),
+                    table: alias,
+                    is_cte: false,
+                    synthetic_columns: Some(synthetic_columns),
+                },
+            );
+            continue;
+        }
         let Some(parts) = take_dotted_ident(&toks, &mut i) else {
             continue;
         };
@@ -396,10 +442,24 @@ fn collect_cte_bindings(toks: &[&Token], out: &mut HashMap<String, TableBinding>
                 i += 1;
                 skip_trivia(toks, &mut i);
             }
-            // Body — must be a parenthesised SELECT. Skip past it.
-            if matches!(toks.get(i), Some(Token::LParen)) && !skip_balanced_parens(toks, &mut i) {
-                break;
-            }
+            // Body — must be a parenthesised SELECT. Capture the
+            // inner-token slice so we can extract the projection's
+            // column names; if the parens don't balance (mid-typing
+            // CTE) treat the body as opaque and let the binding
+            // surface with no columns.
+            let synthetic_columns = if matches!(toks.get(i), Some(Token::LParen)) {
+                let body_start = i + 1;
+                if !skip_balanced_parens(toks, &mut i) {
+                    None
+                } else {
+                    // `i` now points one past the matching RParen.
+                    // The body slice excludes both parens.
+                    let body_end = i.saturating_sub(1);
+                    Some(extract_projection_columns(&toks[body_start..body_end]))
+                }
+            } else {
+                None
+            };
             out.insert(
                 name.clone(),
                 TableBinding {
@@ -407,6 +467,7 @@ fn collect_cte_bindings(toks: &[&Token], out: &mut HashMap<String, TableBinding>
                     schema: String::new(),
                     table: name,
                     is_cte: true,
+                    synthetic_columns,
                 },
             );
             skip_trivia(toks, &mut i);
@@ -419,6 +480,170 @@ fn collect_cte_bindings(toks: &[&Token], out: &mut HashMap<String, TableBinding>
             break;
         }
     }
+}
+
+/// Pull surface-level column names out of a CTE / derived-table
+/// body (the tokens *between* the body's parens). Handles the
+/// common shapes:
+///
+/// - `col` and `t.col` → produces `"col"`.
+/// - `<anything> AS alias` → produces `"alias"` (lets us cope with
+///   `COUNT(*) AS n`, `(a + b) AS sum`, etc.).
+/// - Bare expressions without `AS` (e.g. `COUNT(*)`, `a + b`) — the
+///   item is dropped from the column list. The user gets completions
+///   for the well-named columns and nothing for the computed ones.
+/// - `*` and `t.*` — currently dropped; `SELECT *` recursion lives
+///   behind the README's follow-up "smaller follow-ups" line and
+///   isn't implemented here.
+///
+/// Set ops (`UNION`/`INTERSECT`/`EXCEPT`) bail early — resolving
+/// union shapes is out of scope for this pass. The returned list
+/// may be empty (engine treats that as "we recognised the body but
+/// have no columns to surface").
+fn extract_projection_columns(tokens: &[&Token]) -> Vec<String> {
+    let mut i = 0;
+    skip_trivia(tokens, &mut i);
+
+    // Optional WITH on the inner body — bail; nested CTEs in a
+    // derived-table body push us past Phase 2's scope.
+    if let Some(Token::Word(w)) = tokens.get(i)
+        && w.keyword == Keyword::WITH
+    {
+        return Vec::new();
+    }
+
+    // Optional SELECT [DISTINCT|ALL].
+    if let Some(Token::Word(w)) = tokens.get(i)
+        && w.keyword == Keyword::SELECT
+    {
+        i += 1;
+        skip_trivia(tokens, &mut i);
+        if let Some(Token::Word(w)) = tokens.get(i)
+            && matches!(w.keyword, Keyword::DISTINCT | Keyword::ALL)
+        {
+            i += 1;
+            skip_trivia(tokens, &mut i);
+        }
+    }
+
+    let mut cols: Vec<String> = Vec::new();
+    loop {
+        skip_trivia(tokens, &mut i);
+        if i >= tokens.len() {
+            break;
+        }
+        // FROM closes the projection list. So does any set-op
+        // keyword (UNION/INTERSECT/EXCEPT) — emit whatever we
+        // already collected up to that point and bail.
+        if let Token::Word(w) = tokens[i] {
+            if w.keyword == Keyword::FROM {
+                break;
+            }
+            if matches!(
+                w.keyword,
+                Keyword::UNION | Keyword::INTERSECT | Keyword::EXCEPT
+            ) {
+                return Vec::new();
+            }
+        }
+        let item_start = i;
+        let mut depth: u32 = 0;
+        while i < tokens.len() {
+            match tokens[i] {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                Token::Comma if depth == 0 => break,
+                Token::Word(w)
+                    if depth == 0
+                        && matches!(
+                            w.keyword,
+                            Keyword::FROM | Keyword::UNION | Keyword::INTERSECT | Keyword::EXCEPT
+                        ) =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        if let Some(name) = projection_item_name(&tokens[item_start..i]) {
+            cols.push(name);
+        }
+        if matches!(tokens.get(i), Some(Token::Comma)) {
+            i += 1;
+        } else {
+            // We stopped at FROM / set-op / end — outer loop will
+            // re-evaluate and exit cleanly.
+            continue;
+        }
+    }
+    cols
+}
+
+/// Reduce a single projection item (the slice between commas) to its
+/// produced column name, or `None` for items we can't classify (bare
+/// expressions, wildcards).
+fn projection_item_name(item: &[&Token]) -> Option<String> {
+    // Trim leading/trailing trivia.
+    let mut start = 0;
+    while start < item.len() && is_trivia(item[start]) {
+        start += 1;
+    }
+    let mut end = item.len();
+    while end > start && is_trivia(item[end - 1]) {
+        end -= 1;
+    }
+    let item = &item[start..end];
+    if item.is_empty() {
+        return None;
+    }
+
+    // Trailing `AS <word>` wins regardless of what came before — the
+    // alias is what the user references.
+    if item.len() >= 3 {
+        let last = item.len() - 1;
+        let mut prev = last;
+        // Skip trivia between the alias and `AS`.
+        if prev > 0 {
+            let mut p = prev - 1;
+            while p > 0 && is_trivia(item[p]) {
+                p -= 1;
+            }
+            prev = p;
+        }
+        if let (Token::Word(alias), Token::Word(kw)) = (item[last], item[prev])
+            && kw.keyword == Keyword::AS
+        {
+            return Some(alias.value.clone());
+        }
+    }
+
+    // Pure bare or dotted identifier: `col`, `t.col`, `c.s.t.col`.
+    // Anything else (operators, function calls, parens, asterisks)
+    // disqualifies — needs an `AS` alias to surface.
+    if is_dotted_identifier_only(item) {
+        if let Token::Word(last_word) = item[item.len() - 1] {
+            return Some(last_word.value.clone());
+        }
+    }
+    None
+}
+
+fn is_dotted_identifier_only(item: &[&Token]) -> bool {
+    let mut expect_word = true;
+    for t in item {
+        match t {
+            Token::Word(_) if expect_word => expect_word = false,
+            Token::Period if !expect_word => expect_word = true,
+            _ => return false,
+        }
+    }
+    !expect_word
 }
 
 fn skip_balanced_parens(toks: &[&Token], i: &mut usize) -> bool {
@@ -501,18 +726,21 @@ fn resolve_binding(parts: &[String], resolve: &ResolveContext) -> TableBinding {
             schema: default_schema,
             table: parts[0].clone(),
             is_cte: false,
+            synthetic_columns: None,
         },
         2 => TableBinding {
             catalog: default_catalog,
             schema: parts[0].clone(),
             table: parts[1].clone(),
             is_cte: false,
+            synthetic_columns: None,
         },
         _ => TableBinding {
             catalog: parts[0].clone(),
             schema: parts[1].clone(),
             table: parts[parts.len() - 1].clone(),
             is_cte: false,
+            synthetic_columns: None,
         },
     }
 }
@@ -796,6 +1024,166 @@ mod tests {
         assert_eq!(r.bindings.len(), 1);
         assert_eq!(r.bindings[0].table, "users");
         assert_eq!(r.context, CompletionContext::Column { qualifier: None });
+    }
+
+    #[test]
+    fn cte_body_synthesises_named_columns() {
+        let stmt = "WITH u AS (SELECT id, name FROM users) SELECT u.id FROM u";
+        let r = classify_at_end(stmt);
+        let cte = r
+            .bindings
+            .iter()
+            .find(|b| b.is_cte && b.table == "u")
+            .expect("CTE binding present");
+        assert_eq!(
+            cte.synthetic_columns.as_deref(),
+            Some(["id".to_string(), "name".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn cte_body_with_dotted_idents() {
+        let stmt = "WITH u AS (SELECT users.id, users.name FROM users) SELECT * FROM u";
+        let r = classify_at_end(stmt);
+        let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
+        assert_eq!(
+            cte.synthetic_columns.as_deref(),
+            Some(["id".to_string(), "name".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn cte_body_with_aliased_projection() {
+        let stmt = "WITH u AS (SELECT id AS uid, name AS uname FROM users) SELECT * FROM u";
+        let r = classify_at_end(stmt);
+        let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
+        assert_eq!(
+            cte.synthetic_columns.as_deref(),
+            Some(["uid".to_string(), "uname".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn cte_body_with_expression_alias() {
+        // `COUNT(*) AS n` and `(a + b) AS sum` both surface as the
+        // alias name. The bare expression is dropped silently.
+        let stmt = "WITH x AS (SELECT id, COUNT(*) AS n, foo + 1 AS bumped FROM t) SELECT * FROM x";
+        let r = classify_at_end(stmt);
+        let cte = r.bindings.iter().find(|b| b.table == "x").unwrap();
+        assert_eq!(
+            cte.synthetic_columns.as_deref(),
+            Some(["id".to_string(), "n".to_string(), "bumped".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn cte_body_with_select_star_yields_no_columns() {
+        // `SELECT *` recursion is deliberately deferred — empty list
+        // means "we recognised the body but couldn't extract names",
+        // and the engine emits no column hits.
+        let stmt = "WITH u AS (SELECT * FROM users) SELECT * FROM u";
+        let r = classify_at_end(stmt);
+        let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
+        assert_eq!(cte.synthetic_columns.as_deref(), Some([].as_slice()));
+    }
+
+    #[test]
+    fn cte_body_with_union_uses_first_legs_projection() {
+        // SQL requires both legs of a UNION to expose the same
+        // column shape, so the first leg's projection is the
+        // union's projection. We surface that without trying to
+        // reconcile the legs ourselves.
+        let stmt = "WITH u AS (SELECT id FROM a UNION SELECT id FROM b) SELECT * FROM u";
+        let r = classify_at_end(stmt);
+        let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
+        assert_eq!(
+            cte.synthetic_columns.as_deref(),
+            Some(["id".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn cte_qualifier_after_synthesis_resolves_to_cte() {
+        // Sanity check that the synthesised binding still routes
+        // through the qualifier classifier. The actual column list
+        // is consumed by the engine, not the classifier.
+        let stmt = "WITH u AS (SELECT id, name FROM users) SELECT u.id FROM u";
+        let cursor = stmt.find("u.id").unwrap() + "u.".len();
+        let r = classify_at(stmt, cursor);
+        match r.context {
+            CompletionContext::Column { qualifier: Some(b) } => {
+                assert!(b.is_cte);
+                assert_eq!(b.table, "u");
+                assert_eq!(
+                    b.synthetic_columns.as_deref(),
+                    Some(["id".to_string(), "name".to_string()].as_slice())
+                );
+            }
+            other => panic!("expected CTE qualifier, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn derived_table_synthesises_columns() {
+        let stmt = "SELECT s.id FROM (SELECT id, email FROM users) s";
+        let r = classify_at_end(stmt);
+        let s = r.bindings.iter().find(|b| b.table == "s").unwrap();
+        assert!(!s.is_cte);
+        assert_eq!(
+            s.synthetic_columns.as_deref(),
+            Some(["id".to_string(), "email".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn derived_table_with_as_keyword() {
+        let stmt = "SELECT * FROM (SELECT id FROM users) AS s";
+        let r = classify_at_end(stmt);
+        let s = r.bindings.iter().find(|b| b.table == "s").unwrap();
+        assert_eq!(
+            s.synthetic_columns.as_deref(),
+            Some(["id".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn derived_table_qualifier_resolves_to_synthetic() {
+        let stmt = "SELECT s.email FROM (SELECT id, email FROM users) s";
+        let cursor = stmt.find("s.email").unwrap() + "s.".len();
+        let r = classify_at(stmt, cursor);
+        match r.context {
+            CompletionContext::Column { qualifier: Some(b) } => {
+                assert!(!b.is_cte);
+                assert_eq!(b.table, "s");
+                assert_eq!(
+                    b.synthetic_columns.as_deref(),
+                    Some(["id".to_string(), "email".to_string()].as_slice())
+                );
+            }
+            other => panic!("expected qualified column, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn derived_table_in_join_position() {
+        let stmt = "SELECT * FROM users u JOIN (SELECT id FROM posts) p ON p.id = u.id";
+        let r = classify_at_end(stmt);
+        let p = r.bindings.iter().find(|b| b.table == "p").unwrap();
+        assert_eq!(
+            p.synthetic_columns.as_deref(),
+            Some(["id".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn base_table_binding_synthetic_columns_stays_none() {
+        // Regression guard: existing FROM <table> AS <alias>
+        // bindings must keep going through the schema cache.
+        let stmt = "SELECT * FROM users u";
+        let r = classify_at_end(stmt);
+        let u = r.bindings.iter().find(|b| b.table == "users").unwrap();
+        assert!(!u.is_cte);
+        assert!(u.synthetic_columns.is_none());
     }
 
     #[test]
