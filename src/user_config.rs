@@ -74,8 +74,8 @@ pub fn user_data_dir() -> Option<PathBuf> {
 }
 
 /// Default theme name used when neither store pins one. Matches a file
-/// in `themes/` (`themes/dark.toml`).
-pub const DEFAULT_THEME_NAME: &str = "dark";
+/// in `themes/` (`themes/base16-dark.toml`).
+pub const DEFAULT_THEME_NAME: &str = "base16-dark";
 
 /// Resolve effective theme name using project-overrides-user precedence.
 /// Returns `DEFAULT_THEME_NAME` when neither store pins a value. The
