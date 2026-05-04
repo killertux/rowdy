@@ -22,7 +22,6 @@ impl ThemeKind {
             _ => None,
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -80,10 +79,7 @@ impl Theme {
 /// owned name strings so callers can mutate / store without holding
 /// the registry lock.
 pub fn all_themes_sorted() -> Vec<(String, Theme)> {
-    let mut out: Vec<(String, Theme)> = themes()
-        .iter()
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
+    let mut out: Vec<(String, Theme)> = themes().iter().map(|(k, v)| (k.clone(), *v)).collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }

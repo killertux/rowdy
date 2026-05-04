@@ -41,16 +41,12 @@ impl Widget for ThemePicker<'_> {
         let inner = block.inner(box_area);
         block.render(box_area, buf);
 
-        let chunks =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
         let body_area = chunks[0];
         let footer_area = chunks[1];
 
-        let split = Layout::horizontal([
-            Constraint::Percentage(45),
-            Constraint::Percentage(55),
-        ])
-        .split(body_area);
+        let split = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(body_area);
 
         render_list(self.state, self.theme, split[0], buf);
         render_preview(self.state, self.theme, split[1], buf);
@@ -70,11 +66,7 @@ fn render_list(state: &ThemePickerState, theme: &Theme, area: Rect, buf: &mut Bu
         .render(area, buf);
 }
 
-fn build_list_lines<'a>(
-    state: &'a ThemePickerState,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line<'a>> {
+fn build_list_lines<'a>(state: &'a ThemePickerState, theme: &Theme, width: usize) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
     let mut last_kind: Option<ThemeKind> = None;
     for (idx, item) in state.items.iter().enumerate() {
