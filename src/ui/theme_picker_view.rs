@@ -3,6 +3,7 @@
 //! on the right. The hovered theme drives the colors of *both* panes so
 //! the user sees what selecting it would look like.
 
+use edtui::{EditorTheme, EditorView, SyntaxHighlighter};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -13,7 +14,7 @@ use crate::state::theme_picker::{ThemePickerItem, ThemePickerState};
 use crate::ui::theme::{Theme, ThemeKind};
 
 pub struct ThemePicker<'a> {
-    pub state: &'a ThemePickerState,
+    pub state: &'a mut ThemePickerState,
     pub theme: &'a Theme,
 }
 
@@ -52,7 +53,7 @@ impl Widget for ThemePicker<'_> {
         .split(body_area);
 
         render_list(self.state, self.theme, split[0], buf);
-        render_preview(self.theme, split[1], buf);
+        render_preview(self.state, self.theme, split[1], buf);
 
         let footer = Line::from(Span::styled(
             "j/k arrows · g/G top/bottom · Enter apply · Esc cancel",
@@ -133,8 +134,8 @@ fn build_row<'a>(
     )])
 }
 
-fn render_preview(theme: &Theme, area: Rect, buf: &mut Buffer) {
-    // Border separator + padded inner so the preview reads as its own pane.
+fn render_preview(state: &mut ThemePickerState, theme: &Theme, area: Rect, buf: &mut Buffer) {
+    // Border separator so the preview reads as its own pane.
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(theme.border).bg(theme.bg))
@@ -142,53 +143,74 @@ fn render_preview(theme: &Theme, area: Rect, buf: &mut Buffer) {
     let inner = block.inner(area);
     block.render(area, buf);
 
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    lines.push(Line::from(Span::styled(
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // "Preview" header
+        Constraint::Length(1), // spacer
+        Constraint::Min(5),    // SQL editor
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // "Result:" header
+        Constraint::Length(SAMPLE_TABLE.len() as u16),
+    ])
+    .split(inner);
+
+    Paragraph::new(Line::from(Span::styled(
         "Preview",
         Style::default()
             .fg(theme.header_fg)
             .bg(theme.bg)
             .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(""));
-    for sql_line in SAMPLE_SQL.lines() {
-        let span = if sql_line.trim_start().starts_with("--") {
-            Span::styled(sql_line, Style::default().fg(theme.fg_dim).bg(theme.bg))
-        } else {
-            Span::styled(sql_line, Style::default().fg(theme.fg).bg(theme.bg))
-        };
-        lines.push(Line::from(span));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
+    )))
+    .style(Style::default().bg(theme.bg))
+    .render(chunks[0], buf);
+
+    let editor_theme = EditorTheme::default()
+        .base(Style::default().bg(theme.bg).fg(theme.fg))
+        .cursor_style(Style::default().bg(theme.bg).fg(theme.fg))
+        .selection_style(
+            Style::default()
+                .bg(theme.selection_bg)
+                .fg(theme.selection_fg),
+        );
+    let highlighter = SyntaxHighlighter::new(theme.syntect_theme_name, "sql").ok();
+    EditorView::new(&mut state.preview_editor)
+        .theme(editor_theme)
+        .syntax_highlighter(highlighter)
+        .wrap(false)
+        .render(chunks[2], buf);
+
+    Paragraph::new(Line::from(Span::styled(
         "Result:",
         Style::default()
             .fg(theme.header_fg)
             .bg(theme.bg)
             .add_modifier(Modifier::BOLD),
-    )));
-    for (i, row) in SAMPLE_TABLE.iter().enumerate() {
-        let style = if i == 0 {
-            Style::default()
-                .fg(theme.header_fg)
-                .bg(theme.bg)
-                .add_modifier(Modifier::BOLD)
-        } else if i == 2 {
-            // Highlight one row to demonstrate selection_bg.
-            Style::default()
-                .fg(theme.selection_fg)
-                .bg(theme.selection_bg)
-        } else {
-            Style::default().fg(theme.fg).bg(theme.bg)
-        };
-        lines.push(Line::from(Span::styled(*row, style)));
-    }
-    Paragraph::new(lines)
-        .style(Style::default().bg(theme.bg))
-        .render(inner, buf);
-}
+    )))
+    .style(Style::default().bg(theme.bg))
+    .render(chunks[4], buf);
 
-const SAMPLE_SQL: &str = "-- Sample query\nSELECT id, name, active, created_at\nFROM users\nWHERE active = TRUE\nORDER BY created_at DESC;";
+    let table_lines: Vec<Line<'_>> = SAMPLE_TABLE
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let style = if i == 0 {
+                Style::default()
+                    .fg(theme.header_fg)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD)
+            } else if i == 2 {
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
+            } else {
+                Style::default().fg(theme.fg).bg(theme.bg)
+            };
+            Line::from(Span::styled(*row, style))
+        })
+        .collect();
+    Paragraph::new(table_lines)
+        .style(Style::default().bg(theme.bg))
+        .render(chunks[5], buf);
+}
 
 const SAMPLE_TABLE: &[&str] = &[
     "| id | name  | active | created_at          |",

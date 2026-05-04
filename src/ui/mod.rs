@@ -71,13 +71,14 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
 }
 
-fn render_theme_picker(app: &App, frame: &mut Frame, full: Rect) {
-    let Screen::ThemePicker(state) = &app.screen else {
+fn render_theme_picker(app: &mut App, frame: &mut Frame, full: Rect) {
+    let theme = app.theme;
+    let Screen::ThemePicker(state) = &mut app.screen else {
         return;
     };
     let widget = theme_picker_view::ThemePicker {
         state,
-        theme: &app.theme,
+        theme: &theme,
     };
     frame.render_widget(widget, full);
 }

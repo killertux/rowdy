@@ -4,7 +4,15 @@
 //! Each cursor move re-applies the hovered theme to `app.theme` so the
 //! whole window previews live; `Cancel` restores `original_theme_name`.
 
+use std::fmt;
+
+use edtui::{EditorState, Lines};
+
 use crate::ui::theme::{Theme, ThemeKind};
+
+/// Static SQL shown in the preview pane. Picked to exercise comments,
+/// keywords, and string literals so the user can compare highlights.
+const SAMPLE_SQL: &str = "-- Sample query\nSELECT id, name, active, created_at\nFROM users\nWHERE active = TRUE\nORDER BY created_at DESC;";
 
 /// One row in the picker list. Headers (`Dark` / `Light`) are not stored
 /// here — they're rendered as section breaks computed from the kind
@@ -20,7 +28,6 @@ pub struct ThemePickerItem {
     pub source_path: Option<String>,
 }
 
-#[derive(Debug)]
 pub struct ThemePickerState {
     /// Dark items first, then light. Within each group, alphabetical by
     /// name. Headers are rendered, not stored.
@@ -33,6 +40,23 @@ pub struct ThemePickerState {
     /// Same as `original_theme_name` — kept separately so a future
     /// "preview but don't persist" flow can diverge them.
     pub current_theme_name: String,
+    /// Read-only edtui buffer holding the sample SQL preview. Carried in
+    /// state so `EditorView` (which needs `&mut EditorState`) can borrow
+    /// it from `app.screen` during render. The translator never feeds
+    /// keys to this state, so it stays static for the picker's lifetime.
+    pub preview_editor: EditorState,
+}
+
+impl fmt::Debug for ThemePickerState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThemePickerState")
+            .field("items", &self.items)
+            .field("cursor", &self.cursor)
+            .field("original_theme_name", &self.original_theme_name)
+            .field("current_theme_name", &self.current_theme_name)
+            .field("preview_editor", &"<EditorState>")
+            .finish()
+    }
 }
 
 impl ThemePickerState {
@@ -59,6 +83,7 @@ impl ThemePickerState {
             cursor,
             original_theme_name: current_name.to_string(),
             current_theme_name: current_name.to_string(),
+            preview_editor: EditorState::new(Lines::from(SAMPLE_SQL)),
         }
     }
 
