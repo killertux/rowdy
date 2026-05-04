@@ -63,15 +63,13 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             render_modal(app, frame, area, bottom_area);
         }
         Screen::ResultExpanded { .. } => render_expanded(app, frame, main, bottom_area),
-        Screen::ThemePicker(_) => {
-            render_workspace(app, frame, main, bottom_area);
-            render_theme_picker(app, frame, area);
-        }
+        Screen::ThemePicker(_) => render_theme_picker(app, frame, area, bottom_area),
         _ => render_workspace(app, frame, main, bottom_area),
     }
 }
 
-fn render_theme_picker(app: &mut App, frame: &mut Frame, full: Rect) {
+fn render_theme_picker(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {
+    frame.render_widget(BottomBar::new(app), bottom_area);
     let theme = app.theme;
     let Screen::ThemePicker(state) = &mut app.screen else {
         return;
