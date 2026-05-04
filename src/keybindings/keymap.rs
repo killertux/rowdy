@@ -259,16 +259,16 @@ const DEFAULTS: &[(Context, &str, BindableAction)] = &[
     // `normalize_chord` strips the SHIFT bit so the literal matches.
     // Layout caveat: these are US-shift mappings; users on other
     // layouts can override via `keybindings.toml`.
-    (Context::Leader, ")", BindableAction::SessionSwitch(0)),
-    (Context::Leader, "!", BindableAction::SessionSwitch(1)),
-    (Context::Leader, "@", BindableAction::SessionSwitch(2)),
-    (Context::Leader, "#", BindableAction::SessionSwitch(3)),
-    (Context::Leader, "$", BindableAction::SessionSwitch(4)),
-    (Context::Leader, "%", BindableAction::SessionSwitch(5)),
-    (Context::Leader, "^", BindableAction::SessionSwitch(6)),
-    (Context::Leader, "&", BindableAction::SessionSwitch(7)),
-    (Context::Leader, "*", BindableAction::SessionSwitch(8)),
-    (Context::Leader, "(", BindableAction::SessionSwitch(9)),
+    (Context::Leader, "0", BindableAction::SessionSwitch(0)),
+    (Context::Leader, "1", BindableAction::SessionSwitch(1)),
+    (Context::Leader, "2", BindableAction::SessionSwitch(2)),
+    (Context::Leader, "3", BindableAction::SessionSwitch(3)),
+    (Context::Leader, "4", BindableAction::SessionSwitch(4)),
+    (Context::Leader, "5", BindableAction::SessionSwitch(5)),
+    (Context::Leader, "6", BindableAction::SessionSwitch(6)),
+    (Context::Leader, "7", BindableAction::SessionSwitch(7)),
+    (Context::Leader, "8", BindableAction::SessionSwitch(8)),
+    (Context::Leader, "9", BindableAction::SessionSwitch(9)),
     // --- Schema panel ---
     (Context::Schema, "j", BindableAction::SchemaDown),
     (Context::Schema, "k", BindableAction::SchemaUp),
@@ -379,15 +379,16 @@ mod tests {
         // shouldn't matter (the normalizer strips it for `Char`).
         let m = Keymap::defaults();
         for (sym, n) in [
-            ('!', 1u8),
-            ('@', 2),
-            ('#', 3),
-            ('$', 4),
-            ('%', 5),
-            ('^', 6),
-            ('&', 7),
-            ('*', 8),
-            ('(', 9),
+            ('0', 0u8),
+            ('1', 1),
+            ('2', 2),
+            ('3', 3),
+            ('4', 4),
+            ('5', 5),
+            ('6', 6),
+            ('7', 7),
+            ('8', 8),
+            ('9', 9),
         ] {
             // Plain delivery — most terminals.
             assert_eq!(
