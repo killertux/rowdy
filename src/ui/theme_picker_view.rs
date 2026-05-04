@@ -213,10 +213,10 @@ fn render_preview(state: &mut ThemePickerState, theme: &Theme, area: Rect, buf: 
 }
 
 const SAMPLE_TABLE: &[&str] = &[
-    "| id | name  | active | created_at          |",
-    "| 1  | Alice | true   | 2026-01-01 00:00:00 |",
-    "| 2  | Bob   | false  | 2026-02-15 12:34:56 |",
-    "| 3  | NULL  | true   | 2026-03-21 09:00:12 |",
+    "id  name   active  created_at         ",
+    "1   Alice  true    2026-01-01 00:00:00",
+    "2   Bob    false   2026-02-15 12:34:56",
+    "3   NULL   true    2026-03-21 09:00:12",
 ];
 
 pub fn inner_box(area: Rect) -> Option<Rect> {
