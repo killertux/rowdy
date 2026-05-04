@@ -12,7 +12,7 @@ use crate::ui::theme::{Theme, ThemeKind};
 
 /// Static SQL shown in the preview pane. Picked to exercise comments,
 /// keywords, and string literals so the user can compare highlights.
-const SAMPLE_SQL: &str = "-- Sample query\nSELECT id, name, active, created_at\nFROM users\nWHERE active = TRUE\nORDER BY created_at DESC;";
+const SAMPLE_SQL: &str = "-- Sample query\nSELECT id, name, created_at\nFROM users\nWHERE active = TRUE\nAND name = 'rowdy'\nORDER BY created_at DESC\nLIMIT 1;";
 
 /// One row in the picker list. Headers (`Dark` / `Light`) are not stored
 /// here — they're rendered as section breaks computed from the kind
