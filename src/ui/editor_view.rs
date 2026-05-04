@@ -28,7 +28,7 @@ impl Widget for EditorPane<'_> {
                     .fg(theme.selection_fg),
             );
 
-        let highlighter = SyntaxHighlighter::new(theme.kind.syntect_theme_name(), "sql").ok();
+        let highlighter = SyntaxHighlighter::new(theme.syntect_theme_name, "sql").ok();
 
         EditorView::new(&mut self.app.editor.state)
             .theme(editor_theme)

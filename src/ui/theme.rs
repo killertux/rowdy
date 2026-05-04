@@ -29,20 +29,19 @@ impl ThemeKind {
             Self::Light => Self::Dark,
         }
     }
-
-    /// Name of the syntect theme used for editor syntax highlighting. Both
-    /// names are bundled with edtui's `syntax-highlighting` feature.
-    pub fn syntect_theme_name(self) -> &'static str {
-        match self {
-            Self::Dark => "OneHalfDark",
-            Self::Light => "OneHalfLight",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
     pub kind: ThemeKind,
+    /// Name of the syntect theme paired with this palette. The string
+    /// must match an entry in edtui's bundled theme set (e.g.
+    /// `"OneHalfDark"`, `"dracula"`, `"solarized-light"`). Unknown
+    /// names cause edtui to skip syntax highlighting silently. Read
+    /// once on theme load and leaked to `'static` so `Theme` stays
+    /// `Copy` — the registry lives behind a `OnceLock` so the leak is
+    /// bounded.
+    pub syntect_theme_name: &'static str,
     pub bg: Color,
     pub fg: Color,
     pub fg_dim: Color,
@@ -92,6 +91,7 @@ impl Default for Theme {
 #[derive(Debug, Deserialize)]
 struct ThemeFile {
     kind: String,
+    syntect_theme_name: String,
     bg: String,
     fg: String,
     fg_dim: String,
@@ -138,6 +138,7 @@ fn load_themes() -> Result<HashMap<String, Theme>> {
         })?;
         let theme = Theme {
             kind,
+            syntect_theme_name: Box::leak(parsed.syntect_theme_name.into_boxed_str()),
             bg: parse_color(&parsed.bg)?,
             fg: parse_color(&parsed.fg)?,
             fg_dim: parse_color(&parsed.fg_dim)?,
@@ -179,12 +180,14 @@ mod tests {
 
     #[test]
     fn syntect_theme_names_resolve_for_sql() {
-        for kind in [ThemeKind::Dark, ThemeKind::Light] {
+        // Every bundled palette must point at a syntect theme that
+        // edtui can actually load — otherwise the editor falls back
+        // to no highlighting silently and the user sees plain text.
+        for (name, theme) in themes() {
             assert!(
-                SyntaxHighlighter::new(kind.syntect_theme_name(), "sql").is_ok(),
-                "{:?} → {} did not resolve",
-                kind,
-                kind.syntect_theme_name()
+                SyntaxHighlighter::new(theme.syntect_theme_name, "sql").is_ok(),
+                "theme {name:?} → syntect {:?} did not resolve",
+                theme.syntect_theme_name
             );
         }
     }

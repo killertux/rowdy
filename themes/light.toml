@@ -1,4 +1,5 @@
 kind = "light"
+syntect_theme_name = "OneHalfLight"
 
 bg = "#EFF1F5"
 fg = "#2C2F44"
