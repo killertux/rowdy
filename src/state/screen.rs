@@ -12,6 +12,7 @@ use crate::state::auth::AuthState;
 use crate::state::conn_form::ConnFormState;
 use crate::state::conn_list::ConnListState;
 use crate::state::results::{ColumnView, ResultCursor, ResultId, ResultViewMode};
+use crate::state::theme_picker::ThemePickerState;
 
 // `TextArea` is ~700 bytes (the `Auth`/`EditConnection` variants carry one or
 // two each), so the variants are uneven. Screen lives once per App and is
@@ -46,4 +47,7 @@ pub enum Screen {
     EditConnection(ConnFormState),
     /// Browseable list of saved connections — opens via `:conn`.
     ConnectionList(ConnListState),
+    /// Modal theme picker — opens via bare `:theme`. Hover live-previews
+    /// the theme; Enter persists, Esc restores.
+    ThemePicker(ThemePickerState),
 }

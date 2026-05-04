@@ -96,7 +96,24 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
         Screen::Auth(_) => translate_auth_key(key),
         Screen::EditConnection(_) => translate_conn_form_key(key),
         Screen::ConnectionList(state) => translate_conn_list_key(key, state.is_confirming()),
+        Screen::ThemePicker(_) => translate_theme_picker_key(key),
     }
+}
+
+/// Theme picker keys: vim-style nav (`j`/`k`/`g`/`G`) + arrow keys,
+/// `Enter` to confirm, `Esc` to cancel.
+fn translate_theme_picker_key(key: KeyEvent) -> Option<Action> {
+    use crate::action::ThemePickerAction as P;
+    let action = match (key.code, key.modifiers) {
+        (KeyCode::Char('j') | KeyCode::Down, _) => P::Down,
+        (KeyCode::Char('k') | KeyCode::Up, _) => P::Up,
+        (KeyCode::Char('g'), KeyModifiers::NONE) => P::Top,
+        (KeyCode::Char('G'), _) => P::Bottom,
+        (KeyCode::Enter, _) => P::Confirm,
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => P::Cancel,
+        _ => return None,
+    };
+    Some(Action::ThemePicker(action))
 }
 
 /// Help popover keys: vim-style scrolling plus q/Esc to close. Any change
@@ -1800,5 +1817,31 @@ mod tests {
             translate_chat_composer_key(key(KeyCode::Esc)),
             Some(Action::FocusPanel(Focus::Chat))
         ));
+    }
+
+    #[test]
+    fn theme_picker_keys_translate() {
+        use crate::action::ThemePickerAction as P;
+        let cases = [
+            (key(KeyCode::Char('j')), P::Down),
+            (key(KeyCode::Down), P::Down),
+            (key(KeyCode::Char('k')), P::Up),
+            (key(KeyCode::Up), P::Up),
+            (key(KeyCode::Char('g')), P::Top),
+            (key(KeyCode::Char('G')), P::Bottom),
+            (key(KeyCode::Enter), P::Confirm),
+            (key(KeyCode::Esc), P::Cancel),
+            (key(KeyCode::Char('q')), P::Cancel),
+        ];
+        for (input, want) in cases {
+            let got = translate_theme_picker_key(input);
+            let label = format!("{want:?}");
+            assert!(
+                matches_action(&got, &label),
+                "key {input:?} -> {got:?}, want {label}",
+            );
+        }
+        // Unknown keys yield None.
+        assert!(translate_theme_picker_key(key(KeyCode::Char('x'))).is_none());
     }
 }

@@ -224,10 +224,6 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 desc: "Cancel the in-flight query",
             },
             HelpEntry {
-                keys: "<Space> t",
-                desc: "Toggle Dark / Light theme",
-            },
-            HelpEntry {
                 keys: "<Space> S",
                 desc: "Switch right panel to schema (and focus it)",
             },

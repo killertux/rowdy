@@ -30,7 +30,8 @@ use crate::state::right_panel::RightPanelMode;
 use crate::state::schema::{ExpandOutcome, NodeId, SchemaPanel};
 use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
-use crate::ui::theme::{Theme, ThemeKind};
+use crate::state::theme_picker::ThemePickerState;
+use crate::ui::theme::Theme;
 use crate::worker::{IntrospectTarget, WorkerCommand, WorkerEvent};
 
 #[derive(Debug)]
@@ -90,7 +91,10 @@ pub enum Action {
         table: Option<String>,
         target: ExportTarget,
     },
-    ToggleTheme,
+    /// `:theme` (no args) — open the modal theme picker.
+    OpenThemePicker,
+    /// Cursor / confirm / cancel inside the theme picker.
+    ThemePicker(ThemePickerAction),
     Worker(WorkerEvent),
     Auth(AuthAction),
     ConnForm(ConnFormAction),
@@ -338,6 +342,22 @@ pub enum SessionAction {
     Delete(usize),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ThemePickerAction {
+    /// Move cursor to the next theme.
+    Down,
+    /// Move cursor to the previous theme.
+    Up,
+    /// Jump to the first theme.
+    Top,
+    /// Jump to the last theme.
+    Bottom,
+    /// Apply the hovered theme and persist it to project config.
+    Confirm,
+    /// Discard hover-preview and restore the original theme.
+    Cancel,
+}
+
 #[derive(Debug)]
 pub enum SchemaAction {
     Down,
@@ -437,7 +457,8 @@ pub fn apply(app: &mut App, action: Action) {
         Action::ResultCancelYankFormat => result_cancel_yank_format(app),
         Action::Export { fmt, target } => export_command(app, fmt, target),
         Action::ExportSql { table, target } => export_sql_command(app, table, target),
-        Action::ToggleTheme => toggle_theme(app),
+        Action::OpenThemePicker => open_theme_picker(app),
+        Action::ThemePicker(a) => apply_theme_picker(app, a),
         Action::Worker(ev) => apply_worker_event(app, ev),
         Action::Auth(a) => auth::apply(app, a),
         Action::ConnForm(a) => conn_form::apply(app, a),
@@ -855,7 +876,7 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         C::Expand => apply(app, Action::ExpandLatestResult),
         C::Collapse => apply(app, Action::CollapseResult),
         C::CloseResult => apply(app, Action::DismissResult),
-        C::Theme(ThemeChoice::Toggle) => apply(app, Action::ToggleTheme),
+        C::Theme(ThemeChoice::OpenPicker) => apply(app, Action::OpenThemePicker),
         C::Theme(ThemeChoice::Set(name)) => apply_theme_named(app, &name),
         C::Export { fmt, target } => apply(
             app,
@@ -1051,17 +1072,6 @@ fn set_schema_width(app: &mut App, value: u16) {
     persist_schema_width(app);
 }
 
-/// `:theme toggle` — flip between the canonical `dark` and `light`
-/// theme files. Custom themes preserve their `kind`, so toggling from
-/// e.g. `gruberDarker` (kind = dark) lands on `light`.
-fn toggle_theme(app: &mut App) {
-    let next = match app.theme.kind.toggled() {
-        ThemeKind::Dark => "dark",
-        ThemeKind::Light => "light",
-    };
-    apply_theme_named(app, next);
-}
-
 /// Resolve `:theme <name>` against the bundled registry. Unknown names
 /// surface as a status-bar error rather than aborting the command loop.
 fn apply_theme_named(app: &mut App, name: &str) {
@@ -1074,6 +1084,55 @@ fn apply_theme_named(app: &mut App, name: &str) {
     app.theme = theme;
     if let Err(err) = app.config.set_theme(name) {
         app.log.warn("config", format!("save theme failed: {err}"));
+    }
+}
+
+/// Open the modal theme picker (bare `:theme`). Pre-selects the
+/// currently persisted theme so the user lands on the row they expect.
+fn open_theme_picker(app: &mut App) {
+    let current = app
+        .config
+        .state()
+        .theme
+        .clone()
+        .unwrap_or_else(|| crate::user_config::DEFAULT_THEME_NAME.to_string());
+    let state = ThemePickerState::new(&current);
+    app.screen = Screen::ThemePicker(state);
+}
+
+/// Dispatch picker key actions. Hover (Up/Down/Top/Bottom) live-previews
+/// the theme so the whole window changes; Confirm persists; Cancel
+/// restores the original theme.
+fn apply_theme_picker(app: &mut App, action: ThemePickerAction) {
+    let Screen::ThemePicker(state) = &mut app.screen else {
+        return;
+    };
+    match action {
+        ThemePickerAction::Down => state.move_down(),
+        ThemePickerAction::Up => state.move_up(),
+        ThemePickerAction::Top => state.top(),
+        ThemePickerAction::Bottom => state.bottom(),
+        ThemePickerAction::Confirm => {
+            let Some(name) = state.selected().map(|i| i.name.clone()) else {
+                app.screen = Screen::Normal;
+                return;
+            };
+            apply_theme_named(app, &name);
+            app.screen = Screen::Normal;
+            return;
+        }
+        ThemePickerAction::Cancel => {
+            let original = state.original_theme_name.clone();
+            if let Some(theme) = Theme::by_name(&original) {
+                app.theme = theme;
+            }
+            app.screen = Screen::Normal;
+            return;
+        }
+    }
+    // Hover: live-preview the hovered theme.
+    if let Some(theme) = state.hovered_theme() {
+        app.theme = theme;
     }
 }
 
@@ -2828,5 +2887,50 @@ mod tests {
         assert!(app.in_flight_query.is_none()); // fixture didn't seed one
         // Worker channel still alive (no Close was sent).
         assert!(!app.cmd_tx.is_closed());
+    }
+
+    #[test]
+    fn open_theme_picker_sets_screen_to_picker() {
+        let dir = temp_dir("theme-open");
+        let (mut app, _cmd_rx, _evt_rx) = fixture_app(dir);
+        super::open_theme_picker(&mut app);
+        assert!(matches!(app.screen, Screen::ThemePicker(_)));
+    }
+
+    #[test]
+    fn theme_picker_confirm_persists_to_project_config() {
+        let dir = temp_dir("theme-confirm");
+        let (mut app, _cmd_rx, _evt_rx) = fixture_app(dir.clone());
+        super::open_theme_picker(&mut app);
+        // Move cursor to "light" deterministically.
+        if let Screen::ThemePicker(state) = &mut app.screen {
+            let idx = state
+                .items
+                .iter()
+                .position(|i| i.name == "light")
+                .expect("light theme bundled");
+            state.cursor = idx;
+        } else {
+            panic!("picker not open");
+        }
+        super::apply_theme_picker(&mut app, ThemePickerAction::Confirm);
+        assert!(matches!(app.screen, Screen::Normal));
+        assert_eq!(app.config.state().theme.as_deref(), Some("light"));
+    }
+
+    #[test]
+    fn theme_picker_cancel_restores_original_theme() {
+        let dir = temp_dir("theme-cancel");
+        let (mut app, _cmd_rx, _evt_rx) = fixture_app(dir);
+        // Pin a known starting theme so the original-restore is observable.
+        super::apply_theme_named(&mut app, "dark");
+        let original = app.theme.bg;
+        super::open_theme_picker(&mut app);
+        // Hover something else — preview mutates app.theme.
+        super::apply_theme_picker(&mut app, ThemePickerAction::Down);
+        super::apply_theme_picker(&mut app, ThemePickerAction::Down);
+        super::apply_theme_picker(&mut app, ThemePickerAction::Cancel);
+        assert!(matches!(app.screen, Screen::Normal));
+        assert_eq!(app.theme.bg, original, "cancel must restore original theme");
     }
 }
