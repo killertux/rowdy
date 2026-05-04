@@ -99,6 +99,7 @@ impl BindableAction {
             "set-right-panel-schema" => Self::SetRightPanelSchema,
             "set-right-panel-chat" => Self::SetRightPanelChat,
             "next-session" => Self::SessionNext,
+            "session-switch-0" => Self::SessionSwitch(0),
             "session-switch-1" => Self::SessionSwitch(1),
             "session-switch-2" => Self::SessionSwitch(2),
             "session-switch-3" => Self::SessionSwitch(3),
@@ -156,6 +157,7 @@ impl BindableAction {
             Self::SetRightPanelSchema => "set-right-panel-schema",
             Self::SetRightPanelChat => "set-right-panel-chat",
             Self::SessionNext => "next-session",
+            Self::SessionSwitch(0) => "session-switch-0",
             Self::SessionSwitch(1) => "session-switch-1",
             Self::SessionSwitch(2) => "session-switch-2",
             Self::SessionSwitch(3) => "session-switch-3",
@@ -166,7 +168,7 @@ impl BindableAction {
             Self::SessionSwitch(8) => "session-switch-8",
             Self::SessionSwitch(9) => "session-switch-9",
             // Out-of-range payload — every constructor we expose
-            // (parse, all, the keymap defaults) is gated to 1..=9, so
+            // (parse, all, the keymap defaults) is gated to 0..=9, so
             // hitting this arm means a programmer error elsewhere
             // rather than a user-facing bug. Round-trip through
             // `parse` returns `None` for the placeholder string.
@@ -216,6 +218,7 @@ impl BindableAction {
             Self::SetRightPanelSchema,
             Self::SetRightPanelChat,
             Self::SessionNext,
+            Self::SessionSwitch(0),
             Self::SessionSwitch(1),
             Self::SessionSwitch(2),
             Self::SessionSwitch(3),
@@ -271,6 +274,7 @@ impl BindableAction {
             Self::SetRightPanelSchema => "Switch right panel to schema (and focus it)",
             Self::SetRightPanelChat => "Switch right panel to chat (and focus it)",
             Self::SessionNext => "Cycle to the next per-connection editor session",
+            Self::SessionSwitch(0) => "Switch directly to session 0",
             Self::SessionSwitch(1) => "Switch directly to session 1",
             Self::SessionSwitch(2) => "Switch directly to session 2",
             Self::SessionSwitch(3) => "Switch directly to session 3",
