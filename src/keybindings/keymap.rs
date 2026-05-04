@@ -259,6 +259,7 @@ const DEFAULTS: &[(Context, &str, BindableAction)] = &[
     // `normalize_chord` strips the SHIFT bit so the literal matches.
     // Layout caveat: these are US-shift mappings; users on other
     // layouts can override via `keybindings.toml`.
+    (Context::Leader, ")", BindableAction::SessionSwitch(0)),
     (Context::Leader, "!", BindableAction::SessionSwitch(1)),
     (Context::Leader, "@", BindableAction::SessionSwitch(2)),
     (Context::Leader, "#", BindableAction::SessionSwitch(3)),
