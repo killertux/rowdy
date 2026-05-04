@@ -107,6 +107,8 @@ fn translate_theme_picker_key(key: KeyEvent) -> Option<Action> {
     let action = match (key.code, key.modifiers) {
         (KeyCode::Char('j') | KeyCode::Down, _) => P::Down,
         (KeyCode::Char('k') | KeyCode::Up, _) => P::Up,
+        (KeyCode::Char('n'), m) if m.contains(KeyModifiers::CONTROL) => P::Down,
+        (KeyCode::Char('p'), m) if m.contains(KeyModifiers::CONTROL) => P::Up,
         (KeyCode::Char('g'), KeyModifiers::NONE) => P::Top,
         (KeyCode::Char('G'), _) => P::Bottom,
         (KeyCode::Enter, _) => P::Confirm,
@@ -127,6 +129,8 @@ fn translate_help_key(key: KeyEvent) -> Option<Action> {
         (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => Some(Action::CloseHelp),
         (KeyCode::Char('j') | KeyCode::Down, false) => Some(Action::HelpScroll(Vertical, By(1))),
         (KeyCode::Char('k') | KeyCode::Up, false) => Some(Action::HelpScroll(Vertical, By(-1))),
+        (KeyCode::Char('n'), true) => Some(Action::HelpScroll(Vertical, By(1))),
+        (KeyCode::Char('p'), true) => Some(Action::HelpScroll(Vertical, By(-1))),
         (KeyCode::Char('h') | KeyCode::Left, false) => Some(Action::HelpScroll(Horizontal, By(-2))),
         (KeyCode::Char('l') | KeyCode::Right, false) => Some(Action::HelpScroll(Horizontal, By(2))),
         (KeyCode::Char('d'), true) => Some(Action::HelpScroll(Vertical, By(8))),
@@ -161,6 +165,8 @@ fn translate_conn_list_key(key: KeyEvent, confirming: bool) -> Option<Action> {
     let action = match (key.code, key.modifiers) {
         (KeyCode::Char('j') | KeyCode::Down, _) => Down,
         (KeyCode::Char('k') | KeyCode::Up, _) => Up,
+        (KeyCode::Char('n'), m) if m.contains(KeyModifiers::CONTROL) => Down,
+        (KeyCode::Char('p'), m) if m.contains(KeyModifiers::CONTROL) => Up,
         (KeyCode::Char('g'), _) => Top,
         (KeyCode::Char('G'), _) => Bottom,
         (KeyCode::Enter | KeyCode::Char('u'), _) => UseSelected,
