@@ -379,15 +379,16 @@ mod tests {
         // shouldn't matter (the normalizer strips it for `Char`).
         let m = Keymap::defaults();
         for (sym, n) in [
-            ('!', 1u8),
-            ('@', 2),
-            ('#', 3),
-            ('$', 4),
-            ('%', 5),
-            ('^', 6),
-            ('&', 7),
-            ('*', 8),
-            ('(', 9),
+            ('0', 0u8),
+            ('1', 1),
+            ('2', 2),
+            ('3', 3),
+            ('4', 4),
+            ('5', 5),
+            ('6', 6),
+            ('7', 7),
+            ('8', 8),
+            ('9', 9),
         ] {
             // Plain delivery — most terminals.
             assert_eq!(
