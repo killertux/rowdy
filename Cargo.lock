@@ -2886,7 +2886,7 @@ dependencies = [
 
 [[package]]
 name = "rowdy"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "arboard",
