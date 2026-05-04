@@ -22,13 +22,6 @@ impl ThemeKind {
             _ => None,
         }
     }
-
-    pub fn toggled(self) -> Self {
-        match self {
-            Self::Dark => Self::Light,
-            Self::Light => Self::Dark,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +73,15 @@ impl Theme {
     pub fn by_name(name: &str) -> Option<Self> {
         themes().get(name).copied()
     }
+}
+
+/// All bundled themes sorted alphabetically by name. Returned as
+/// owned name strings so callers can mutate / store without holding
+/// the registry lock.
+pub fn all_themes_sorted() -> Vec<(String, Theme)> {
+    let mut out: Vec<(String, Theme)> = themes().iter().map(|(k, v)| (k.clone(), *v)).collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 impl Default for Theme {

@@ -14,3 +14,4 @@ pub mod right_panel;
 pub mod schema;
 pub mod screen;
 pub mod status;
+pub mod theme_picker;

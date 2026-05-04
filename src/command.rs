@@ -73,13 +73,14 @@ pub enum FormatScope {
     All,
 }
 
-/// `:theme` outcome. `Set` carries the theme file's stem (e.g. `"dark"`,
-/// `"light"`, or any custom `themes/*.toml` name). The dispatcher
-/// validates the name against the bundled registry; the parser stays
-/// permissive so adding a new theme file is enough.
+/// `:theme` outcome. `Set` carries the theme file's stem (e.g.
+/// `"base16-dark"`, `"light"`, or any custom `themes/*.toml` name). The
+/// dispatcher validates the name against the bundled registry; the
+/// parser stays permissive so adding a new theme file is enough.
+/// `OpenPicker` opens the modal theme picker (bare `:theme`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThemeChoice {
-    Toggle,
+    OpenPicker,
     Set(String),
 }
 
@@ -370,7 +371,12 @@ fn parse_width(args: &[&str]) -> Result<Command, String> {
 
 fn parse_theme(args: &[&str]) -> Result<Command, String> {
     let choice = match args.first().copied() {
-        None | Some("toggle") => ThemeChoice::Toggle,
+        None => ThemeChoice::OpenPicker,
+        Some("toggle") => {
+            return Err(
+                "unknown :theme arg: toggle (use a theme name or omit for picker)".to_string(),
+            );
+        }
         Some(name) => ThemeChoice::Set(name.to_string()),
     };
     Ok(Command::Theme(choice))
@@ -585,15 +591,12 @@ mod tests {
     }
 
     #[test]
-    fn theme_defaults_to_toggle() {
+    fn theme_no_arg_opens_picker() {
         assert_eq!(
             parse("theme"),
-            Ok(Some(Command::Theme(ThemeChoice::Toggle)))
+            Ok(Some(Command::Theme(ThemeChoice::OpenPicker)))
         );
-        assert_eq!(
-            parse("theme toggle"),
-            Ok(Some(Command::Theme(ThemeChoice::Toggle)))
-        );
+        assert!(parse("theme toggle").is_err());
         assert_eq!(
             parse("theme dark"),
             Ok(Some(Command::Theme(ThemeChoice::Set("dark".into()))))

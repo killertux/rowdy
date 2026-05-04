@@ -11,6 +11,7 @@ pub mod llm_settings_view;
 pub mod results_view;
 pub mod schema_view;
 pub mod theme;
+pub mod theme_picker_view;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -62,8 +63,22 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             render_modal(app, frame, area, bottom_area);
         }
         Screen::ResultExpanded { .. } => render_expanded(app, frame, main, bottom_area),
+        Screen::ThemePicker(_) => render_theme_picker(app, frame, area, bottom_area),
         _ => render_workspace(app, frame, main, bottom_area),
     }
+}
+
+fn render_theme_picker(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {
+    frame.render_widget(BottomBar::new(app), bottom_area);
+    let theme = app.theme;
+    let Screen::ThemePicker(state) = &mut app.screen else {
+        return;
+    };
+    let widget = theme_picker_view::ThemePicker {
+        state,
+        theme: &theme,
+    };
+    frame.render_widget(widget, full);
 }
 
 fn render_llm_settings(app: &mut App, frame: &mut Frame, full: Rect, bottom_area: Rect) {

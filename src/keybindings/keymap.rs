@@ -249,7 +249,6 @@ const DEFAULTS: &[(Context, &str, BindableAction)] = &[
     ),
     (Context::Leader, "c", BindableAction::CancelQuery),
     (Context::Leader, "e", BindableAction::ExpandLatestResult),
-    (Context::Leader, "t", BindableAction::ToggleTheme),
     (Context::Leader, "S", BindableAction::SetRightPanelSchema),
     (Context::Leader, "C", BindableAction::SetRightPanelChat),
     (Context::Leader, "n", BindableAction::SessionNext),
@@ -509,8 +508,8 @@ mod tests {
             Some(BindableAction::CancelQuery)
         );
         assert_eq!(
-            m.lookup_key(Context::Leader, KeyCode::Char('t'), KeyModifiers::NONE),
-            Some(BindableAction::ToggleTheme)
+            m.lookup_key(Context::Leader, KeyCode::Char('e'), KeyModifiers::NONE),
+            Some(BindableAction::ExpandLatestResult)
         );
     }
 
