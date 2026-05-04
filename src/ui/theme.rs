@@ -162,15 +162,62 @@ fn load_themes() -> Result<HashMap<String, Theme>> {
     Ok(map)
 }
 
+/// Parse a TOML color literal. Accepts `#RRGGBB` / bare `RRGGBB` hex,
+/// or a named ANSI / base16 color (`black`, `red`, …, `brightwhite`,
+/// `reset`). Named colors map to ratatui's indexed [`Color`] variants
+/// — they render against the user's terminal palette, which is the
+/// whole point of base16-style themes. Hex always renders true-color.
 fn parse_color(s: &str) -> Result<Color> {
+    if let Some(named) = parse_named_color(s) {
+        return Ok(named);
+    }
     let hex = s.strip_prefix('#').unwrap_or(s);
     if hex.len() != 6 {
-        bail!("invalid color {s:?}: expected 6-digit hex like \"#1E1E2E\"");
+        bail!(
+            "invalid color {s:?}: expected 6-digit hex like \"#1E1E2E\" \
+             or a named ANSI color (black/red/green/yellow/blue/magenta/cyan/white, \
+             plus bright_* / light_* / darkgray / brightwhite / reset)"
+        );
     }
     let r = u8::from_str_radix(&hex[0..2], 16).with_context(|| format!("invalid color {s:?}"))?;
     let g = u8::from_str_radix(&hex[2..4], 16).with_context(|| format!("invalid color {s:?}"))?;
     let b = u8::from_str_radix(&hex[4..6], 16).with_context(|| format!("invalid color {s:?}"))?;
     Ok(Color::Rgb(r, g, b))
+}
+
+/// Map a TOML string to a ratatui indexed color. Case-insensitive.
+/// Convention follows ratatui's enum: `Color::Gray` is ANSI 7
+/// (terminal's "white"); `Color::White` is ANSI 15 (bright white). The
+/// alias table accepts both shorthand (`darkgray`) and explicit
+/// (`bright_black`) spellings so themes ported from other tools just
+/// work.
+fn parse_named_color(s: &str) -> Option<Color> {
+    Some(match s.to_ascii_lowercase().as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        // ANSI 7 — the terminal palette's "white" (a.k.a. light gray
+        // in many themes). Use `brightwhite` for ANSI 15.
+        "gray" | "grey" | "white" => Color::Gray,
+        "darkgray" | "darkgrey" | "dark_gray" | "dark_grey" | "brightblack" | "bright_black" => {
+            Color::DarkGray
+        }
+        "lightred" | "light_red" | "brightred" | "bright_red" => Color::LightRed,
+        "lightgreen" | "light_green" | "brightgreen" | "bright_green" => Color::LightGreen,
+        "lightyellow" | "light_yellow" | "brightyellow" | "bright_yellow" => Color::LightYellow,
+        "lightblue" | "light_blue" | "brightblue" | "bright_blue" => Color::LightBlue,
+        "lightmagenta" | "light_magenta" | "brightmagenta" | "bright_magenta" => {
+            Color::LightMagenta
+        }
+        "lightcyan" | "light_cyan" | "brightcyan" | "bright_cyan" => Color::LightCyan,
+        "brightwhite" | "bright_white" => Color::White,
+        "reset" | "default" => Color::Reset,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -214,5 +261,28 @@ mod tests {
     fn parse_color_rejects_bad_input() {
         assert!(parse_color("#zzzzzz").is_err());
         assert!(parse_color("#abc").is_err());
+        assert!(parse_color("not_a_color").is_err());
+    }
+
+    #[test]
+    fn parse_color_accepts_named_ansi() {
+        assert_eq!(parse_color("black").unwrap(), Color::Black);
+        assert_eq!(parse_color("red").unwrap(), Color::Red);
+        assert_eq!(parse_color("Cyan").unwrap(), Color::Cyan);
+        assert_eq!(parse_color("YELLOW").unwrap(), Color::Yellow);
+        // White vs brightwhite split — ANSI 7 vs ANSI 15.
+        assert_eq!(parse_color("white").unwrap(), Color::Gray);
+        assert_eq!(parse_color("gray").unwrap(), Color::Gray);
+        assert_eq!(parse_color("brightwhite").unwrap(), Color::White);
+        assert_eq!(parse_color("bright_white").unwrap(), Color::White);
+        // Bright/light aliases collapse to the same Light* variant.
+        assert_eq!(parse_color("bright_red").unwrap(), Color::LightRed);
+        assert_eq!(parse_color("lightred").unwrap(), Color::LightRed);
+        // Dark gray = ANSI 8.
+        assert_eq!(parse_color("darkgray").unwrap(), Color::DarkGray);
+        assert_eq!(parse_color("bright_black").unwrap(), Color::DarkGray);
+        // Reset falls back to the terminal default.
+        assert_eq!(parse_color("reset").unwrap(), Color::Reset);
+        assert_eq!(parse_color("default").unwrap(), Color::Reset);
     }
 }
