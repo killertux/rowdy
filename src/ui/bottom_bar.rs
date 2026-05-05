@@ -245,12 +245,12 @@ fn render_status(app: &App, area: Rect, buf: &mut Buffer, theme: &Theme) {
         "● ",
         Style::default().fg(icon_color).bg(theme.bg),
     )];
-    // `[sN]` indicator — only when there's an active connection; the
-    // editor isn't reachable without one, so the marker would just
+    // `[sN] <conn>` indicator — only when there's an active connection;
+    // the editor isn't reachable without one, so the marker would just
     // be noise on the splash / auth / connection-list screens.
-    if app.active_connection.is_some() {
+    if let Some(conn) = app.active_connection.as_deref() {
         spans.push(Span::styled(
-            format!("[s{}] ", app.active_session_index),
+            format!("[s{}] {conn} ", app.active_session_index),
             Style::default().fg(theme.fg_dim).bg(theme.bg),
         ));
     }
