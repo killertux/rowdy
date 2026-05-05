@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::Event as CtEvent;
+use ratatui::crossterm::event::{Event as CtEvent, MouseEventKind};
 use ratatui_textarea::{Input, TextArea};
 
 mod auth;
@@ -155,9 +155,8 @@ pub enum MouseTarget {
     /// Click landed on the editor pane. The raw event is forwarded to edtui
     /// (which handles its own mouse selection / cursor placement).
     Editor(CtEvent),
-    /// Click on a row in the schema tree.
-    SchemaRow(NodeId),
-    /// Toggle (or first-expand) the given schema node.
+    /// Click on a row in the schema tree — selects and toggles the node
+    /// (toggle is a no-op for leaves, so clicking a column just selects).
     SchemaToggle(NodeId),
     /// Scroll-wheel over the schema panel; positive scrolls down.
     SchemaScroll(i32),
@@ -393,14 +392,6 @@ pub enum ResultColumnAction {
     Reset,
 }
 
-/// Snap the schema selection to a specific node and toggle/expand it.
-/// `select` only moves the selection; `toggle` does both. Helpers exist
-/// in the apply layer so the mouse-click and chevron-click paths share a
-/// canonical implementation.
-fn schema_select(app: &mut App, id: NodeId) {
-    app.schema.selected = Some(id);
-}
-
 fn schema_toggle_at(app: &mut App, id: NodeId) {
     app.schema.selected = Some(id);
     let outcome = app.schema.toggle_selected();
@@ -501,14 +492,16 @@ fn focus_panel(app: &mut App, target: Focus) {
 fn apply_mouse(app: &mut App, target: MouseTarget) {
     match target {
         MouseTarget::Editor(ev) => {
-            // Click on the editor: focus it, then forward the raw event so
-            // edtui can place the cursor / start its own selection.
-            app.focus = Focus::Editor;
+            // Click/drag focuses the editor; wheel scroll just forwards
+            // (mirrors how the schema/result panels scroll without stealing
+            // focus). edtui handles cursor placement / selection / viewport
+            // scroll from the raw event.
+            if let CtEvent::Mouse(ref mev) = ev
+                && matches!(mev.kind, MouseEventKind::Down(_) | MouseEventKind::Drag(_))
+            {
+                app.focus = Focus::Editor;
+            }
             apply(app, Action::EditorEvent(ev));
-        }
-        MouseTarget::SchemaRow(id) => {
-            app.focus = Focus::Schema;
-            schema_select(app, id);
         }
         MouseTarget::SchemaToggle(id) => {
             app.focus = Focus::Schema;

@@ -955,18 +955,12 @@ fn translate_mouse_schema(app: &App, ev: MouseEvent) -> Option<Action> {
         MouseEventKind::Down(MouseButton::Left) => {
             let row_idx = (ev.row.checked_sub(layout.rows_area.y))? as usize;
             let id: NodeId = *layout.rows.get(row_idx)?;
-            // Clicks on the leading indent + chevron column toggle expand/collapse;
-            // anywhere else just selects. We don't currently track depth in
-            // `SchemaLayout`, so use the leftmost few columns as a pragmatic
-            // chevron hit-zone — far enough that the user landing on the
-            // glyph counts, narrow enough that clicking on a label still
-            // means "select this row".
-            let col_local = ev.column.saturating_sub(layout.rows_area.x);
-            if col_local <= 1 {
-                Some(Action::Mouse(MouseTarget::SchemaToggle(id)))
-            } else {
-                Some(Action::Mouse(MouseTarget::SchemaRow(id)))
-            }
+            // Anywhere on the row toggles. Indentation grows as the tree
+            // expands, so a fixed chevron hit-zone forced the user to chase
+            // the glyph; toggling on the whole row is the same gesture
+            // every click. Toggle is a no-op for leaves, so a click on a
+            // column still just selects.
+            Some(Action::Mouse(MouseTarget::SchemaToggle(id)))
         }
         _ => None,
     }
@@ -990,12 +984,15 @@ fn translate_mouse_editor(app: &App, ev: MouseEvent) -> Option<Action> {
     if !rect_contains(area, ev.column, ev.row) {
         return None;
     }
-    // Forward only the gestures edtui understands; ignore wheel etc. for now
-    // (edtui doesn't scroll on its own anyway).
+    // Forward the gestures edtui understands: left-button click/drag for
+    // cursor placement and selection, plus scroll wheel for viewport scroll
+    // (edtui's MouseEventHandler scrolls on ScrollUp/ScrollDown natively).
     match ev.kind {
         MouseEventKind::Down(MouseButton::Left)
         | MouseEventKind::Drag(MouseButton::Left)
-        | MouseEventKind::Up(MouseButton::Left) => {
+        | MouseEventKind::Up(MouseButton::Left)
+        | MouseEventKind::ScrollUp
+        | MouseEventKind::ScrollDown => {
             Some(Action::Mouse(MouseTarget::Editor(CtEvent::Mouse(ev))))
         }
         _ => None,
