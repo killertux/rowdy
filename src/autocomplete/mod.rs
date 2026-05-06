@@ -45,17 +45,31 @@ pub struct CompletionItem {
 /// Post-insert cursor placement. Lives on each item rather than being
 /// derived at accept-time so the engine can encode per-item nuances
 /// (zero-arg vs arg functions, e.g.).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertTrail {
     /// Cursor lands right after the inserted text. Default for
     /// keywords, columns, CTEs.
     None,
-    /// Append a space, leave the cursor after it. Used after a table
-    /// or view in a FROM/JOIN slot.
-    Space,
     /// Append `()` and put the cursor *between* the parens, ready
     /// for arguments. Used for arg-taking functions like `COUNT(`.
     OpenParens,
+    /// Append a space and a generated short alias (e.g. ` u` for
+    /// `users`). Used for table/view items in FROM/JOIN/INSERT INTO
+    /// slots to save a manual aliasing step.
+    Alias(String),
+}
+
+/// Generate a short alias from a table name by taking the first
+/// lowercased letter of each underscore-separated segment.
+/// `"user_roles"` → `"ur"`, `"users"` → `"u"`, `"AB_CD"` → `"ac"`.
+pub fn generate_alias(table_name: &str) -> String {
+    let mut alias = String::new();
+    for segment in table_name.split('_') {
+        if let Some(c) = segment.chars().next() {
+            alias.push(c.to_ascii_lowercase());
+        }
+    }
+    alias
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -103,5 +117,39 @@ impl CompletionKind {
             Self::Cte => "cte",
             Self::Loading => "loading",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alias_single_word() {
+        assert_eq!(generate_alias("users"), "u");
+        assert_eq!(generate_alias("products"), "p");
+    }
+
+    #[test]
+    fn alias_underscore_segments() {
+        assert_eq!(generate_alias("user_roles"), "ur");
+        assert_eq!(generate_alias("order_items"), "oi");
+        assert_eq!(generate_alias("user_role_permissions"), "urp");
+    }
+
+    #[test]
+    fn alias_lowercases() {
+        assert_eq!(generate_alias("AB_CD"), "ac");
+        assert_eq!(generate_alias("Users"), "u");
+    }
+
+    #[test]
+    fn alias_empty_name() {
+        assert_eq!(generate_alias(""), "");
+    }
+
+    #[test]
+    fn alias_single_char() {
+        assert_eq!(generate_alias("a"), "a");
     }
 }

@@ -124,6 +124,13 @@ pub struct UserConfig {
     /// [`ReadToolsMode`]). Toggleable from the `:chat settings` modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_tools: Option<ReadToolsMode>,
+    /// Number of identifier characters to type before the autocomplete
+    /// popover auto-opens in Insert mode. `None` defaults to `2`.
+    /// Set to `1` for eager triggers or a higher value to suppress
+    /// until you're well into a word. `0` disables auto-trigger
+    /// altogether (you can still use `Ctrl+Space`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_trigger_threshold: Option<u8>,
 }
 
 /// Owns the on-disk user config. Vanilla runs never touch the
@@ -265,6 +272,7 @@ mod tests {
             last_update_check_at: Some(1_730_000_000),
             last_dismissed_version: Some("v0.7.0".into()),
             read_tools: Some(ReadToolsMode::Auto),
+            completion_trigger_threshold: Some(3),
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let parsed: UserConfig = toml::from_str(&text).unwrap();
@@ -313,6 +321,28 @@ mod tests {
             let reloaded = UserConfigStore::load(&dir).unwrap();
             assert_eq!(reloaded.state().read_tools, Some(mode));
         }
+    }
+
+    #[test]
+    fn completion_trigger_threshold_default_round_trips() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.completion_trigger_threshold, None);
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            text.trim().is_empty(),
+            "default should serialise to empty TOML"
+        );
+    }
+
+    #[test]
+    fn completion_trigger_threshold_custom_round_trips() {
+        let cfg = UserConfig {
+            completion_trigger_threshold: Some(3),
+            ..Default::default()
+        };
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let parsed: UserConfig = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.completion_trigger_threshold, Some(3));
     }
 
     #[test]

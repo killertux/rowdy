@@ -38,13 +38,13 @@ pub fn apply_completion(
     let cursor_offset = cursor_to_offset(state);
     let partial_start = partial_start.min(cursor_offset).min(chars.len());
 
-    let (appendix, cursor_back) = trail_pieces(trail);
+    let (appendix, cursor_back) = trail_pieces(&trail);
     let mut next = String::with_capacity(
         partial_start + insert.len() + appendix.len() + (chars.len() - cursor_offset),
     );
     next.extend(chars[..partial_start].iter());
     next.push_str(insert);
-    next.push_str(appendix);
+    next.push_str(&appendix);
     next.extend(chars[cursor_offset..].iter());
 
     state.lines = Lines::from(next.as_str());
@@ -60,13 +60,11 @@ pub fn apply_completion(
 /// Translate an `InsertTrail` to its raw pieces: the text appended
 /// after `insert`, and how many chars to back the cursor up after the
 /// whole thing is laid down.
-fn trail_pieces(trail: InsertTrail) -> (&'static str, usize) {
+fn trail_pieces(trail: &InsertTrail) -> (String, usize) {
     match trail {
-        InsertTrail::None => ("", 0),
-        InsertTrail::Space => (" ", 0),
-        // Insert `()` then back the cursor up by 1 so it lands
-        // between the parens.
-        InsertTrail::OpenParens => ("()", 1),
+        InsertTrail::None => (String::new(), 0),
+        InsertTrail::OpenParens => ("()".into(), 1),
+        InsertTrail::Alias(a) => (format!(" {}", a), 0),
     }
 }
 
@@ -113,11 +111,11 @@ mod tests {
     }
 
     #[test]
-    fn appends_space_trail_after_table() {
+    fn appends_alias_trail_after_table() {
         let mut state = EditorState::new(Lines::from("SELECT * FROM us"));
         state.cursor = Index2::new(0, 16);
-        apply_completion(&mut state, 14, "users", InsertTrail::Space);
-        assert_eq!(flatten(&state), "SELECT * FROM users ");
+        apply_completion(&mut state, 14, "users", InsertTrail::Alias("u".into()));
+        assert_eq!(flatten(&state), "SELECT * FROM users u");
     }
 
     #[test]

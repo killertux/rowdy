@@ -101,6 +101,13 @@ pub enum WorkerEvent {
         name: String,
         error: DatasourceError,
     },
+    /// Result of a one-shot `TestConnection` fired from the connection
+    /// form. The active datasource is NOT swapped; success just means
+    /// the URL accepted a connect-then-drop handshake.
+    TestConnectionResult {
+        success: bool,
+        error: Option<String>,
+    },
     /// Cache prime stage finished. The data is already written into the
     /// shared `SchemaCache`; this event is purely a signal so the UI can
     /// re-render the popover (and a future schema panel) when fresh

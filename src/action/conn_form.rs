@@ -1,12 +1,14 @@
 //! `Action::ConnForm(_)` dispatcher — name+url two-field connection
 //! editor. Handles the create/edit common save path, including the
-//! post-save branch (auto-connect vs. return to picker).
+//! post-save branch (auto-connect vs. return to picker) and the
+//! test-connection flow.
 
 use crate::action::{ConnFormAction, copy_from, cut_from, dispatch_connect, paste_into};
 use crate::app::App;
-use crate::state::conn_form::ConnFormPostSave;
+use crate::state::conn_form::{ConnFormPostSave, TestResult};
 use crate::state::conn_list::ConnListState;
 use crate::state::screen::Screen;
+use crate::worker::WorkerEvent;
 
 pub fn apply(app: &mut App, action: ConnFormAction) {
     let Screen::EditConnection(state) = &mut app.screen else {
@@ -15,16 +17,25 @@ pub fn apply(app: &mut App, action: ConnFormAction) {
     match action {
         ConnFormAction::Input(input) => {
             let _ = state.current_input_mut().input(input);
+            state.test_result = None;
         }
-        ConnFormAction::Paste(text) => paste_into(state.current_input_mut(), &app.log, text),
+        ConnFormAction::Paste(text) => {
+            paste_into(state.current_input_mut(), &app.log, text);
+            state.test_result = None;
+        }
         ConnFormAction::Copy => copy_from(state.current_input_mut(), &app.log),
-        ConnFormAction::Cut => cut_from(state.current_input_mut(), &app.log),
+        ConnFormAction::Cut => {
+            cut_from(state.current_input_mut(), &app.log);
+            state.test_result = None;
+        }
         ConnFormAction::ToggleFocus => state.toggle_focus(),
         ConnFormAction::ClearField => {
             state.current_input_mut().clear();
+            state.test_result = None;
         }
         ConnFormAction::Cancel => app.should_quit = true,
         ConnFormAction::Submit => submit(app),
+        ConnFormAction::TestConnection => test_connection(app),
     }
 }
 
@@ -78,4 +89,27 @@ fn submit(app: &mut App) {
             app.screen = Screen::ConnectionList(list);
         }
     }
+}
+
+fn test_connection(app: &mut App) {
+    let Screen::EditConnection(state) = &mut app.screen else {
+        return;
+    };
+    state.test_result = None;
+    let url = state.url_value();
+    if url.is_empty() {
+        state.test_result = Some(TestResult::Failure("url is empty".into()));
+        return;
+    }
+    state.testing = true;
+    let evt_tx = app.evt_tx.clone();
+    let log = app.log.clone();
+    tokio::spawn(async move {
+        let result = crate::datasource::connect(&url, log).await;
+        let (success, error) = match result {
+            Ok(_) => (true, None),
+            Err(e) => (false, Some(e.to_string())),
+        };
+        let _ = evt_tx.send(WorkerEvent::TestConnectionResult { success, error });
+    });
 }

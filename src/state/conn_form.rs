@@ -7,6 +7,12 @@ pub enum ConnFormField {
     Url,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestResult {
+    Success,
+    Failure(String),
+}
+
 /// What to do once `ConnFormState` is successfully submitted. Lets the
 /// first-launch flow auto-connect while `:conn add` / `:conn edit` just
 /// save and bounce back to the list.
@@ -28,6 +34,11 @@ pub struct ConnFormState {
     /// overwrite). `None` for a fresh create.
     pub original: Option<String>,
     pub post_save: ConnFormPostSave,
+    /// `true` while a test-connect is in flight.
+    pub testing: bool,
+    /// Result of the most recent test-connect. Cleared when any field
+    /// changes (next edit discards the stale result).
+    pub test_result: Option<TestResult>,
 }
 
 impl ConnFormState {
@@ -39,6 +50,8 @@ impl ConnFormState {
             error: None,
             original: None,
             post_save: ConnFormPostSave::AutoConnect,
+            testing: false,
+            test_result: None,
         }
     }
 
@@ -50,6 +63,8 @@ impl ConnFormState {
             error: None,
             original: Some(name),
             post_save: ConnFormPostSave::AutoConnect,
+            testing: false,
+            test_result: None,
         }
     }
 

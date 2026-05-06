@@ -361,7 +361,8 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
 - **Saved connections** in `./.rowdy/config.toml`, optionally encrypted with a
   password (argon2id + chacha20-poly1305). Pick one from `:conn`, switch live
   with `:conn use NAME`. The password prompts in-TUI on launch or via
-  `--password`. Manage them without the TUI via `rowdy connections …`.
+  `--password`. Manage them without the TUI via `rowdy connections …`. The
+  connection form includes `Ctrl+T` to test a URL before saving.
 - **Per-connection editor sessions** persisted at
   `./.rowdy/sessions/<name>/session_0.sql`. The buffer is flushed 800ms
   after the last edit and reloaded on the next launch (or `:conn use`
@@ -611,8 +612,10 @@ Format details:
 ### Autocomplete
 
 The popover **auto-opens** in editor Insert mode after you type `.` or
-two identifier characters; `Ctrl+Space` forces it open in any editor
-mode. Selection and acceptance:
+at least N identifier characters (default 2, configurable via
+`completion_trigger_threshold` in `~/.rowdy/config.toml`);
+`Ctrl+Space` forces it open in any editor mode.
+Selection and acceptance:
 
 | Keys                  | Action                                          |
 |-----------------------|-------------------------------------------------|
@@ -633,18 +636,21 @@ suggestions:
   the default schema (or the named schema after `<schema>.`), plus
   any **CTE names** declared with `WITH`.
 - After `<alias>.` or `<table>.` → **columns** of that bound table.
-  Bound CTEs return no columns yet.
-- After `SELECT` / `WHERE` / `ON` / `AND` / `,` / operators →
-  **columns** unioned across FROM/JOIN bindings (qualifier-free)
-  plus **SQL functions** (per-dialect curated list).
+  CTE bodies with named columns surface those columns; `SELECT *`
+  bodies resolve against the schema cache when the FROM has a single
+  base table.
+- After `SELECT` / `WHERE` / `ON` / `AND` / `,` / `INSERT INTO`
+  column list / operators → **columns** unioned across FROM/JOIN
+  bindings (qualifier-free) plus **SQL functions** (per-dialect
+  curated list).
 - Statement start, after `;`, or unrecognised slot → **keywords**.
 
-FROM/JOIN aliases are resolved by a forward pass over the *whole*
+FROM/JOIN/INSERT aliases are resolved by a forward pass over the *whole*
 statement, so `SELECT u.|` autocompletes correctly even when the
 `FROM users u` clause comes after the cursor. CTE definitions
 (`WITH name AS (…)`, optional `RECURSIVE`, multiple comma-separated
-CTEs) are recognized too; subqueries and derived-table aliases are
-not yet bound.
+CTEs) and derived-table aliases are recognized; their bodies'
+projections are extracted for column completion.
 
 **Ranking.** Candidates are scored with `nucleo-matcher` (fuzzy
 subsequence match) and re-ordered by:
@@ -668,7 +674,9 @@ refinements:
   `` `x` `` for MySQL — and any internal quote chars are doubled.
   Keywords and functions are inserted *as displayed*, never quoted.
 - **Trail** depends on item kind:
-  - **Table / view** in a FROM/JOIN slot → trailing space.
+  - **Table / view** in a FROM/JOIN/INSERT INTO slot → auto-generated
+    short alias (e.g. `users u` from first letters of underscore
+    segments).
   - **Function** with arguments → appended `()` with the cursor
     between them, ready for arguments.
   - **Function** with no arguments (`NOW`, `CURRENT_TIMESTAMP`,
@@ -901,17 +909,6 @@ Next likely steps, roughly ordered:
   timeout (with the existing server-side cancel path) would be a cheap
   guardrail.
 
-### Authoring
-
-- **Autocomplete — `SELECT *` recursion in CTE / derived bodies.**
-  Today the projection extractor pulls named columns and aliased
-  expressions out of `WITH x AS (SELECT id, name FROM users) SELECT
-  x.|`-style bodies, but `SELECT *` falls through with an empty
-  column list. Threading the schema cache through `classify` so the
-  extractor can resolve `*` against a single-base-table FROM is the
-  next step. Auto-alias suggestion and configurable trigger
-  thresholds are smaller follow-ups.
-
 ### Result view
 
 - **Cell zoom / detail view** for long TEXT / JSON cells. The bottom-row
@@ -923,9 +920,3 @@ Next likely steps, roughly ordered:
 - **Query history** surfaced under each result block.
 - **`:explain` / `<Space>x`** that wraps the statement under the cursor
   in `EXPLAIN` (or `EXPLAIN ANALYZE`) for the active dialect.
-
-### Connection management
-
-- **"Test connection"** action in the connection form — fire a one-shot
-  connect-and-disconnect so URL typos surface before the user saves and
-  switches.

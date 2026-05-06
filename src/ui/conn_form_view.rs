@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 use ratatui_textarea::TextArea;
 
-use crate::state::conn_form::{ConnFormField, ConnFormState};
+use crate::state::conn_form::{ConnFormField, ConnFormState, TestResult};
 use crate::ui::theme::Theme;
 
 const NAME_LABEL: &str = "Name: ";
@@ -50,6 +50,7 @@ impl Widget for ConnForm<'_> {
             Constraint::Length(1), // url row
             Constraint::Length(1), // blank
             Constraint::Length(2), // hint / error (wrapped)
+            Constraint::Length(1), // test connection status
             Constraint::Length(2), // help (wrapped)
         ])
         .split(inner);
@@ -90,12 +91,43 @@ impl Widget for ConnForm<'_> {
             .wrap(Wrap { trim: true })
             .render(chunks[3], buf);
 
+        // ── test connection status ──
+        let test_line = if self.state.testing {
+            Line::from(Span::styled(
+                "Testing…",
+                Style::default()
+                    .fg(self.theme.fg_dim)
+                    .bg(self.theme.bg)
+                    .add_modifier(Modifier::ITALIC),
+            ))
+        } else {
+            match &self.state.test_result {
+                Some(TestResult::Success) => Line::from(Span::styled(
+                    "✓ Connected",
+                    Style::default().fg(self.theme.status_ok).bg(self.theme.bg),
+                )),
+                Some(TestResult::Failure(msg)) => Line::from(Span::styled(
+                    format!("✗ {msg}"),
+                    Style::default()
+                        .fg(self.theme.status_error)
+                        .bg(self.theme.bg),
+                )),
+                None => Line::from(Span::styled(
+                    "Ctrl+T to test connection",
+                    Style::default().fg(self.theme.fg_dim).bg(self.theme.bg),
+                )),
+            }
+        };
+        Paragraph::new(test_line)
+            .wrap(Wrap { trim: true })
+            .render(chunks[4], buf);
+
         Paragraph::new(Line::from(Span::styled(
             "Tab to switch · Enter to save · Esc to quit",
             Style::default().fg(self.theme.fg_dim).bg(self.theme.bg),
         )))
         .wrap(Wrap { trim: true })
-        .render(chunks[4], buf);
+        .render(chunks[5], buf);
     }
 }
 
@@ -125,8 +157,8 @@ fn render_field(
 
 pub fn inner_box(area: Rect) -> Option<Rect> {
     let width = area.width.min(70);
-    let height = 10.min(area.height);
-    if width < 30 || height < 7 {
+    let height = 12.min(area.height);
+    if width < 30 || height < 8 {
         return None;
     }
     let x = area.x + (area.width.saturating_sub(width)) / 2;
