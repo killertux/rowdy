@@ -1437,7 +1437,9 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
         WorkerEvent::ConnectFailed { name, error } => {
             on_connect_failed(app, name, error.to_string())
         }
-        WorkerEvent::TestConnectionResult { success, error, .. } => on_test_result(app, success, error),
+        WorkerEvent::TestConnectionResult { success, error, .. } => {
+            on_test_result(app, success, error)
+        }
         WorkerEvent::CompletionCacheStage { stage } => on_cache_stage(app, stage),
         WorkerEvent::CompletionCacheFailed { stage, error } => {
             on_cache_failed(app, stage, error.to_string())

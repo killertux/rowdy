@@ -110,9 +110,6 @@ fn test_connection(app: &mut App) {
             Ok(_) => (true, None),
             Err(e) => (false, Some(e.to_string())),
         };
-        let _ = evt_tx.send(WorkerEvent::TestConnectionResult {
-            success,
-            error,
-        });
+        let _ = evt_tx.send(WorkerEvent::TestConnectionResult { success, error });
     });
 }

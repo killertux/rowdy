@@ -104,9 +104,7 @@ impl Widget for ConnForm<'_> {
             match &self.state.test_result {
                 Some(TestResult::Success) => Line::from(Span::styled(
                     "✓ Connected",
-                    Style::default()
-                        .fg(self.theme.status_ok)
-                        .bg(self.theme.bg),
+                    Style::default().fg(self.theme.status_ok).bg(self.theme.bg),
                 )),
                 Some(TestResult::Failure(msg)) => Line::from(Span::styled(
                     format!("✗ {msg}"),

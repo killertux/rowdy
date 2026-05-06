@@ -357,7 +357,8 @@ fn collect_bindings(
                 continue;
             }
             let body_end = i.saturating_sub(1);
-            let synthetic_columns = extract_projection_columns(&toks[body_start..body_end], cache, resolve);
+            let synthetic_columns =
+                extract_projection_columns(&toks[body_start..body_end], cache, resolve);
             skip_trivia(&toks, &mut i);
             if let Some(Token::Word(w)) = toks.get(i)
                 && w.keyword == Keyword::AS
@@ -441,7 +442,12 @@ fn collect_bindings(
 /// at the first non-CTE keyword (SELECT/INSERT/UPDATE/DELETE) so a
 /// WITH that's part of, say, an UPDATE doesn't bleed into following
 /// statements.
-fn collect_cte_bindings(toks: &[&Token], out: &mut HashMap<String, TableBinding>, cache: &SchemaCache, resolve: &ResolveContext) {
+fn collect_cte_bindings(
+    toks: &[&Token],
+    out: &mut HashMap<String, TableBinding>,
+    cache: &SchemaCache,
+    resolve: &ResolveContext,
+) {
     let mut i = 0;
     while i < toks.len() {
         let with_here = matches!(
@@ -502,7 +508,11 @@ fn collect_cte_bindings(toks: &[&Token], out: &mut HashMap<String, TableBinding>
                     // `i` now points one past the matching RParen.
                     // The body slice excludes both parens.
                     let body_end = i.saturating_sub(1);
-                    Some(extract_projection_columns(&toks[body_start..body_end], cache, resolve))
+                    Some(extract_projection_columns(
+                        &toks[body_start..body_end],
+                        cache,
+                        resolve,
+                    ))
                 }
             } else {
                 None
@@ -647,9 +657,7 @@ fn extract_projection_columns(
                 }
             } else if let Some(qual) = qualified_star_qualifier(item_slice) {
                 let matches_table = qual.eq_ignore_ascii_case(&binding.table)
-                    || alias
-                        .as_ref()
-                        .is_some_and(|a| qual.eq_ignore_ascii_case(a));
+                    || alias.as_ref().is_some_and(|a| qual.eq_ignore_ascii_case(a));
                 if matches_table {
                     let key = (
                         binding.catalog.clone(),
@@ -1404,7 +1412,11 @@ mod tests {
         // Column context with INSERT target table as binding.
         let stmt = "INSERT INTO users (";
         let r = classify_at_end(stmt);
-        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+        assert!(
+            r.bindings.iter().any(|b| b.table == "users"),
+            "{:?}",
+            r.bindings
+        );
         assert_eq!(r.context, CompletionContext::Column { qualifier: None });
     }
 
@@ -1412,7 +1424,11 @@ mod tests {
     fn insert_into_with_partial_column() {
         let stmt = "INSERT INTO users (na";
         let r = classify_at_end(stmt);
-        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+        assert!(
+            r.bindings.iter().any(|b| b.table == "users"),
+            "{:?}",
+            r.bindings
+        );
         assert_eq!(r.context, CompletionContext::Column { qualifier: None });
         assert_eq!(r.partial, "na");
     }
@@ -1421,7 +1437,11 @@ mod tests {
     fn insert_into_after_comma_is_column() {
         let stmt = "INSERT INTO users (id, ";
         let r = classify_at_end(stmt);
-        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+        assert!(
+            r.bindings.iter().any(|b| b.table == "users"),
+            "{:?}",
+            r.bindings
+        );
         assert_eq!(r.context, CompletionContext::Column { qualifier: None });
     }
 
@@ -1437,14 +1457,22 @@ mod tests {
     fn insert_or_replace_into_collects_binding() {
         let stmt = "INSERT OR REPLACE INTO users (";
         let r = classify_at_end(stmt);
-        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+        assert!(
+            r.bindings.iter().any(|b| b.table == "users"),
+            "{:?}",
+            r.bindings
+        );
     }
 
     #[test]
     fn insert_or_ignore_into_collects_binding() {
         let stmt = "INSERT OR IGNORE INTO users (";
         let r = classify_at_end(stmt);
-        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+        assert!(
+            r.bindings.iter().any(|b| b.table == "users"),
+            "{:?}",
+            r.bindings
+        );
     }
 
     #[test]
@@ -1456,7 +1484,11 @@ mod tests {
         // from the target table is more useful than keywords alone.
         let stmt = "INSERT INTO users VALUES (";
         let r = classify_at_end(stmt);
-        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+        assert!(
+            r.bindings.iter().any(|b| b.table == "users"),
+            "{:?}",
+            r.bindings
+        );
         assert_eq!(r.context, CompletionContext::Column { qualifier: None });
     }
 
@@ -1572,7 +1604,15 @@ mod tests {
         let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
         assert_eq!(
             cte.synthetic_columns.as_deref(),
-            Some(["id".to_string(), "name".to_string(), "email".to_string(), "n".to_string()].as_slice())
+            Some(
+                [
+                    "id".to_string(),
+                    "name".to_string(),
+                    "email".to_string(),
+                    "n".to_string()
+                ]
+                .as_slice()
+            )
         );
     }
 
