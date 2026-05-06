@@ -214,6 +214,9 @@ fn translate_conn_form_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Esc => Some(Action::ConnForm(ConnFormAction::Cancel)),
         KeyCode::Enter => Some(Action::ConnForm(ConnFormAction::Submit)),
         KeyCode::Tab | KeyCode::BackTab => Some(Action::ConnForm(ConnFormAction::ToggleFocus)),
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Action::ConnForm(ConnFormAction::TestConnection))
+        }
         _ => Some(Action::ConnForm(ConnFormAction::Input(Input::from(key)))),
     }
 }
@@ -1307,6 +1310,11 @@ mod tests {
         assert!(matches_action(
             &translate_conn_form_key(key(KeyCode::Enter)),
             "Submit"
+        ));
+        // Ctrl+T → TestConnection
+        assert!(matches_action(
+            &translate_conn_form_key(ctrl(KeyCode::Char('t'))),
+            "TestConnection"
         ));
     }
 

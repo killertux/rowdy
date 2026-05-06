@@ -70,6 +70,7 @@ fn compute(app: &App) -> Option<Computed> {
         cursor.cursor_byte_in_stmt,
         dialect,
         resolve,
+        &cache,
     );
     let needs_loads = bindings_needing_columns(&cache, &result);
     let mut items = autocomplete::compute(
@@ -231,7 +232,7 @@ fn accept(app: &mut App) {
         &mut app.editor.state,
         state.anchor_offset,
         &to_insert,
-        item.trail,
+        item.trail.clone(),
     );
     schedule_session_save(app);
 }
@@ -269,9 +270,16 @@ pub fn refresh(app: &mut App) {
     }
 }
 
+/// Default number of typed identifier characters before auto-trigger.
+pub const DEFAULT_TRIGGER_THRESHOLD: u8 = 2;
+
 /// Auto-trigger heuristic: open the popover after a keystroke when the
-/// user just typed `.` or has 2+ identifier chars in the current
+/// user just typed `.` or has enough identifier chars in the current
 /// partial. Insert mode + editor focus only; respects the snooze flag.
+///
+/// The threshold is read from `~/.rowdy/config.toml` (field
+/// `completion_trigger_threshold`). Defaults to 2; set to 1 for eager
+/// triggers, 0 to disable auto-trigger entirely (Ctrl+Space still works).
 pub fn maybe_auto_trigger(app: &mut App) {
     if app.completion.is_some() {
         return;
@@ -290,7 +298,16 @@ pub fn maybe_auto_trigger(app: &mut App) {
         .rev()
         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
         .count();
-    if !just_after_dot && partial_len < 2 {
+    let threshold = app
+        .user_config
+        .state()
+        .completion_trigger_threshold
+        .unwrap_or(DEFAULT_TRIGGER_THRESHOLD) as usize;
+    // Threshold of 0 disables auto-trigger entirely (but `.` still opens).
+    if threshold == 0 && !just_after_dot {
+        return;
+    }
+    if !just_after_dot && partial_len < threshold {
         return;
     }
     open(app, OpenSource::Auto);

@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer, Whitespace, Word};
 
+use super::cache::SchemaCache;
 use crate::datasource::DriverKind;
 use crate::sql_infer::dialect_for;
 
@@ -131,6 +132,7 @@ pub fn classify(
     cursor: usize,
     dialect: DriverKind,
     resolve: ResolveContext,
+    cache: &SchemaCache,
 ) -> ClassifyResult {
     let cursor = cursor.min(statement.len());
     let prefix = &statement[..cursor];
@@ -155,7 +157,7 @@ pub fn classify(
     let full_tokens = Tokenizer::new(&*dialect_obj, statement)
         .tokenize_with_location()
         .unwrap_or_default();
-    let bindings_map = collect_bindings(&full_tokens, &resolve);
+    let bindings_map = collect_bindings(&full_tokens, &resolve, cache);
     let bindings: Vec<TableBinding> = bindings_map.values().cloned().collect();
 
     let context = classify_from_tokens(&head_tokens, &bindings_map);
@@ -283,24 +285,69 @@ fn lookup_binding<'a>(
 fn collect_bindings(
     tokens: &[TokenWithSpan],
     resolve: &ResolveContext,
+    cache: &SchemaCache,
 ) -> HashMap<String, TableBinding> {
     let mut out = HashMap::new();
     let toks: Vec<&Token> = tokens.iter().map(|t| &t.token).collect();
     // Sweep for CTE definitions first so a later FROM <cte> doesn't
     // overwrite the CTE binding with a freshly-resolved table one.
-    collect_cte_bindings(&toks, &mut out);
+    collect_cte_bindings(&toks, &mut out, cache, resolve);
     let mut i = 0;
     while i < toks.len() {
         let is_intro = matches!(
             toks[i],
-            Token::Word(w) if matches!(w.keyword, Keyword::FROM | Keyword::JOIN | Keyword::UPDATE)
+            Token::Word(w) if matches!(w.keyword, Keyword::FROM | Keyword::JOIN | Keyword::UPDATE | Keyword::INSERT)
         );
         if !is_intro {
             i += 1;
             continue;
         }
-        i += 1;
+        let intro_kw = if let Token::Word(w) = &toks[i] {
+            w.keyword
+        } else {
+            i += 1;
+            continue;
+        };
+        i += 1; // skip the intro keyword
         skip_trivia(&toks, &mut i);
+
+        // INSERT INTO <table> — skip past INTO to reach the table name.
+        if intro_kw == Keyword::INSERT {
+            // Skip optional INSERT OR <action> (REPLACE, IGNORE, ABORT, etc.)
+            if let Some(Token::Word(w)) = toks.get(i)
+                && w.keyword == Keyword::OR
+            {
+                i += 1;
+                skip_trivia(&toks, &mut i);
+                if matches!(toks.get(i), Some(Token::Word(_))) {
+                    i += 1;
+                    skip_trivia(&toks, &mut i);
+                }
+            }
+            // MySQL: INSERT IGNORE INTO ...
+            if let Some(Token::Word(w)) = toks.get(i)
+                && w.keyword == Keyword::IGNORE
+            {
+                i += 1;
+                skip_trivia(&toks, &mut i);
+            }
+            // Expect INTO
+            if let Some(Token::Word(w)) = toks.get(i)
+                && w.keyword == Keyword::INTO
+            {
+                i += 1;
+                skip_trivia(&toks, &mut i);
+            } else {
+                continue;
+            }
+            let Some(parts) = take_dotted_ident(&toks, &mut i) else {
+                continue;
+            };
+            let binding = resolve_binding(&parts, resolve);
+            let key = parts.last().unwrap().clone();
+            out.insert(key, binding);
+            continue;
+        }
         // Derived table: `FROM ( SELECT … ) [AS] alias`. The body's
         // projection becomes the binding's synthetic_columns; the
         // alias is the binding key.
@@ -310,7 +357,7 @@ fn collect_bindings(
                 continue;
             }
             let body_end = i.saturating_sub(1);
-            let synthetic_columns = extract_projection_columns(&toks[body_start..body_end]);
+            let synthetic_columns = extract_projection_columns(&toks[body_start..body_end], cache, resolve);
             skip_trivia(&toks, &mut i);
             if let Some(Token::Word(w)) = toks.get(i)
                 && w.keyword == Keyword::AS
@@ -394,7 +441,7 @@ fn collect_bindings(
 /// at the first non-CTE keyword (SELECT/INSERT/UPDATE/DELETE) so a
 /// WITH that's part of, say, an UPDATE doesn't bleed into following
 /// statements.
-fn collect_cte_bindings(toks: &[&Token], out: &mut HashMap<String, TableBinding>) {
+fn collect_cte_bindings(toks: &[&Token], out: &mut HashMap<String, TableBinding>, cache: &SchemaCache, resolve: &ResolveContext) {
     let mut i = 0;
     while i < toks.len() {
         let with_here = matches!(
@@ -455,7 +502,7 @@ fn collect_cte_bindings(toks: &[&Token], out: &mut HashMap<String, TableBinding>
                     // `i` now points one past the matching RParen.
                     // The body slice excludes both parens.
                     let body_end = i.saturating_sub(1);
-                    Some(extract_projection_columns(&toks[body_start..body_end]))
+                    Some(extract_projection_columns(&toks[body_start..body_end], cache, resolve))
                 }
             } else {
                 None
@@ -492,15 +539,21 @@ fn collect_cte_bindings(toks: &[&Token], out: &mut HashMap<String, TableBinding>
 /// - Bare expressions without `AS` (e.g. `COUNT(*)`, `a + b`) — the
 ///   item is dropped from the column list. The user gets completions
 ///   for the well-named columns and nothing for the computed ones.
-/// - `*` and `t.*` — currently dropped; `SELECT *` recursion lives
-///   behind the README's follow-up "smaller follow-ups" line and
-///   isn't implemented here.
+/// - `*` → resolves to every column of the single base table in the
+///   body's FROM clause (via the schema cache). Multi-table FROM /
+///   JOINs / subqueries bail — the wildcard is dropped.
+/// - `t.*` → resolves to every column of `t` when `t` matches the
+///   FROM table's alias or name.
 ///
 /// Set ops (`UNION`/`INTERSECT`/`EXCEPT`) bail early — resolving
 /// union shapes is out of scope for this pass. The returned list
 /// may be empty (engine treats that as "we recognised the body but
 /// have no columns to surface").
-fn extract_projection_columns(tokens: &[&Token]) -> Vec<String> {
+fn extract_projection_columns(
+    tokens: &[&Token],
+    cache: &SchemaCache,
+    resolve: &ResolveContext,
+) -> Vec<String> {
     let mut i = 0;
     skip_trivia(tokens, &mut i);
 
@@ -525,6 +578,10 @@ fn extract_projection_columns(tokens: &[&Token]) -> Vec<String> {
             skip_trivia(tokens, &mut i);
         }
     }
+
+    // Pre-scan: find the single base table in the FROM clause so we
+    // can resolve `SELECT *` and `SELECT t.*`.
+    let from_ref = find_from_table_in_body(tokens, cache, resolve);
 
     let mut cols: Vec<String> = Vec::new();
     loop {
@@ -571,9 +628,47 @@ fn extract_projection_columns(tokens: &[&Token]) -> Vec<String> {
             }
             i += 1;
         }
-        if let Some(name) = projection_item_name(&tokens[item_start..i]) {
+        let item_slice = trim_trivia_slice(&tokens[item_start..i]);
+
+        // Resolve `*` and `t.*` from the FROM table's schema cache
+        // entry. Only succeeds when the body has exactly one base
+        // table in its FROM clause (no JOINs, no subqueries).
+        if let Some((ref binding, ref alias)) = from_ref {
+            if is_wildcard_item(item_slice) {
+                let key = (
+                    binding.catalog.clone(),
+                    binding.schema.clone(),
+                    binding.table.clone(),
+                );
+                if let Some(columns) = cache.columns.get(&key) {
+                    for c in columns {
+                        cols.push(c.name.clone());
+                    }
+                }
+            } else if let Some(qual) = qualified_star_qualifier(item_slice) {
+                let matches_table = qual.eq_ignore_ascii_case(&binding.table)
+                    || alias
+                        .as_ref()
+                        .is_some_and(|a| qual.eq_ignore_ascii_case(a));
+                if matches_table {
+                    let key = (
+                        binding.catalog.clone(),
+                        binding.schema.clone(),
+                        binding.table.clone(),
+                    );
+                    if let Some(columns) = cache.columns.get(&key) {
+                        for c in columns {
+                            cols.push(c.name.clone());
+                        }
+                    }
+                }
+            } else if let Some(name) = projection_item_name(item_slice) {
+                cols.push(name);
+            }
+        } else if let Some(name) = projection_item_name(item_slice) {
             cols.push(name);
         }
+
         if matches!(tokens.get(i), Some(Token::Comma)) {
             i += 1;
         } else {
@@ -583,6 +678,111 @@ fn extract_projection_columns(tokens: &[&Token]) -> Vec<String> {
         }
     }
     cols
+}
+
+/// Find the single base table in a CTE/derived body's FROM clause.
+/// Returns the resolved binding and the optional alias. Returns
+/// `None` for multi-table FROM (JOINs, commas), subqueries, or
+/// missing FROM.
+fn find_from_table_in_body(
+    tokens: &[&Token],
+    _cache: &SchemaCache,
+    resolve: &ResolveContext,
+) -> Option<(TableBinding, Option<String>)> {
+    let mut i = 0;
+    while i < tokens.len() {
+        if let Token::Word(w) = tokens[i]
+            && w.keyword == Keyword::FROM
+        {
+            i += 1;
+            skip_trivia(tokens, &mut i);
+            // Can't resolve * through a subquery in FROM.
+            if matches!(tokens.get(i), Some(Token::LParen)) {
+                return None;
+            }
+            let parts = take_dotted_ident(tokens, &mut i)?;
+            let binding = resolve_binding(&parts, resolve);
+            skip_trivia(tokens, &mut i);
+            // Collect optional alias.
+            let mut alias = None;
+            if let Some(Token::Word(w)) = tokens.get(i)
+                && w.keyword == Keyword::AS
+            {
+                i += 1;
+                skip_trivia(tokens, &mut i);
+            }
+            if let Some(Token::Word(w)) = tokens.get(i) {
+                if !is_table_terminator(w) {
+                    alias = Some(w.value.clone());
+                    i += 1;
+                }
+            }
+            // Bail on multi-table FROM (JOIN or comma follows).
+            skip_trivia(tokens, &mut i);
+            if let Some(Token::Word(w)) = tokens.get(i) {
+                if matches!(
+                    w.keyword,
+                    Keyword::JOIN
+                        | Keyword::INNER
+                        | Keyword::LEFT
+                        | Keyword::RIGHT
+                        | Keyword::FULL
+                        | Keyword::CROSS
+                        | Keyword::NATURAL
+                ) {
+                    return None;
+                }
+            }
+            if matches!(tokens.get(i), Some(Token::Comma)) {
+                return None;
+            }
+            return Some((binding, alias));
+        }
+        // Stop at set-ops — can't resolve across UNION boundaries.
+        if let Token::Word(w) = tokens[i]
+            && matches!(
+                w.keyword,
+                Keyword::UNION | Keyword::INTERSECT | Keyword::EXCEPT
+            )
+        {
+            return None;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Trim leading and trailing trivia from a token slice, returning a
+/// subslice suitable for `projection_item_name` or wildcard detection.
+fn trim_trivia_slice<'a>(tokens: &'a [&'a Token]) -> &'a [&'a Token] {
+    let mut start = 0;
+    while start < tokens.len() && is_trivia(tokens[start]) {
+        start += 1;
+    }
+    let mut end = tokens.len();
+    while end > start && is_trivia(tokens[end - 1]) {
+        end -= 1;
+    }
+    &tokens[start..end]
+}
+
+/// True when the (trimmed) projection item is a bare `*`.
+fn is_wildcard_item(tokens: &[&Token]) -> bool {
+    tokens.len() == 1 && matches!(tokens[0], Token::Mul)
+}
+
+/// Returns the qualifier when the (trimmed) projection item is
+/// `<word> . *`.
+fn qualified_star_qualifier<'a>(tokens: &'a [&'a Token]) -> Option<&'a str> {
+    if tokens.len() == 3
+        && let Token::Word(qual) = tokens[0]
+        && matches!(tokens[1], Token::Period)
+        && matches!(tokens[2], Token::Mul)
+    {
+        Some(qual.value.as_str())
+    } else {
+        None
+    }
 }
 
 /// Reduce a single projection item (the slice between commas) to its
@@ -783,6 +983,7 @@ mod tests {
             stmt.len(),
             DriverKind::Sqlite,
             ResolveContext::empty(),
+            &SchemaCache::new(),
         )
     }
 
@@ -795,6 +996,7 @@ mod tests {
                 default_catalog: Some("main"),
                 default_schema: Some("main"),
             },
+            &SchemaCache::new(),
         )
     }
 
@@ -1193,5 +1395,194 @@ mod tests {
         assert_eq!(r.bindings.len(), 1);
         let u = r.bindings.iter().find(|b| b.table == "users").unwrap();
         assert_eq!(u.table, "users");
+    }
+
+    // ── INSERT INTO binding tests ──
+
+    #[test]
+    fn insert_into_collects_target_table() {
+        // Column context with INSERT target table as binding.
+        let stmt = "INSERT INTO users (";
+        let r = classify_at_end(stmt);
+        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+        assert_eq!(r.context, CompletionContext::Column { qualifier: None });
+    }
+
+    #[test]
+    fn insert_into_with_partial_column() {
+        let stmt = "INSERT INTO users (na";
+        let r = classify_at_end(stmt);
+        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+        assert_eq!(r.context, CompletionContext::Column { qualifier: None });
+        assert_eq!(r.partial, "na");
+    }
+
+    #[test]
+    fn insert_into_after_comma_is_column() {
+        let stmt = "INSERT INTO users (id, ";
+        let r = classify_at_end(stmt);
+        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+        assert_eq!(r.context, CompletionContext::Column { qualifier: None });
+    }
+
+    #[test]
+    fn insert_into_table_no_column_list_keeps_table_context() {
+        // After INSERT INTO us — still suggesting table names.
+        let stmt = "INSERT INTO us";
+        let r = classify_at_end(stmt);
+        assert_eq!(r.partial, "us");
+    }
+
+    #[test]
+    fn insert_or_replace_into_collects_binding() {
+        let stmt = "INSERT OR REPLACE INTO users (";
+        let r = classify_at_end(stmt);
+        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+    }
+
+    #[test]
+    fn insert_or_ignore_into_collects_binding() {
+        let stmt = "INSERT OR IGNORE INTO users (";
+        let r = classify_at_end(stmt);
+        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+    }
+
+    #[test]
+    fn insert_into_values_lparen_is_column() {
+        // VALUES ( — LParen triggers column_or_mixed with the INSERT
+        // binding in scope. That suggests columns (the user may be
+        // typing a column reference in an expression slot). Even if
+        // not always the right thing, the popover showing columns
+        // from the target table is more useful than keywords alone.
+        let stmt = "INSERT INTO users VALUES (";
+        let r = classify_at_end(stmt);
+        assert!(r.bindings.iter().any(|b| b.table == "users"), "{:?}", r.bindings);
+        assert_eq!(r.context, CompletionContext::Column { qualifier: None });
+    }
+
+    // ── SELECT * resolution in CTE / derived table bodies ──
+
+    fn cache_with_columns(table: &str, cols: &[&str]) -> SchemaCache {
+        let mut cache = SchemaCache::new();
+        cache.default_catalog = Some("main".into());
+        cache.default_schema = Some("main".into());
+        cache.columns.insert(
+            ("main".into(), "main".into(), table.to_string()),
+            cols.iter()
+                .map(|n| super::super::cache::CachedColumn {
+                    name: (*n).to_string(),
+                    type_name: "TEXT".into(),
+                })
+                .collect(),
+        );
+        cache
+    }
+
+    fn classify_at_with_cache(stmt: &str, cursor: usize, cache: &SchemaCache) -> ClassifyResult {
+        classify(
+            stmt,
+            cursor,
+            DriverKind::Sqlite,
+            ResolveContext {
+                default_catalog: Some("main"),
+                default_schema: Some("main"),
+            },
+            cache,
+        )
+    }
+
+    fn classify_at_end_with_cache(stmt: &str, cache: &SchemaCache) -> ClassifyResult {
+        classify_at_with_cache(stmt, stmt.len(), cache)
+    }
+
+    #[test]
+    fn cte_body_select_star_resolves_from_cache() {
+        let cache = cache_with_columns("users", &["id", "name", "email"]);
+        let stmt = "WITH u AS (SELECT * FROM users) SELECT * FROM u";
+        let r = classify_at_end_with_cache(stmt, &cache);
+        let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
+        assert_eq!(
+            cte.synthetic_columns.as_deref(),
+            Some(["id".to_string(), "name".to_string(), "email".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn cte_body_select_table_star_resolves_from_cache() {
+        let cache = cache_with_columns("users", &["id", "name"]);
+        let stmt = "WITH u AS (SELECT users.* FROM users) SELECT * FROM u";
+        let r = classify_at_end_with_cache(stmt, &cache);
+        let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
+        assert_eq!(
+            cte.synthetic_columns.as_deref(),
+            Some(["id".to_string(), "name".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn cte_body_select_alias_star_resolves_from_cache() {
+        let cache = cache_with_columns("users", &["id", "name"]);
+        let stmt = "WITH u AS (SELECT x.* FROM users x) SELECT * FROM u";
+        let r = classify_at_end_with_cache(stmt, &cache);
+        let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
+        assert_eq!(
+            cte.synthetic_columns.as_deref(),
+            Some(["id".to_string(), "name".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn cte_body_select_star_with_join_still_drops_wildcard() {
+        // Multi-table FROM — can't resolve *, falls back to empty.
+        let cache = cache_with_columns("users", &["id", "name"]);
+        let stmt = "WITH u AS (SELECT * FROM users JOIN posts) SELECT * FROM u";
+        let r = classify_at_end_with_cache(stmt, &cache);
+        let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
+        assert_eq!(cte.synthetic_columns.as_deref(), Some([].as_slice()));
+    }
+
+    #[test]
+    fn cte_body_select_star_without_cache_returns_empty() {
+        // No columns in cache — * resolves to nothing (graceful).
+        let cache = SchemaCache::new();
+        let stmt = "WITH u AS (SELECT * FROM users) SELECT * FROM u";
+        let r = classify_at_end_with_cache(stmt, &cache);
+        let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
+        assert_eq!(cte.synthetic_columns.as_deref(), Some([].as_slice()));
+    }
+
+    #[test]
+    fn derived_table_select_star_resolves_from_cache() {
+        let cache = cache_with_columns("users", &["id", "email"]);
+        let stmt = "SELECT s.id FROM (SELECT * FROM users) s";
+        let r = classify_at_end_with_cache(stmt, &cache);
+        let s = r.bindings.iter().find(|b| b.table == "s").unwrap();
+        assert!(!s.is_cte);
+        assert_eq!(
+            s.synthetic_columns.as_deref(),
+            Some(["id".to_string(), "email".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn cte_body_mixed_star_and_named_columns() {
+        let cache = cache_with_columns("users", &["id", "name", "email"]);
+        let stmt = "WITH u AS (SELECT *, 1 AS n FROM users) SELECT * FROM u";
+        let r = classify_at_end_with_cache(stmt, &cache);
+        let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
+        assert_eq!(
+            cte.synthetic_columns.as_deref(),
+            Some(["id".to_string(), "name".to_string(), "email".to_string(), "n".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn cte_body_qualified_star_wrong_table_drops() {
+        let cache = cache_with_columns("users", &["id", "name"]);
+        // posts.* doesn't match users — wildcard is dropped.
+        let stmt = "WITH u AS (SELECT posts.* FROM users) SELECT * FROM u";
+        let r = classify_at_end_with_cache(stmt, &cache);
+        let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
+        assert_eq!(cte.synthetic_columns.as_deref(), Some([].as_slice()));
     }
 }

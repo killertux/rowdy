@@ -90,12 +90,13 @@ fn collect_tables(out: &mut Vec<CompletionItem>, tables: &[CachedTable]) {
             TableKind::Table => CompletionKind::Table,
             TableKind::View => CompletionKind::View,
         };
+        let alias = crate::autocomplete::generate_alias(&t.name);
         out.push(CompletionItem {
             label: t.name.clone(),
             kind,
             detail: None,
             insert: t.name.clone(),
-            trail: InsertTrail::Space,
+            trail: InsertTrail::Alias(alias),
         });
     }
 }
@@ -202,16 +203,14 @@ fn collect_functions(out: &mut Vec<CompletionItem>, dialect: DriverKind) {
 /// entry. Phase 5 can parse the body.
 fn collect_cte_bindings(out: &mut Vec<CompletionItem>, bindings: &[TableBinding]) {
     for b in bindings {
-        // CTE bindings are flagged by an empty schema *and* an empty
-        // catalog, since `collect_bindings` only sets that pair when
-        // a CTE was detected (real tables get the resolve defaults).
         if b.is_cte() {
+            let alias = crate::autocomplete::generate_alias(&b.table);
             out.push(CompletionItem {
                 label: b.table.clone(),
                 kind: CompletionKind::Cte,
                 detail: Some("WITH …".into()),
                 insert: b.table.clone(),
-                trail: InsertTrail::Space,
+                trail: InsertTrail::Alias(alias),
             });
         }
     }

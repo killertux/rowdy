@@ -239,6 +239,8 @@ pub enum ConnFormAction {
     ClearField,
     Submit,
     Cancel,
+    /// Fire a one-shot connect-and-disconnect to check the URL.
+    TestConnection,
 }
 
 #[derive(Debug)]
@@ -1435,6 +1437,7 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
         WorkerEvent::ConnectFailed { name, error } => {
             on_connect_failed(app, name, error.to_string())
         }
+        WorkerEvent::TestConnectionResult { success, error, .. } => on_test_result(app, success, error),
         WorkerEvent::CompletionCacheStage { stage } => on_cache_stage(app, stage),
         WorkerEvent::CompletionCacheFailed { stage, error } => {
             on_cache_failed(app, stage, error.to_string())
@@ -1703,6 +1706,24 @@ fn on_connect_failed(app: &mut App, name: String, error: String) {
                 error: format!("connect to {name} failed: {error}"),
             };
         }
+    }
+}
+
+/// Update the connection form with the test-connect result.
+fn on_test_result(app: &mut App, success: bool, error: Option<String>) {
+    let Screen::EditConnection(state) = &mut app.screen else {
+        return;
+    };
+    state.testing = false;
+    state.test_result = Some(if success {
+        crate::state::conn_form::TestResult::Success
+    } else {
+        crate::state::conn_form::TestResult::Failure(
+            error.unwrap_or_else(|| "unknown error".into()),
+        )
+    });
+    if success {
+        app.log.info("conn", "test connection succeeded");
     }
 }
 
