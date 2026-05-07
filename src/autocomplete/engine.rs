@@ -95,7 +95,7 @@ fn collect_tables(out: &mut Vec<CompletionItem>, tables: &[CachedTable]) {
             kind,
             detail: None,
             insert: t.name.clone(),
-            trail: InsertTrail::None,
+            trail: InsertTrail::Space,
         });
     }
 }
@@ -208,7 +208,7 @@ fn collect_cte_bindings(out: &mut Vec<CompletionItem>, bindings: &[TableBinding]
                 kind: CompletionKind::Cte,
                 detail: Some("WITH …".into()),
                 insert: b.table.clone(),
-                trail: InsertTrail::None,
+                trail: InsertTrail::Space,
             });
         }
     }
@@ -646,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn table_completions_do_not_auto_append_alias() {
+    fn table_completions_append_trailing_space_not_alias() {
         let cache = cache_with_tables(&["users", "user_roles"]);
         let items = compute_sqlite(
             &CompletionContext::Table { schema: None },
@@ -657,15 +657,15 @@ mod tests {
         for item in &items {
             assert_eq!(
                 item.trail,
-                InsertTrail::None,
-                "{} should not auto-append an alias",
+                InsertTrail::Space,
+                "{} should append a trailing space, not an alias",
                 item.label,
             );
         }
     }
 
     #[test]
-    fn cte_completions_do_not_auto_append_alias() {
+    fn cte_completions_append_trailing_space_not_alias() {
         let cache = SchemaCache::new();
         let bindings = vec![TableBinding {
             catalog: String::new(),
@@ -685,6 +685,6 @@ mod tests {
             .iter()
             .find(|i| i.label == "recent")
             .expect("CTE name in items");
-        assert_eq!(cte.trail, InsertTrail::None);
+        assert_eq!(cte.trail, InsertTrail::Space);
     }
 }

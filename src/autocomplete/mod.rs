@@ -48,11 +48,14 @@ pub struct CompletionItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertTrail {
     /// Cursor lands right after the inserted text. Default for
-    /// keywords, columns, CTEs.
+    /// keywords, columns.
     None,
     /// Append `()` and put the cursor *between* the parens, ready
     /// for arguments. Used for arg-taking functions like `COUNT(`.
     OpenParens,
+    /// Append a single space. Used for table/view/CTE completions
+    /// so an optional alias can be typed or accepted next.
+    Space,
     /// Append a space and a generated short alias (e.g. ` u` for
     /// `users`). Reserved for future alias-on-accept flows.
     #[allow(dead_code)]
