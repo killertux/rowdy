@@ -221,7 +221,7 @@ pub fn replace_selection_text(state: &mut EditorState, replacement: &str) -> boo
     true
 }
 
-fn cursor_to_offset(state: &EditorState) -> usize {
+pub fn cursor_to_offset(state: &EditorState) -> usize {
     let mut offset = 0;
     for row in 0..state.cursor.row {
         let len = state.lines.len_col(row).unwrap_or(0);

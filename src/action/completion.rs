@@ -228,13 +228,39 @@ fn accept(app: &mut App) {
         | CompletionKind::Column
         | CompletionKind::Cte => autocomplete::insert::quote_if_needed(&item.insert, dialect),
     };
-    autocomplete::insert::apply_completion(
+    let _cursor = autocomplete::insert::apply_completion(
         &mut app.editor.state,
         state.anchor_offset,
         &to_insert,
         item.trail.clone(),
     );
     schedule_session_save(app);
+
+    // After completing a table / view / CTE name, immediately offer an
+    // alias suggestion derived from the just-inserted name so the user
+    // can accept it in one keystroke or dismiss with Esc.
+    if matches!(
+        item.kind,
+        CompletionKind::Table | CompletionKind::View | CompletionKind::Cte
+    ) {
+        let alias = crate::autocomplete::generate_alias(&item.insert);
+        if !alias.is_empty() {
+            let alias_item = autocomplete::CompletionItem {
+                label: alias.clone(),
+                kind: CompletionKind::Keyword,
+                detail: Some(format!("alias for {}", item.insert)),
+                insert: alias,
+                trail: autocomplete::InsertTrail::None,
+            };
+            // Anchor at the new cursor (char offset).
+            let anchor = crate::state::editor::cursor_to_offset(&app.editor.state);
+            app.completion = Some(crate::state::completion::CompletionState::new(
+                vec![alias_item],
+                anchor,
+                String::new(),
+            ));
+        }
+    }
 }
 
 /// Recompute the popover after each edit. Closes it if the cursor

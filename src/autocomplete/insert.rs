@@ -64,6 +64,7 @@ fn trail_pieces(trail: &InsertTrail) -> (String, usize) {
     match trail {
         InsertTrail::None => (String::new(), 0),
         InsertTrail::OpenParens => ("()".into(), 1),
+        InsertTrail::Space => (" ".into(), 0),
         InsertTrail::Alias(a) => (format!(" {}", a), 0),
     }
 }
@@ -116,6 +117,14 @@ mod tests {
         state.cursor = Index2::new(0, 16);
         apply_completion(&mut state, 14, "users", InsertTrail::Alias("u".into()));
         assert_eq!(flatten(&state), "SELECT * FROM users u");
+    }
+
+    #[test]
+    fn space_trail_appends_single_space() {
+        let mut state = EditorState::new(Lines::from("SELECT * FROM us"));
+        state.cursor = Index2::new(0, 16);
+        apply_completion(&mut state, 14, "users", InsertTrail::Space);
+        assert_eq!(flatten(&state), "SELECT * FROM users ");
     }
 
     #[test]
