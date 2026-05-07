@@ -90,13 +90,12 @@ fn collect_tables(out: &mut Vec<CompletionItem>, tables: &[CachedTable]) {
             TableKind::Table => CompletionKind::Table,
             TableKind::View => CompletionKind::View,
         };
-        let alias = crate::autocomplete::generate_alias(&t.name);
         out.push(CompletionItem {
             label: t.name.clone(),
             kind,
             detail: None,
             insert: t.name.clone(),
-            trail: InsertTrail::Alias(alias),
+            trail: InsertTrail::None,
         });
     }
 }
@@ -204,13 +203,12 @@ fn collect_functions(out: &mut Vec<CompletionItem>, dialect: DriverKind) {
 fn collect_cte_bindings(out: &mut Vec<CompletionItem>, bindings: &[TableBinding]) {
     for b in bindings {
         if b.is_cte() {
-            let alias = crate::autocomplete::generate_alias(&b.table);
             out.push(CompletionItem {
                 label: b.table.clone(),
                 kind: CompletionKind::Cte,
                 detail: Some("WITH …".into()),
                 insert: b.table.clone(),
-                trail: InsertTrail::Alias(alias),
+                trail: InsertTrail::None,
             });
         }
     }
@@ -645,5 +643,48 @@ mod tests {
             .find(|i| i.label == "recent")
             .expect("CTE name in items");
         assert_eq!(cte.kind, CompletionKind::Cte);
+    }
+
+    #[test]
+    fn table_completions_do_not_auto_append_alias() {
+        let cache = cache_with_tables(&["users", "user_roles"]);
+        let items = compute_sqlite(
+            &CompletionContext::Table { schema: None },
+            &cache,
+            "user",
+            &[],
+        );
+        for item in &items {
+            assert_eq!(
+                item.trail,
+                InsertTrail::None,
+                "{} should not auto-append an alias",
+                item.label,
+            );
+        }
+    }
+
+    #[test]
+    fn cte_completions_do_not_auto_append_alias() {
+        let cache = SchemaCache::new();
+        let bindings = vec![TableBinding {
+            catalog: String::new(),
+            schema: String::new(),
+            table: "recent".into(),
+            is_cte: true,
+            synthetic_columns: None,
+        }];
+        let items = compute(
+            &CompletionContext::Table { schema: None },
+            &cache,
+            "rec",
+            &bindings,
+            DriverKind::Sqlite,
+        );
+        let cte = items
+            .iter()
+            .find(|i| i.label == "recent")
+            .expect("CTE name in items");
+        assert_eq!(cte.trail, InsertTrail::None);
     }
 }

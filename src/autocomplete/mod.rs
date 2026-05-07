@@ -54,8 +54,8 @@ pub enum InsertTrail {
     /// for arguments. Used for arg-taking functions like `COUNT(`.
     OpenParens,
     /// Append a space and a generated short alias (e.g. ` u` for
-    /// `users`). Used for table/view items in FROM/JOIN/INSERT INTO
-    /// slots to save a manual aliasing step.
+    /// `users`). Reserved for future alias-on-accept flows.
+    #[allow(dead_code)]
     Alias(String),
 }
 
