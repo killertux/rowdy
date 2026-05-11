@@ -405,6 +405,7 @@ fn schema_scroll(app: &mut App, delta: i32) {
     if total == 0 {
         return;
     }
+    app.schema.snap_to_selection = false;
     let max_offset = total.saturating_sub(1);
     let next = (app.schema.scroll_offset as i32).saturating_add(delta);
     let next = next.clamp(0, max_offset as i32) as usize;

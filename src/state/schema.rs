@@ -54,6 +54,10 @@ pub struct SchemaPanel {
     /// Index of the first visible row inside `visible_rows()`. Render keeps
     /// this clamped so the selected node stays inside the viewport.
     pub scroll_offset: usize,
+    /// When true, `clamp_scroll` enforces that the selection stays visible.
+    /// Set to false by mouse scrolls (so the user can scroll freely) and
+    /// re-enabled by any selection movement.
+    pub snap_to_selection: bool,
 }
 
 /// Outcome of an `expand_or_descend`/`toggle` action: signals whether the
@@ -75,6 +79,7 @@ impl SchemaPanel {
             selected: None,
             width,
             scroll_offset: 0,
+            snap_to_selection: true,
         }
     }
 
@@ -94,6 +99,9 @@ impl SchemaPanel {
         let max_offset = total.saturating_sub(view);
         if self.scroll_offset > max_offset {
             self.scroll_offset = max_offset;
+        }
+        if !self.snap_to_selection {
+            return;
         }
         if let Some(idx) = self.selected_index() {
             if idx < self.scroll_offset {
@@ -140,6 +148,7 @@ impl SchemaPanel {
     // ---- selection movement ------------------------------------------------
 
     pub fn move_selection(&mut self, delta: i32) {
+        self.snap_to_selection = true;
         let visible = self.visible_rows();
         if visible.is_empty() {
             return;
@@ -153,6 +162,7 @@ impl SchemaPanel {
     }
 
     pub fn select_first(&mut self) {
+        self.snap_to_selection = true;
         if let Some(row) = self.visible_rows().first() {
             self.selected = Some(row.id);
         }
