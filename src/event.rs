@@ -332,6 +332,7 @@ fn translate_command_key(buf: &CommandBuffer, key: KeyEvent) -> Option<Action> {
             Some(Action::Command(CommandAction::CompletionMove(1)))
         }
         KeyCode::Esc => Some(Action::Command(CommandAction::Cancel)),
+        KeyCode::Enter if popover_open => Some(Action::Command(CommandAction::CompletionAccept)),
         KeyCode::Enter => Some(Action::Command(CommandAction::Submit)),
         _ => Some(Action::Command(CommandAction::Input(Input::from(key)))),
     }
