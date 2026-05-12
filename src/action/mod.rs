@@ -321,8 +321,11 @@ pub enum CommandAction {
     /// popover is open.
     CompletionMove(i32),
     /// Replace the in-progress command name with the highlighted
-    /// candidate. Tab.
-    CompletionAccept,
+    /// candidate. When `submit` is true, the completed command is
+    /// immediately executed — Tab (`false`) vs Enter (`true`).
+    CompletionAccept {
+        submit: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -728,11 +731,14 @@ fn apply_command(app: &mut App, action: CommandAction) {
                 c.move_selection(delta);
             }
         }
-        CommandAction::CompletionAccept => {
+        CommandAction::CompletionAccept { submit } => {
             if let Some(c) = &buf.completion
                 && let Some(name) = c.current()
             {
                 buf.accept_completion(name);
+                if submit {
+                    submit_command(app);
+                }
             }
         }
     }

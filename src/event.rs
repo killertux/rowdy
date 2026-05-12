@@ -319,7 +319,9 @@ fn translate_command_key(buf: &CommandBuffer, key: KeyEvent) -> Option<Action> {
         // Tab inserts a literal tab when the popover isn't showing —
         // unusual but consistent with the existing fallthrough. With
         // the popover up, Tab accepts the highlighted candidate.
-        KeyCode::Tab if popover_open => Some(Action::Command(CommandAction::CompletionAccept)),
+        KeyCode::Tab if popover_open => Some(Action::Command(CommandAction::CompletionAccept {
+            submit: false,
+        })),
         // Arrow / Ctrl+P / Ctrl+N navigate the popover when open. Off
         // mode lets the keys fall through to TextArea (which ignores
         // them on a single-line input).
@@ -332,7 +334,9 @@ fn translate_command_key(buf: &CommandBuffer, key: KeyEvent) -> Option<Action> {
             Some(Action::Command(CommandAction::CompletionMove(1)))
         }
         KeyCode::Esc => Some(Action::Command(CommandAction::Cancel)),
-        KeyCode::Enter if popover_open => Some(Action::Command(CommandAction::CompletionAccept)),
+        KeyCode::Enter if popover_open => Some(Action::Command(CommandAction::CompletionAccept {
+            submit: true,
+        })),
         KeyCode::Enter => Some(Action::Command(CommandAction::Submit)),
         _ => Some(Action::Command(CommandAction::Input(Input::from(key)))),
     }
