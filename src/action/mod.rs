@@ -323,7 +323,9 @@ pub enum CommandAction {
     /// Replace the in-progress command name with the highlighted
     /// candidate. When `submit` is true, the completed command is
     /// immediately executed — Tab (`false`) vs Enter (`true`).
-    CompletionAccept { submit: bool },
+    CompletionAccept {
+        submit: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
