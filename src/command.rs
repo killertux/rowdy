@@ -35,6 +35,16 @@ pub enum Command {
     },
     Format(FormatScope),
     Reload,
+    /// Roll back any open transaction on the pinned session connection
+    /// and drop it; the next query acquires a fresh connection. The
+    /// active autocomplete cache, results, and editor buffer are
+    /// untouched — this command only resets server-side session state.
+    Reset,
+    /// Wipe the local session: empty the editor buffer and drop any
+    /// accumulated result blocks. The pinned database connection is
+    /// also reset so the new buffer doesn't inherit an open
+    /// transaction.
+    Clear,
     /// Re-read user + project config UI prefs, the user keybindings
     /// file, and the LLM provider records. Connections, crypto, the
     /// in-flight worker query, and the active session are NOT
@@ -227,6 +237,16 @@ pub static COMMAND_TREE: &[CommandSpec] = &[
         children: &[],
     },
     CommandSpec {
+        name: "reset",
+        aliases: &[],
+        children: &[],
+    },
+    CommandSpec {
+        name: "clear",
+        aliases: &[],
+        children: &[],
+    },
+    CommandSpec {
         name: "source",
         aliases: &[],
         children: &[],
@@ -338,6 +358,8 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
         "export" => parse_export(&args)?,
         "format" | "fmt" => parse_format(&args)?,
         "reload" => Command::Reload,
+        "reset" => Command::Reset,
+        "clear" => Command::Clear,
         "source" => Command::Source,
         "conn" | "conns" => Command::Conn(parse_conn(&args)?),
         "chat" => Command::Chat(parse_chat(&args)?),
@@ -573,6 +595,12 @@ mod tests {
     fn close_and_hide_dismiss_result_preview() {
         assert_eq!(parse("close"), Ok(Some(Command::CloseResult)));
         assert_eq!(parse("hide"), Ok(Some(Command::CloseResult)));
+    }
+
+    #[test]
+    fn reset_and_clear_parse() {
+        assert_eq!(parse("reset"), Ok(Some(Command::Reset)));
+        assert_eq!(parse("clear"), Ok(Some(Command::Clear)));
     }
 
     #[test]

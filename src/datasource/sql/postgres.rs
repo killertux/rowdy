@@ -4,8 +4,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde_json::Value as JsonValue;
-use sqlx::postgres::{PgPool, PgPoolOptions, PgRow, PgTypeKind};
+use sqlx::pool::PoolConnection;
+use sqlx::postgres::{PgPool, PgPoolOptions, PgRow, PgTypeKind, Postgres};
 use sqlx::{Column as _, Row, TypeInfo};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::datasource::cell::Cell;
@@ -23,10 +25,19 @@ const TARGET: &str = "postgres";
 pub struct PostgresDatasource {
     pool: PgPool,
     log: Logger,
-    // Backend PID of the currently running `execute()`, or 0 when nothing is
-    // in flight. PostgreSQL backend PIDs are positive int4, so 0 is a safe
-    // "none" sentinel. Read by `cancel()` to issue `pg_cancel_backend`.
-    in_flight_pid: AtomicI32,
+    // Backend PID of the pinned session connection, or 0 when no session
+    // is currently held. Recorded once when the session is acquired and
+    // kept across executes so `cancel()` can target the exact backend
+    // running the user's queries — and so it can target an idle session
+    // in a transaction (callers can hit `pg_cancel_backend` to break out
+    // of a stuck wait without first finding a running statement).
+    session_pid: AtomicI32,
+    // Pinned connection held across `execute()` calls so BEGIN /
+    // COMMIT / ROLLBACK work the way the user expects. Lazily acquired
+    // and dropped by `reset_session()`. Introspection and `cancel()`
+    // still talk to the pool, never to this connection — they need to
+    // make progress while the session is busy.
+    session: Mutex<Option<PoolConnection<Postgres>>>,
 }
 
 impl PostgresDatasource {
@@ -44,7 +55,8 @@ impl PostgresDatasource {
         Ok(Self {
             pool,
             log,
-            in_flight_pid: AtomicI32::new(0),
+            session_pid: AtomicI32::new(0),
+            session: Mutex::new(None),
         })
     }
 }
@@ -205,33 +217,33 @@ impl Datasource for PostgresDatasource {
         );
         let started = Instant::now();
 
-        // Pin a single connection to this query so `cancel()` can target the
-        // exact backend that's running it. The connection returns to the pool
-        // when `conn` drops (including on a `JoinHandle::abort`).
-        let mut conn = self.pool.acquire().await.map_err(|e| {
-            self.log.error(TARGET, format!("acquire failed: {e}"));
-            execute_err(e)
-        })?;
-        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(|e| {
-                self.log
-                    .error(TARGET, format!("backend pid fetch failed: {e}"));
+        let mut guard = self.session.lock().await;
+        if guard.is_none() {
+            let mut conn = self.pool.acquire().await.map_err(|e| {
+                self.log.error(TARGET, format!("acquire failed: {e}"));
                 execute_err(e)
             })?;
-        self.in_flight_pid.store(pid, Ordering::SeqCst);
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(|e| {
+                    self.log
+                        .error(TARGET, format!("backend pid fetch failed: {e}"));
+                    execute_err(e)
+                })?;
+            self.session_pid.store(pid, Ordering::SeqCst);
+            *guard = Some(conn);
+        }
+        let conn = guard.as_mut().expect("session conn populated above");
 
         if super::is_row_returning(statement, &sqlparser::dialect::PostgreSqlDialect {}) {
-            let result = sqlx::query(statement).fetch_all(&mut *conn).await;
-            // Clear the pid before checking the result so a subsequent cancel
-            // doesn't try to kill a backend that's already free. On abort,
-            // this line never runs and `cancel()` reads the still-set pid.
-            self.in_flight_pid.store(0, Ordering::SeqCst);
-            let rows = result.map_err(|e| {
-                self.log.error(TARGET, format!("execute failed: {e}"));
-                execute_err(e)
-            })?;
+            let rows = sqlx::query(statement)
+                .fetch_all(&mut **conn)
+                .await
+                .map_err(|e| {
+                    self.log.error(TARGET, format!("execute failed: {e}"));
+                    execute_err(e)
+                })?;
             let elapsed = started.elapsed();
             let columns = build_columns(&rows);
             let rows: Vec<CellRow> = rows
@@ -247,14 +259,16 @@ impl Datasource for PostgresDatasource {
                 rows,
                 affected: None,
                 elapsed,
+                statements_run: 1,
             })
         } else {
-            let result = sqlx::query(statement).execute(&mut *conn).await;
-            self.in_flight_pid.store(0, Ordering::SeqCst);
-            let outcome = result.map_err(|e| {
-                self.log.error(TARGET, format!("execute failed: {e}"));
-                execute_err(e)
-            })?;
+            let outcome = sqlx::query(statement)
+                .execute(&mut **conn)
+                .await
+                .map_err(|e| {
+                    self.log.error(TARGET, format!("execute failed: {e}"));
+                    execute_err(e)
+                })?;
             let elapsed = started.elapsed();
             let affected = outcome.rows_affected();
             self.log.info(
@@ -266,14 +280,15 @@ impl Datasource for PostgresDatasource {
                 rows: Vec::new(),
                 affected: Some(affected),
                 elapsed,
+                statements_run: 1,
             })
         }
     }
 
     async fn cancel(&self) -> DatasourceResult<()> {
-        let pid = self.in_flight_pid.swap(0, Ordering::SeqCst);
+        let pid = self.session_pid.load(Ordering::SeqCst);
         if pid == 0 {
-            self.log.info(TARGET, "cancel: no in-flight query");
+            self.log.info(TARGET, "cancel: no active session");
             return Ok(());
         }
         self.log
@@ -293,6 +308,26 @@ impl Datasource for PostgresDatasource {
             self.log
                 .warn(TARGET, format!("pg_cancel_backend({pid}) returned false"));
         }
+        Ok(())
+    }
+
+    async fn reset_session(&self) -> DatasourceResult<()> {
+        let mut guard = self.session.lock().await;
+        if let Some(mut conn) = guard.take() {
+            // Roll back any in-progress (or aborted) transaction
+            // before the conn returns to the pool. Postgres leaves a
+            // tx aborted after a cancel, and a pooled hand-off without
+            // ROLLBACK would surface "current transaction is aborted"
+            // on the next checkout from a different caller. Failure
+            // is logged but swallowed — the session is being discarded
+            // and a fresh acquire will paper over a poisoned conn.
+            if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+                self.log.warn(TARGET, format!("reset rollback: {e}"));
+            }
+            drop(conn);
+            self.log.info(TARGET, "session reset");
+        }
+        self.session_pid.store(0, Ordering::SeqCst);
         Ok(())
     }
 }

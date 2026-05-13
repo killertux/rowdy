@@ -48,6 +48,13 @@ pub struct QueryResult {
     pub rows: Vec<Row>,
     pub affected: Option<u64>,
     pub elapsed: Duration,
+    /// How many statements contributed to this result. The worker
+    /// splits the user-submitted SQL on top-level `;` and runs the
+    /// pieces in sequence on the pinned session connection; the
+    /// `QueryResult` it surfaces carries the *last* statement's
+    /// columns/rows plus this count so the UI can say "ran N
+    /// statements". Drivers themselves always set this to 1.
+    pub statements_run: usize,
 }
 
 #[async_trait]
@@ -79,6 +86,19 @@ pub trait Datasource: Send + Sync {
 
     async fn execute(&self, statement: &str) -> DatasourceResult<QueryResult>;
     async fn cancel(&self) -> DatasourceResult<()>;
+
+    /// Drop the pinned session connection (if any) and forget the
+    /// associated backend identity. The next `execute()` re-acquires a
+    /// fresh connection from the pool, which severs whatever
+    /// transaction state was open on the prior one. Default impl is a
+    /// no-op for drivers that don't pin a session.
+    ///
+    /// Wired to the user-facing `:reset` command (and to `:clear`,
+    /// which resets the session in addition to wiping the editor
+    /// buffer and result history).
+    async fn reset_session(&self) -> DatasourceResult<()> {
+        Ok(())
+    }
 }
 
 /// Builds a datasource from a connection string. Scheme dispatches to the driver.

@@ -20,6 +20,11 @@ pub enum WorkerCommand {
         sql: String,
     },
     Cancel,
+    /// Roll back any open transaction on the pinned session
+    /// connection and drop it. The next `Execute` re-acquires from
+    /// the pool. Fired by the user-facing `:reset` and `:clear`
+    /// commands.
+    ResetSession,
     Introspect {
         target: IntrospectTarget,
     },
@@ -231,6 +236,14 @@ pub async fn run(
                 Some(ds) => cancel_query(&logger, ds.as_ref(), &mut current_query).await,
                 None => logger.warn("worker", "cancel ignored: no active connection"),
             },
+            WorkerCommand::ResetSession => match &datasource {
+                Some(ds) => {
+                    if let Err(e) = ds.reset_session().await {
+                        logger.warn("worker", format!("reset failed: {e}"));
+                    }
+                }
+                None => logger.warn("worker", "reset ignored: no active connection"),
+            },
             WorkerCommand::Execute { req, sql } => match &datasource {
                 Some(ds) => spawn_query(ds, &events, &mut current_query, req, sql),
                 None => {
@@ -326,7 +339,7 @@ fn spawn_query(
     let datasource = datasource.clone();
     let events = events.clone();
     *current = Some(tokio::spawn(async move {
-        let event = handle_execute(datasource.as_ref(), req, sql).await;
+        let event = handle_execute_multi(datasource.as_ref(), req, sql).await;
         let _ = events.send(event);
     }));
 }
@@ -344,11 +357,73 @@ fn spawn_introspect(
     });
 }
 
-async fn handle_execute(datasource: &dyn Datasource, req: RequestId, sql: String) -> WorkerEvent {
-    match datasource.execute(&sql).await {
-        Ok(result) => WorkerEvent::QueryDone { req, result },
-        Err(error) => WorkerEvent::QueryFailed { req, error },
+/// Splits `sql` on top-level `;` and runs each statement sequentially on
+/// the datasource's pinned session connection, so a leading `BEGIN`
+/// (or `START TRANSACTION`) really does scope subsequent DML on the
+/// same backend. Stops at the first failure — remaining statements are
+/// skipped so a broken script doesn't keep modifying state past the
+/// error.
+///
+/// Emits a single `QueryDone` that carries the *last* statement's
+/// columns/rows (intermediate row sets are dropped — stacked results
+/// are a separate roadmap item) plus a `statements_run` count and a
+/// summed `affected` across DML statements.
+async fn handle_execute_multi(
+    datasource: &dyn Datasource,
+    req: RequestId,
+    sql: String,
+) -> WorkerEvent {
+    let pieces = crate::datasource::sql::split_statements(&sql);
+    if pieces.is_empty() {
+        // Whole input was empty / whitespace / bare `;`s. Treat as a
+        // single empty execute so the existing UX (status flips to
+        // "ok: 0 rows") is preserved.
+        return match datasource.execute(&sql).await {
+            Ok(result) => WorkerEvent::QueryDone { req, result },
+            Err(error) => WorkerEvent::QueryFailed { req, error },
+        };
     }
+
+    let total = pieces.len();
+    let mut last: Option<crate::datasource::QueryResult> = None;
+    let mut summed_affected: Option<u64> = None;
+    let mut total_elapsed = std::time::Duration::ZERO;
+    let mut ran = 0usize;
+    for piece in &pieces {
+        match datasource.execute(piece).await {
+            Ok(r) => {
+                ran += 1;
+                if let Some(a) = r.affected {
+                    summed_affected = Some(summed_affected.unwrap_or(0) + a);
+                }
+                total_elapsed += r.elapsed;
+                last = Some(r);
+            }
+            Err(error) => {
+                let msg = if total > 1 {
+                    crate::datasource::DatasourceError::Execute(format!(
+                        "statement {} of {total} failed: {error}",
+                        ran + 1
+                    ))
+                } else {
+                    error
+                };
+                return WorkerEvent::QueryFailed { req, error: msg };
+            }
+        }
+    }
+
+    let mut result = last.expect("at least one piece ran");
+    result.statements_run = ran;
+    result.elapsed = total_elapsed;
+    // If the final statement returned rows, keep its own affected
+    // (None for SELECTs). Only roll the sum forward when the last
+    // statement is DML — that's the case where the user wants to see
+    // "10 affected" across a multi-INSERT script.
+    if result.columns.is_empty() {
+        result.affected = summed_affected;
+    }
+    WorkerEvent::QueryDone { req, result }
 }
 
 fn spawn_load_columns(

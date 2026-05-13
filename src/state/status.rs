@@ -17,6 +17,12 @@ pub enum QueryStatus {
         /// label. `None` for SELECT-shaped statements.
         affected: Option<u64>,
         took: Duration,
+        /// How many semicolon-separated statements contributed to this
+        /// run. `1` for the common single-statement case; higher when
+        /// the user ran a selection (or buffer) containing several
+        /// statements — the bottom bar surfaces the count so the user
+        /// knows the whole script went through.
+        statements_run: usize,
     },
     Failed {
         error: String,
