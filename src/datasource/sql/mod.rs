@@ -20,6 +20,71 @@ macro_rules! decode_to {
 }
 pub(crate) use decode_to;
 
+/// Split `sql` into individual statements at top-level semicolons. Uses
+/// sqlparser's tokenizer so `;` inside string literals, comments, and
+/// quoted identifiers is ignored. Returns each statement trimmed of
+/// surrounding whitespace; empty / whitespace-only segments are dropped.
+/// A trailing statement without a closing `;` is included.
+///
+/// On tokenizer error (typically a half-typed string or comment in a
+/// buffer the user is still editing) falls back to a naive char-level
+/// `;` scan so the worker doesn't freeze.
+pub(crate) fn split_statements(sql: &str) -> Vec<String> {
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::tokenizer::{Token, Tokenizer};
+
+    let dialect = GenericDialect {};
+    let semi_byte_offsets: Vec<usize> = match Tokenizer::new(&dialect, sql).tokenize_with_location()
+    {
+        Ok(tokens) => {
+            let semi_locs: std::collections::BTreeSet<(u64, u64)> = tokens
+                .iter()
+                .filter(|t| matches!(t.token, Token::SemiColon))
+                .map(|t| (t.span.start.line, t.span.start.column))
+                .collect();
+            if semi_locs.is_empty() {
+                Vec::new()
+            } else {
+                let mut out = Vec::with_capacity(semi_locs.len());
+                let mut line: u64 = 1;
+                let mut col: u64 = 1;
+                for (byte_idx, ch) in sql.char_indices() {
+                    if semi_locs.contains(&(line, col)) {
+                        out.push(byte_idx);
+                    }
+                    if ch == '\n' {
+                        line += 1;
+                        col = 1;
+                    } else {
+                        col += 1;
+                    }
+                }
+                out
+            }
+        }
+        Err(_) => sql
+            .char_indices()
+            .filter(|(_, c)| *c == ';')
+            .map(|(i, _)| i)
+            .collect(),
+    };
+
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for semi in &semi_byte_offsets {
+        let piece = sql[start..*semi].trim();
+        if !piece.is_empty() {
+            out.push(piece.to_string());
+        }
+        start = semi + 1; // ';' is one byte
+    }
+    let tail = sql[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
+}
+
 /// Collapse whitespace runs into single spaces and trim — used to flatten SQL
 /// statements onto a single log line.
 pub(crate) fn one_line_sql(sql: &str) -> String {
@@ -429,6 +494,55 @@ mod tests {
             requires_destructive_confirmation(sql, &d),
             Some("DELETE without WHERE")
         );
+    }
+
+    #[test]
+    fn split_statements_basic() {
+        let pieces = split_statements("SELECT 1; SELECT 2;");
+        assert_eq!(pieces, vec!["SELECT 1", "SELECT 2"]);
+    }
+
+    #[test]
+    fn split_statements_drops_empty_segments() {
+        let pieces = split_statements(";;SELECT 1;;\n;");
+        assert_eq!(pieces, vec!["SELECT 1"]);
+    }
+
+    #[test]
+    fn split_statements_keeps_trailing_no_semicolon() {
+        let pieces = split_statements("SELECT 1;\nSELECT 2");
+        assert_eq!(pieces, vec!["SELECT 1", "SELECT 2"]);
+    }
+
+    #[test]
+    fn split_statements_ignores_semicolons_in_strings() {
+        let pieces = split_statements("SELECT ';'; SELECT 2;");
+        assert_eq!(pieces, vec!["SELECT ';'", "SELECT 2"]);
+    }
+
+    #[test]
+    fn split_statements_ignores_semicolons_in_comments() {
+        let pieces = split_statements("-- a; b\nSELECT 1; /* x; y */ SELECT 2;");
+        assert_eq!(pieces, vec!["-- a; b\nSELECT 1", "/* x; y */ SELECT 2"]);
+    }
+
+    #[test]
+    fn split_statements_handles_quoted_identifiers() {
+        let pieces = split_statements("SELECT `a;b` FROM t; SELECT \"c;d\" FROM u;");
+        assert_eq!(pieces, vec!["SELECT `a;b` FROM t", "SELECT \"c;d\" FROM u"]);
+    }
+
+    #[test]
+    fn split_statements_empty_input() {
+        assert!(split_statements("").is_empty());
+        assert!(split_statements("   \n  ").is_empty());
+        assert!(split_statements(";;;").is_empty());
+    }
+
+    #[test]
+    fn split_statements_transaction_script() {
+        let pieces = split_statements("BEGIN; INSERT INTO t VALUES (1); COMMIT;");
+        assert_eq!(pieces, vec!["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"]);
     }
 
     #[test]

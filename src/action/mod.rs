@@ -115,6 +115,15 @@ pub enum Action {
     /// User-facing `:reload`. Drops the autocomplete schema cache and
     /// re-primes from the active connection.
     ReloadSchemaCache,
+    /// User-facing `:reset`. Asks the worker to roll back any open
+    /// transaction on the pinned session connection and drop it; the
+    /// next `execute` re-acquires a fresh connection. Autocomplete
+    /// cache, results, and editor buffer are untouched.
+    ResetSession,
+    /// User-facing `:clear`. Empties the editor buffer, drops result
+    /// blocks, and resets the pinned session connection so the
+    /// fresh-start state isn't haunted by an open transaction.
+    ClearSession,
     /// Re-read user + project UI prefs, the user keybindings file,
     /// and LLM provider records. Connections, crypto, the worker
     /// pool, and any in-flight query are NOT touched. Bottom bar
@@ -471,6 +480,8 @@ pub fn apply(app: &mut App, action: Action) {
         Action::FormatEditor(scope) => format_editor(app, scope),
         Action::Completion(c) => completion::apply(app, c),
         Action::ReloadSchemaCache => reload_schema_cache(app),
+        Action::ResetSession => reset_session(app),
+        Action::ClearSession => clear_session(app),
         Action::Source => apply_source(app),
         Action::Mouse(target) => apply_mouse(app, target),
         Action::Chat(a) => chat::apply(app, a),
@@ -658,6 +669,36 @@ fn inline_result_jump(app: &mut App, row: usize, col: usize) {
         row_offset: 0,
         view: ResultViewMode::Normal,
         column_view: crate::state::results::ColumnView::new(max_cols),
+    };
+}
+
+fn reset_session(app: &mut App) {
+    if app.active_connection.is_none() {
+        app.status = QueryStatus::Failed {
+            error: "no active connection".into(),
+        };
+        return;
+    }
+    let _ = app.cmd_tx.send(WorkerCommand::ResetSession);
+    app.status = QueryStatus::Notice {
+        msg: "session reset — open transactions rolled back".into(),
+    };
+}
+
+fn clear_session(app: &mut App) {
+    // Editor buffer + results — local state we own, so wipe synchronously.
+    crate::state::editor::replace_buffer_text(&mut app.editor.state, "");
+    app.results.clear();
+    app.preview_hidden = false;
+    app.editor_dirty = true;
+    // And roll back the pinned connection so a fresh prompt doesn't
+    // inherit a stale BEGIN. Best-effort: if there's no connection, the
+    // local clear still stands.
+    if app.active_connection.is_some() {
+        let _ = app.cmd_tx.send(WorkerCommand::ResetSession);
+    }
+    app.status = QueryStatus::Notice {
+        msg: "session cleared".into(),
     };
 }
 
@@ -896,6 +937,8 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         ),
         C::Format(scope) => apply(app, Action::FormatEditor(scope)),
         C::Reload => apply(app, Action::ReloadSchemaCache),
+        C::Reset => apply(app, Action::ResetSession),
+        C::Clear => apply(app, Action::ClearSession),
         C::Source => apply(app, Action::Source),
         C::Conn(sub) => dispatch_conn(app, sub),
         C::Chat(sub) => dispatch_chat(app, sub),
@@ -1870,6 +1913,7 @@ fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResu
         rows: total_rows,
         affected,
         took,
+        statements_run: result.statements_run.max(1),
     };
 }
 

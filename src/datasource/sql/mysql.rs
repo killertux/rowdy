@@ -4,8 +4,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde_json::Value as JsonValue;
-use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
+use sqlx::mysql::{MySql, MySqlPool, MySqlPoolOptions, MySqlRow};
+use sqlx::pool::PoolConnection;
 use sqlx::{Column as _, Row, TypeInfo};
+use tokio::sync::Mutex;
 
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
@@ -24,10 +26,15 @@ const TARGET: &str = "mysql";
 pub struct MysqlDatasource {
     pool: MySqlPool,
     log: Logger,
-    // CONNECTION_ID() of the currently running `execute()`, or 0 when nothing
-    // is in flight. MySQL connection ids start at 1, so 0 is a safe "none"
-    // sentinel. Read by `cancel()` to issue `KILL QUERY`.
-    in_flight_conn_id: AtomicU64,
+    // CONNECTION_ID() of the pinned session connection, or 0 when no
+    // session is currently held. Recorded once on acquire and kept
+    // across executes so `cancel()` can `KILL QUERY <id>` even when
+    // the spawn_query task is mid-await.
+    session_conn_id: AtomicU64,
+    // Pinned connection across `execute()` calls so BEGIN / COMMIT /
+    // ROLLBACK survive between statements. Introspection and cancel
+    // talk to the pool directly.
+    session: Mutex<Option<PoolConnection<MySql>>>,
 }
 
 impl MysqlDatasource {
@@ -55,7 +62,8 @@ impl MysqlDatasource {
         Ok(Self {
             pool,
             log,
-            in_flight_conn_id: AtomicU64::new(0),
+            session_conn_id: AtomicU64::new(0),
+            session: Mutex::new(None),
         })
     }
 }
@@ -227,32 +235,33 @@ impl Datasource for MysqlDatasource {
         );
         let started = Instant::now();
 
-        // Pin a single connection to this query so `cancel()` can issue
-        // `KILL QUERY <conn_id>` against the exact session running it.
-        let mut conn = self.pool.acquire().await.map_err(|e| {
-            self.log.error(TARGET, format!("acquire failed: {e}"));
-            execute_err(e)
-        })?;
-        let conn_id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(|e| {
-                self.log
-                    .error(TARGET, format!("connection id fetch failed: {e}"));
+        let mut guard = self.session.lock().await;
+        if guard.is_none() {
+            let mut conn = self.pool.acquire().await.map_err(|e| {
+                self.log.error(TARGET, format!("acquire failed: {e}"));
                 execute_err(e)
             })?;
-        self.in_flight_conn_id.store(conn_id, Ordering::SeqCst);
+            let conn_id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(|e| {
+                    self.log
+                        .error(TARGET, format!("connection id fetch failed: {e}"));
+                    execute_err(e)
+                })?;
+            self.session_conn_id.store(conn_id, Ordering::SeqCst);
+            *guard = Some(conn);
+        }
+        let conn = guard.as_mut().expect("session conn populated above");
 
         if super::is_row_returning(statement, &sqlparser::dialect::MySqlDialect {}) {
-            let result = sqlx::query(statement).fetch_all(&mut *conn).await;
-            // Clear the conn id before checking the result so a subsequent
-            // cancel doesn't try to kill a session that's already idle. On
-            // abort, this never runs and `cancel()` reads the still-set id.
-            self.in_flight_conn_id.store(0, Ordering::SeqCst);
-            let rows = result.map_err(|e| {
-                self.log.error(TARGET, format!("execute failed: {e}"));
-                execute_err(e)
-            })?;
+            let rows = sqlx::query(statement)
+                .fetch_all(&mut **conn)
+                .await
+                .map_err(|e| {
+                    self.log.error(TARGET, format!("execute failed: {e}"));
+                    execute_err(e)
+                })?;
             let elapsed = started.elapsed();
             let columns = build_columns(&rows);
             let rows: Vec<CellRow> = rows
@@ -268,14 +277,16 @@ impl Datasource for MysqlDatasource {
                 rows,
                 affected: None,
                 elapsed,
+                statements_run: 1,
             })
         } else {
-            let result = sqlx::query(statement).execute(&mut *conn).await;
-            self.in_flight_conn_id.store(0, Ordering::SeqCst);
-            let outcome = result.map_err(|e| {
-                self.log.error(TARGET, format!("execute failed: {e}"));
-                execute_err(e)
-            })?;
+            let outcome = sqlx::query(statement)
+                .execute(&mut **conn)
+                .await
+                .map_err(|e| {
+                    self.log.error(TARGET, format!("execute failed: {e}"));
+                    execute_err(e)
+                })?;
             let elapsed = started.elapsed();
             let affected = outcome.rows_affected();
             self.log.info(
@@ -287,14 +298,15 @@ impl Datasource for MysqlDatasource {
                 rows: Vec::new(),
                 affected: Some(affected),
                 elapsed,
+                statements_run: 1,
             })
         }
     }
 
     async fn cancel(&self) -> DatasourceResult<()> {
-        let conn_id = self.in_flight_conn_id.swap(0, Ordering::SeqCst);
+        let conn_id = self.session_conn_id.load(Ordering::SeqCst);
         if conn_id == 0 {
-            self.log.info(TARGET, "cancel: no in-flight query");
+            self.log.info(TARGET, "cancel: no active session");
             return Ok(());
         }
         // `KILL QUERY` is an admin statement and doesn't accept placeholders;
@@ -307,6 +319,22 @@ impl Datasource for MysqlDatasource {
             self.log.warn(TARGET, format!("cancel failed: {e}"));
             execute_err(e)
         })?;
+        Ok(())
+    }
+
+    async fn reset_session(&self) -> DatasourceResult<()> {
+        let mut guard = self.session.lock().await;
+        if let Some(mut conn) = guard.take() {
+            // Drop any open transaction before returning the conn to
+            // the pool — a stale BEGIN would otherwise be inherited by
+            // the next checkout. Logged-and-swallowed on failure.
+            if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+                self.log.warn(TARGET, format!("reset rollback: {e}"));
+            }
+            drop(conn);
+            self.log.info(TARGET, "session reset");
+        }
+        self.session_conn_id.store(0, Ordering::SeqCst);
         Ok(())
     }
 }

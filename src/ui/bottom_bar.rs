@@ -275,12 +275,21 @@ fn describe(status: &QueryStatus, theme: &Theme) -> (Color, String) {
             rows,
             affected,
             took,
+            statements_run,
         } => {
             let summary = match affected {
                 Some(n) => format!("{n} affected"),
                 None => format!("{rows} rows"),
             };
-            (theme.status_ok, format!("ok — {summary} in {took:?}"))
+            let scope = if *statements_run > 1 {
+                format!(" · ran {statements_run} statements")
+            } else {
+                String::new()
+            };
+            (
+                theme.status_ok,
+                format!("ok — {summary} in {took:?}{scope}"),
+            )
         }
         QueryStatus::Failed { error } => (theme.status_error, format!("error — {error}")),
         QueryStatus::Cancelled => (theme.status_idle, "cancelled".to_string()),

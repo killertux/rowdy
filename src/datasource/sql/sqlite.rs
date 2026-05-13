@@ -1,8 +1,10 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteRow};
+use sqlx::pool::PoolConnection;
+use sqlx::sqlite::{Sqlite, SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{Column as _, Row, TypeInfo};
+use tokio::sync::Mutex;
 
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
@@ -19,6 +21,12 @@ const TARGET: &str = "sqlite";
 pub struct SqliteDatasource {
     pool: SqlitePool,
     log: Logger,
+    // Pinned connection used by `execute()` so transaction state (BEGIN
+    // … COMMIT) survives across calls. Lazily acquired on first
+    // execute; dropped by `reset_session()`. Introspection still goes
+    // through `&self.pool` so a long-running user query doesn't block
+    // schema browsing.
+    session: Mutex<Option<PoolConnection<Sqlite>>>,
 }
 
 impl SqliteDatasource {
@@ -33,7 +41,11 @@ impl SqliteDatasource {
                 DatasourceError::Connect(e.to_string())
             })?;
         log.info(TARGET, "connected");
-        Ok(Self { pool, log })
+        Ok(Self {
+            pool,
+            log,
+            session: Mutex::new(None),
+        })
     }
 }
 
@@ -157,9 +169,20 @@ impl Datasource for SqliteDatasource {
             format!("execute: {}", super::one_line_sql(statement)),
         );
         let started = Instant::now();
+
+        let mut guard = self.session.lock().await;
+        if guard.is_none() {
+            let conn = self.pool.acquire().await.map_err(|e| {
+                self.log.error(TARGET, format!("acquire failed: {e}"));
+                execute_err(e)
+            })?;
+            *guard = Some(conn);
+        }
+        let conn = guard.as_mut().expect("session conn populated above");
+
         if super::is_row_returning(statement, &sqlparser::dialect::SQLiteDialect {}) {
             let rows = sqlx::query(statement)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut **conn)
                 .await
                 .map_err(|e| {
                     self.log.error(TARGET, format!("execute failed: {e}"));
@@ -180,10 +203,11 @@ impl Datasource for SqliteDatasource {
                 rows,
                 affected: None,
                 elapsed,
+                statements_run: 1,
             })
         } else {
             let outcome = sqlx::query(statement)
-                .execute(&self.pool)
+                .execute(&mut **conn)
                 .await
                 .map_err(|e| {
                     self.log.error(TARGET, format!("execute failed: {e}"));
@@ -200,6 +224,7 @@ impl Datasource for SqliteDatasource {
                 rows: Vec::new(),
                 affected: Some(affected),
                 elapsed,
+                statements_run: 1,
             })
         }
     }
@@ -208,6 +233,24 @@ impl Datasource for SqliteDatasource {
         // SQLite has no server-side cancel; the worker aborts the in-flight
         // task instead, which drops the future and releases the connection.
         self.log.info(TARGET, "cancel (no-op for sqlite)");
+        Ok(())
+    }
+
+    async fn reset_session(&self) -> DatasourceResult<()> {
+        let mut guard = self.session.lock().await;
+        if let Some(mut conn) = guard.take() {
+            // sqlx returns the connection to the pool on drop without
+            // touching transaction state — so an open BEGIN would
+            // outlive the "reset". Issue an explicit ROLLBACK so the
+            // session really is clean. Failure is logged but not
+            // propagated: the conn is being discarded anyway, and the
+            // worst case is the next execute opens a fresh pool conn.
+            if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+                self.log.warn(TARGET, format!("reset rollback: {e}"));
+            }
+            drop(conn);
+            self.log.info(TARGET, "session reset");
+        }
         Ok(())
     }
 }
@@ -301,16 +344,18 @@ mod tests {
     use super::*;
 
     async fn fresh() -> SqliteDatasource {
-        // Single connection + shared cache so the DB stays alive across pool checkouts.
+        // Shared cache so the DB stays alive across pool checkouts.
+        // Two slots: one for the pinned session, one for introspection.
         let url = "sqlite::memory:?cache=shared";
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+            .max_connections(2)
             .connect(url)
             .await
             .expect("connect");
         let ds = SqliteDatasource {
             pool,
             log: Logger::discard(),
+            session: Mutex::new(None),
         };
         ds.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, score REAL)")
             .await
@@ -362,6 +407,70 @@ mod tests {
         let d = ds.default_schema().await.unwrap();
         assert_eq!(d.catalog, "main");
         assert_eq!(d.schema, "main");
+    }
+
+    #[tokio::test]
+    async fn session_preserves_transaction_across_executes() {
+        // BEGIN / INSERT / COMMIT issued as separate execute() calls must
+        // land on the same connection — otherwise the BEGIN binds to a
+        // pooled conn that's discarded before the INSERT, and the INSERT
+        // runs in autocommit mode.
+        let ds = fresh().await;
+        ds.execute("BEGIN").await.expect("begin");
+        ds.execute("INSERT INTO users(id, name, score) VALUES (3, 'carol', 1.0)")
+            .await
+            .expect("insert");
+        // Before COMMIT, the row exists from the session's POV.
+        let mid = ds
+            .execute("SELECT id FROM users WHERE id = 3")
+            .await
+            .expect("select pre-commit");
+        assert_eq!(mid.rows.len(), 1, "row should be visible inside the tx");
+        ds.execute("COMMIT").await.expect("commit");
+        let after = ds
+            .execute("SELECT id FROM users WHERE id = 3")
+            .await
+            .expect("select post-commit");
+        assert_eq!(after.rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn multi_statement_script_via_split_runs_in_one_session() {
+        // The worker path: split a "BEGIN; INSERT; INSERT; COMMIT;" script
+        // into pieces and run each on the same datasource. Both inserts
+        // should be visible afterwards because BEGIN+COMMIT scoped them
+        // on the pinned session.
+        let ds = fresh().await;
+        let script = "BEGIN;\n\
+                      INSERT INTO users(id, name) VALUES (10, 'x');\n\
+                      INSERT INTO users(id, name) VALUES (11, 'y');\n\
+                      COMMIT;";
+        for piece in crate::datasource::sql::split_statements(script) {
+            ds.execute(&piece).await.expect(&piece);
+        }
+        let rows = ds
+            .execute("SELECT COUNT(*) AS n FROM users WHERE id IN (10, 11)")
+            .await
+            .expect("count");
+        assert_eq!(rows.rows.len(), 1);
+        assert!(matches!(rows.rows[0][0], Cell::Int(2)));
+    }
+
+    #[tokio::test]
+    async fn reset_session_drops_transaction_state() {
+        let ds = fresh().await;
+        ds.execute("BEGIN").await.expect("begin");
+        ds.execute("INSERT INTO users(id, name) VALUES (4, 'd')")
+            .await
+            .expect("insert");
+        ds.reset_session().await.expect("reset");
+        // A fresh session sees the data only if COMMIT happened — it
+        // didn't, so the row should be gone.
+        let after = ds
+            .execute("SELECT id FROM users WHERE id = 4")
+            .await
+            .expect("select");
+        assert_eq!(after.rows.len(), 0);
     }
 
     #[tokio::test]

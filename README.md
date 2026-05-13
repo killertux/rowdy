@@ -6,9 +6,9 @@ The goal is a fast, modal, keyboard-first workspace for writing queries,
 exploring schemas, and inspecting results — all without leaving the terminal.
 
 SQLite, Postgres, and MySQL/MariaDB are wired end-to-end. Most authoring
-features (autocomplete, formatting, yank, CSV/TSV/JSON/SQL export) are
-shipped; the rough edges live around transactions and multi-statement
-execution — see [Roadmap](#roadmap).
+features (autocomplete, formatting, yank, CSV/TSV/JSON/SQL export,
+transactions across statements, multi-statement scripts) are shipped —
+see [Roadmap](#roadmap) for what's still ahead.
 
 ## Install
 
@@ -301,6 +301,16 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
     `:command` prompt and as the run-confirmation prompt.
 - **Async query execution** through a tokio worker. The UI never blocks on
   the database; a single in-flight query is enforced and `:cancel` aborts it.
+- **Session-pinned connection.** Each driver holds one connection across
+  `execute()` calls, so `BEGIN` / `COMMIT` / `ROLLBACK` issued as
+  separate statements all land on the same backend — and an interactive
+  transaction can span several `<Space>r` runs. Introspection and
+  `:cancel` still use the pool, so neither stalls behind a slow query.
+- **Multi-statement execution.** A selection (Visual `<Space>r`) or
+  buffer containing several semicolon-separated statements runs them in
+  order on the pinned session. The bottom bar shows
+  `ok — N rows in T · ran K statements`. Execution stops at the first
+  error so a broken script doesn't keep mutating state past the failure.
 - **Confirm-before-run**: `<Space>r` highlights the SQL statement under the
   cursor and asks before executing it. `<Space>R` bypasses the confirmation;
   in editor Visual mode `<Space>r` runs the explicit selection straight away.
@@ -720,6 +730,8 @@ After pressing `:`.
 | `:export sql [table] [path]` | Emit `INSERT` statements. Table is inferred from the query for simple `SELECT * FROM t` / `SELECT cols FROM t` shapes; pass `<table>` explicitly for joins, aggregates, aliases, etc. `:export sql > path` writes to disk with inferred table |
 | `:format`, `:fmt`            | Format the SQL buffer (or active Visual selection) via `sqlformat`. Undo via edtui's `u` won't restore the pre-format text — yank first if you need a backup |
 | `:reload`                    | Drop and re-prime the autocomplete schema cache against the active connection (use after DDL outside the app) |
+| `:reset`                     | Roll back any open transaction on the pinned session connection and drop it; the next query re-acquires a fresh connection |
+| `:clear`                     | Wipe the editor buffer, drop result blocks, and reset the session (useful after a multi-statement script you'd like to walk away from cleanly) |
 | `:source`                    | Re-read user + project UI prefs, the user keybindings file, and LLM provider records. Connections, crypto, the worker pool, and any in-flight query are NOT touched |
 | `:conn`, `:conn list`        | Open the connection list                                        |
 | `:conn add <name>`           | Open the form to create `<name>`                                |
@@ -890,24 +902,6 @@ examples/
 ## Roadmap
 
 Next likely steps, roughly ordered:
-
-### Correctness / safety
-
-- **Transactions.** `Datasource::execute` runs every statement on
-  `&self.pool`, so sqlx hands each call a fresh pooled connection — `BEGIN`
-  lands on connection A and the next `UPDATE` may land on connection B.
-  The trait needs a transaction handle (or a "stick the next N statements
-  to one connection" mode) before BEGIN/COMMIT/ROLLBACK behave the way the
-  user expects.
-- **Multi-statement execution.** `:run` runs the statement under the
-  cursor; there's no way to run a buffer of N statements as a unit. Pairs
-  with the real-SQL-lexer item below — splitting is necessary but not
-  sufficient, the execution model also needs to pin one connection for
-  the duration of the script.
-- **Query timeout** per connection. A runaway query holds the worker's
-  one-at-a-time slot until the user manually `:cancel`s; a default
-  timeout (with the existing server-side cancel path) would be a cheap
-  guardrail.
 
 ### Result view
 

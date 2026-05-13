@@ -667,6 +667,14 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 desc: "Re-prime the autocomplete schema cache",
             },
             HelpEntry {
+                keys: ":reset",
+                desc: "Roll back open tx and drop the pinned session connection",
+            },
+            HelpEntry {
+                keys: ":clear",
+                desc: "Wipe the editor buffer, drop results, reset the session",
+            },
+            HelpEntry {
                 keys: ":conn, :conn list",
                 desc: "Open the connection list",
             },
