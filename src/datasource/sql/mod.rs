@@ -34,7 +34,8 @@ pub(crate) fn split_statements(sql: &str) -> Vec<String> {
     use sqlparser::tokenizer::{Token, Tokenizer};
 
     let dialect = GenericDialect {};
-    let semi_byte_offsets: Vec<usize> = match Tokenizer::new(&dialect, sql).tokenize_with_location() {
+    let semi_byte_offsets: Vec<usize> = match Tokenizer::new(&dialect, sql).tokenize_with_location()
+    {
         Ok(tokens) => {
             let semi_locs: std::collections::BTreeSet<(u64, u64)> = tokens
                 .iter()
@@ -528,10 +529,7 @@ mod tests {
     #[test]
     fn split_statements_handles_quoted_identifiers() {
         let pieces = split_statements("SELECT `a;b` FROM t; SELECT \"c;d\" FROM u;");
-        assert_eq!(
-            pieces,
-            vec!["SELECT `a;b` FROM t", "SELECT \"c;d\" FROM u"]
-        );
+        assert_eq!(pieces, vec!["SELECT `a;b` FROM t", "SELECT \"c;d\" FROM u"]);
     }
 
     #[test]
@@ -544,10 +542,7 @@ mod tests {
     #[test]
     fn split_statements_transaction_script() {
         let pieces = split_statements("BEGIN; INSERT INTO t VALUES (1); COMMIT;");
-        assert_eq!(
-            pieces,
-            vec!["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"]
-        );
+        assert_eq!(pieces, vec!["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"]);
     }
 
     #[test]
