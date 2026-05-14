@@ -254,52 +254,63 @@ impl Datasource for MysqlDatasource {
         }
         let conn = guard.as_mut().expect("session conn populated above");
 
-        if super::is_row_returning(statement, &sqlparser::dialect::MySqlDialect {}) {
-            let rows = sqlx::query(statement)
-                .fetch_all(&mut **conn)
-                .await
-                .map_err(|e| {
-                    self.log.error(TARGET, format!("execute failed: {e}"));
-                    execute_err(e)
-                })?;
-            let elapsed = started.elapsed();
-            let columns = build_columns(&rows);
-            let rows: Vec<CellRow> = rows
-                .iter()
-                .map(|r| row_to_cells(r, columns.len()))
-                .collect();
-            self.log.info(
-                TARGET,
-                format!("execute ok: {} rows in {:?}", rows.len(), elapsed),
-            );
-            Ok(QueryResult {
-                columns,
-                rows,
-                affected: None,
-                elapsed,
-                statements_run: 1,
-            })
-        } else {
-            let outcome = sqlx::query(statement)
-                .execute(&mut **conn)
-                .await
-                .map_err(|e| {
-                    self.log.error(TARGET, format!("execute failed: {e}"));
-                    execute_err(e)
-                })?;
-            let elapsed = started.elapsed();
-            let affected = outcome.rows_affected();
-            self.log.info(
-                TARGET,
-                format!("execute ok: {affected} affected in {elapsed:?}"),
-            );
-            Ok(QueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                affected: Some(affected),
-                elapsed,
-                statements_run: 1,
-            })
+        let outcome: Result<QueryResult, sqlx::Error> =
+            if super::is_row_returning(statement, &sqlparser::dialect::MySqlDialect {}) {
+                match sqlx::query(statement).fetch_all(&mut **conn).await {
+                    Ok(rows) => {
+                        let elapsed = started.elapsed();
+                        let columns = build_columns(&rows);
+                        let rows: Vec<CellRow> = rows
+                            .iter()
+                            .map(|r| row_to_cells(r, columns.len()))
+                            .collect();
+                        Ok(QueryResult {
+                            columns,
+                            rows,
+                            affected: None,
+                            elapsed,
+                            statements_run: 1,
+                        })
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                match sqlx::query(statement).execute(&mut **conn).await {
+                    Ok(outcome) => {
+                        let elapsed = started.elapsed();
+                        Ok(QueryResult {
+                            columns: Vec::new(),
+                            rows: Vec::new(),
+                            affected: Some(outcome.rows_affected()),
+                            elapsed,
+                            statements_run: 1,
+                        })
+                    }
+                    Err(e) => Err(e),
+                }
+            };
+
+        match outcome {
+            Ok(r) => {
+                self.log.info(
+                    TARGET,
+                    match r.affected {
+                        Some(n) => format!("execute ok: {n} affected in {:?}", r.elapsed),
+                        None => format!("execute ok: {} rows in {:?}", r.rows.len(), r.elapsed),
+                    },
+                );
+                Ok(r)
+            }
+            Err(e) => {
+                self.log.error(TARGET, format!("execute failed: {e}"));
+                if super::is_connection_lost(&e) {
+                    *guard = None;
+                    self.session_conn_id.store(0, Ordering::SeqCst);
+                    self.log
+                        .warn(TARGET, "session conn dropped after connection loss");
+                }
+                Err(execute_err(e))
+            }
         }
     }
 
