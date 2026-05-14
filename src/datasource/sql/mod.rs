@@ -85,6 +85,28 @@ pub(crate) fn split_statements(sql: &str) -> Vec<String> {
     out
 }
 
+/// True for `sqlx::Error`s that indicate the underlying connection
+/// has died (TCP reset, server shutdown, TLS abort, etc.) — i.e. the
+/// pinned session connection is no longer usable and the next
+/// `execute()` should drop it and re-acquire from the pool.
+///
+/// Database errors (syntax / permission / "transaction aborted") are
+/// deliberately *not* treated as connection loss — the conn is still
+/// alive, and for Postgres the user may still need to issue ROLLBACK
+/// against it. Tearing it down on every query error would silently
+/// discard interactive transaction state.
+pub(crate) fn is_connection_lost(err: &sqlx::Error) -> bool {
+    matches!(
+        err,
+        sqlx::Error::Io(_)
+            | sqlx::Error::Protocol(_)
+            | sqlx::Error::Tls(_)
+            | sqlx::Error::WorkerCrashed
+            | sqlx::Error::PoolClosed
+            | sqlx::Error::PoolTimedOut
+    )
+}
+
 /// Collapse whitespace runs into single spaces and trim — used to flatten SQL
 /// statements onto a single log line.
 pub(crate) fn one_line_sql(sql: &str) -> String {
@@ -494,6 +516,21 @@ mod tests {
             requires_destructive_confirmation(sql, &d),
             Some("DELETE without WHERE")
         );
+    }
+
+    #[test]
+    fn connection_lost_classifies_transport_errors() {
+        // Database errors (server-side, e.g. syntax) keep the conn —
+        // we don't want to tear down an interactive Postgres tx on a
+        // typo. Only transport-level failures flip the flag.
+        let pool_closed = sqlx::Error::PoolClosed;
+        assert!(is_connection_lost(&pool_closed));
+        let timed_out = sqlx::Error::PoolTimedOut;
+        assert!(is_connection_lost(&timed_out));
+        let worker_crashed = sqlx::Error::WorkerCrashed;
+        assert!(is_connection_lost(&worker_crashed));
+        let row_not_found = sqlx::Error::RowNotFound;
+        assert!(!is_connection_lost(&row_not_found));
     }
 
     #[test]
