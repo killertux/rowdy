@@ -219,7 +219,9 @@ fn translate_params_prompt_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Enter => Some(Action::ParamsPrompt(ParamsPromptAction::Submit)),
         KeyCode::Tab => Some(Action::ParamsPrompt(ParamsPromptAction::NextField)),
         KeyCode::BackTab => Some(Action::ParamsPrompt(ParamsPromptAction::PrevField)),
-        _ => Some(Action::ParamsPrompt(ParamsPromptAction::Input(Input::from(key)))),
+        _ => Some(Action::ParamsPrompt(ParamsPromptAction::Input(
+            Input::from(key),
+        ))),
     }
 }
 

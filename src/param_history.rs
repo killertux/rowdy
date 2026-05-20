@@ -108,11 +108,7 @@ fn save(path: &Path, history: &ParamHistory) -> io::Result<()> {
 /// Load (lazily, cached on `App`) and return the values for the most
 /// recent execution of `sql` on `connection`. Returns `None` if the
 /// connection has no history or `sql` isn't in it.
-pub fn lookup(
-    app: &mut App,
-    connection: &str,
-    sql: &str,
-) -> Option<HashMap<String, String>> {
+pub fn lookup(app: &mut App, connection: &str, sql: &str) -> Option<HashMap<String, String>> {
     let key = normalize(sql);
     let history = ensure_loaded(app, connection);
     history
@@ -127,12 +123,7 @@ pub fn lookup(
 /// Touches the in-memory cache and writes through to disk. Best-effort
 /// — write failures are logged but don't surface to the user (the
 /// query still ran).
-pub fn record(
-    app: &mut App,
-    connection: &str,
-    sql: &str,
-    values: &[(ParamKey, String)],
-) {
+pub fn record(app: &mut App, connection: &str, sql: &str, values: &[(ParamKey, String)]) {
     let key = normalize(sql);
     let path = path_for(&app.data_dir, connection);
     let history = ensure_loaded(app, connection);
@@ -164,9 +155,12 @@ pub fn record(
 fn ensure_loaded<'a>(app: &'a mut App, connection: &str) -> &'a mut ParamHistory {
     if !app.param_history.contains_key(connection) {
         let path = path_for(&app.data_dir, connection);
-        app.param_history.insert(connection.to_string(), load(&path));
+        app.param_history
+            .insert(connection.to_string(), load(&path));
     }
-    app.param_history.get_mut(connection).expect("just inserted")
+    app.param_history
+        .get_mut(connection)
+        .expect("just inserted")
 }
 
 #[cfg(test)]
@@ -186,10 +180,7 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trips() {
-        let dir = std::env::temp_dir().join(format!(
-            "rowdy-params-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("rowdy-params-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let path = path_for(&dir, "c");
         let mut h = ParamHistory::default();

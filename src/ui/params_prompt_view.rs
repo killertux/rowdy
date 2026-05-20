@@ -50,20 +50,29 @@ impl Widget for ParamsPrompt<'_> {
         block.render(box_area, buf);
 
         let field_count = self.state.fields.len().max(1) as u16;
-        let constraints: Vec<Constraint> = std::iter::repeat_n(Constraint::Length(1), field_count as usize)
-            .chain([
-                Constraint::Length(1), // blank
-                Constraint::Length(2), // hint
-                Constraint::Length(2), // footer
-            ])
-            .collect();
+        let constraints: Vec<Constraint> =
+            std::iter::repeat_n(Constraint::Length(1), field_count as usize)
+                .chain([
+                    Constraint::Length(1), // blank
+                    Constraint::Length(2), // hint
+                    Constraint::Length(2), // footer
+                ])
+                .collect();
         let rows = Layout::vertical(constraints).split(inner);
 
         let label_cols = compute_label_cols(self.state);
         for (i, field) in self.state.fields.iter().enumerate() {
             let row = rows[i];
             let focused = i == self.state.focus;
-            render_field(buf, row, &field.label, label_cols, &field.input, focused, self.theme);
+            render_field(
+                buf,
+                row,
+                &field.label,
+                label_cols,
+                &field.input,
+                focused,
+                self.theme,
+            );
         }
 
         let hint_idx = self.state.fields.len() + 1;
@@ -99,7 +108,11 @@ fn render_field(
         .fg(if focused { theme.header_fg } else { theme.fg })
         .bg(theme.bg)
         .add_modifier(Modifier::BOLD);
-    let padded = format!("{label:<width$}", label = label, width = label_cols as usize);
+    let padded = format!(
+        "{label:<width$}",
+        label = label,
+        width = label_cols as usize
+    );
     Paragraph::new(Line::from(Span::styled(padded, label_style))).render(area, buf);
 
     let label_actual = label_cols.saturating_add(1);

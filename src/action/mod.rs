@@ -1382,16 +1382,12 @@ fn open_params_prompt(
         .clone()
         .and_then(|conn| crate::param_history::lookup(app, &conn, &statement));
 
-    let state = crate::state::params_prompt::ParamsPromptState::new(
-        statement,
-        placeholders,
-        keys,
-        |key| {
+    let state =
+        crate::state::params_prompt::ParamsPromptState::new(statement, placeholders, keys, |key| {
             prefill_map
                 .as_ref()
                 .and_then(|m| m.get(&key.label()).cloned())
-        },
-    );
+        });
     app.overlay = Some(Overlay::ParamsPrompt(state));
 }
 

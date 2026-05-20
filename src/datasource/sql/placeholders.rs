@@ -152,11 +152,7 @@ pub fn substitute(
     out
 }
 
-fn token_byte_span(
-    t: &TokenWithSpan,
-    pos_map: &PosMap,
-    sql: &str,
-) -> Option<Range<usize>> {
+fn token_byte_span(t: &TokenWithSpan, pos_map: &PosMap, sql: &str) -> Option<Range<usize>> {
     let start = pos_map.byte_at(&t.span.start)?;
     // sqlparser's end Location is the position *after* the last
     // character of the token, so the byte offset of `end` is already

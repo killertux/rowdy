@@ -67,9 +67,7 @@ pub fn apply(app: &mut App, action: ParamsPromptAction) {
     }
 }
 
-fn params_state_mut(
-    app: &mut App,
-) -> Option<&mut crate::state::params_prompt::ParamsPromptState> {
+fn params_state_mut(app: &mut App) -> Option<&mut crate::state::params_prompt::ParamsPromptState> {
     match &mut app.overlay {
         Some(Overlay::ParamsPrompt(state)) => Some(state),
         _ => None,
