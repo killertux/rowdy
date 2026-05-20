@@ -9,6 +9,7 @@ pub mod focus;
 pub mod layout;
 pub mod llm_settings;
 pub mod overlay;
+pub mod params_prompt;
 pub mod results;
 pub mod right_panel;
 pub mod schema;
