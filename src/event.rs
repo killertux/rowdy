@@ -7,8 +7,8 @@ use ratatui_textarea::Input;
 
 use crate::action::{
     Action, AuthAction, ChatAction, CommandAction, CompletionAction, ConnFormAction,
-    ConnListAction, HelpAxis, HelpScrollDelta, LlmSettingsAction, MouseTarget, ResultColumnAction,
-    ResultNavAction, SchemaAction,
+    ConnListAction, HelpAxis, HelpScrollDelta, LlmSettingsAction, MouseTarget, ParamsPromptAction,
+    ResultColumnAction, ResultNavAction, SchemaAction,
 };
 use crate::app::App;
 use crate::export::ExportFormat;
@@ -50,6 +50,9 @@ fn translate_paste(app: &App, event: CtEvent) -> Option<Action> {
             Overlay::LlmSettings(_) => {
                 Some(Action::LlmSettings(LlmSettingsAction::Paste(Some(text))))
             }
+            Overlay::ParamsPrompt(_) => {
+                Some(Action::ParamsPrompt(ParamsPromptAction::Paste(Some(text))))
+            }
             // Help / ConfirmRun / Connecting don't take text input.
             _ => None,
         };
@@ -88,6 +91,7 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
             Overlay::LlmSettings(state) => translate_llm_settings_key(state, key),
             Overlay::UpdateAvailable { .. } => translate_update_key(key),
             Overlay::ConfirmToolUse { .. } => translate_tool_confirm_key(key),
+            Overlay::ParamsPrompt(_) => translate_params_prompt_key(key),
         };
     }
     match &app.screen {
@@ -195,6 +199,27 @@ fn translate_auth_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Esc => Some(Action::Auth(AuthAction::Cancel)),
         KeyCode::Enter => Some(Action::Auth(AuthAction::Submit)),
         _ => Some(Action::Auth(AuthAction::Input(Input::from(key)))),
+    }
+}
+
+fn translate_params_prompt_key(key: KeyEvent) -> Option<Action> {
+    if let Some(act) = clipboard_arm(
+        key,
+        ParamsPromptAction::Paste(None),
+        ParamsPromptAction::Copy,
+        ParamsPromptAction::Cut,
+    ) {
+        return Some(Action::ParamsPrompt(act));
+    }
+    if is_ctrl_u(key) {
+        return Some(Action::ParamsPrompt(ParamsPromptAction::ClearField));
+    }
+    match key.code {
+        KeyCode::Esc => Some(Action::ParamsPrompt(ParamsPromptAction::Cancel)),
+        KeyCode::Enter => Some(Action::ParamsPrompt(ParamsPromptAction::Submit)),
+        KeyCode::Tab => Some(Action::ParamsPrompt(ParamsPromptAction::NextField)),
+        KeyCode::BackTab => Some(Action::ParamsPrompt(ParamsPromptAction::PrevField)),
+        _ => Some(Action::ParamsPrompt(ParamsPromptAction::Input(Input::from(key)))),
     }
 }
 

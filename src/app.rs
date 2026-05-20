@@ -176,6 +176,12 @@ pub struct App {
     /// `update::try_promote_pending_prompt` once the user reaches a
     /// quiescent `Screen::Normal`.
     pub pending_update_prompt: Option<(String, String)>,
+    /// Cache of per-connection "last execution values" for queries
+    /// that carry `$N` / `:name` placeholders. Lazily filled on the
+    /// first popup open for each connection; written through to
+    /// `<data_dir>/params/<conn>.json` on every submit. See
+    /// [`crate::param_history`].
+    pub param_history: std::collections::HashMap<String, crate::param_history::ParamHistory>,
 }
 
 impl App {
@@ -275,6 +281,7 @@ impl App {
             agents_md,
             preview_hidden: false,
             pending_update_prompt: None,
+            param_history: std::collections::HashMap::new(),
         }
     }
 }

@@ -8,6 +8,7 @@ pub mod conn_list_view;
 pub mod editor_view;
 pub mod help_view;
 pub mod llm_settings_view;
+pub mod params_prompt_view;
 pub mod results_view;
 pub mod schema_view;
 pub mod theme;
@@ -33,6 +34,7 @@ use conn_list_view::ConnList;
 use editor_view::EditorPane;
 use help_view::HelpPopover;
 use llm_settings_view::LlmSettingsForm;
+use params_prompt_view::ParamsPrompt;
 use results_view::{ExpandedResult, InlineResult};
 use schema_view::SchemaPane;
 
@@ -65,6 +67,15 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         Screen::ResultExpanded { .. } => render_expanded(app, frame, main, bottom_area),
         Screen::ThemePicker(_) => render_theme_picker(app, frame, area, bottom_area),
         _ => render_workspace(app, frame, main, bottom_area),
+    }
+    // Params popup is drawn on top of whatever screen rendered above
+    // so the user still sees the SQL they're about to fill in.
+    if let Some(Overlay::ParamsPrompt(state)) = &app.overlay {
+        let widget = ParamsPrompt {
+            state,
+            theme: &app.theme,
+        };
+        frame.render_widget(widget, area);
     }
 }
 

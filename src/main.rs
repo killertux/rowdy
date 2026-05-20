@@ -14,6 +14,7 @@ mod export;
 mod keybindings;
 mod llm;
 mod log;
+mod param_history;
 mod session;
 mod sql_infer;
 mod sql_quote;

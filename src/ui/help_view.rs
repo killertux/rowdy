@@ -583,6 +583,43 @@ const HELP_SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
+        title: "Query parameters popup ($N / :name)",
+        entries: &[
+            HelpEntry {
+                keys: "(opens automatically)",
+                desc: "When the about-to-run SQL contains $1, $2, … or :name placeholders",
+            },
+            HelpEntry {
+                keys: "$1, $2, …",
+                desc: "Positional placeholder — works in any driver (Postgres, MySQL, SQLite)",
+            },
+            HelpEntry {
+                keys: ":name",
+                desc: "Named placeholder — repeating :name in the same query is one field",
+            },
+            HelpEntry {
+                keys: "(values)",
+                desc: "Substituted as text — wrap strings in quotes ('foo'); NULL or any SQL expression also OK",
+            },
+            HelpEntry {
+                keys: "Tab / Shift+Tab",
+                desc: "Cycle between fields",
+            },
+            HelpEntry {
+                keys: "Enter",
+                desc: "Run the query — values are remembered per (connection, query)",
+            },
+            HelpEntry {
+                keys: "Esc",
+                desc: "Cancel without running",
+            },
+            HelpEntry {
+                keys: "(re-run)",
+                desc: "Re-running the same query pre-fills last execution's values",
+            },
+        ],
+    },
+    HelpSection {
         title: "Help (this screen)",
         entries: &[
             HelpEntry {

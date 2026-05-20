@@ -9,6 +9,7 @@
 
 use crate::state::command::CommandBuffer;
 use crate::state::llm_settings::LlmSettingsState;
+use crate::state::params_prompt::ParamsPromptState;
 
 /// The layer that floats over the current [`crate::state::screen::Screen`].
 //
@@ -49,6 +50,11 @@ pub enum Overlay {
     /// the latest tag in user-config so we don't re-prompt for the
     /// same version.
     UpdateAvailable { current: String, latest: String },
+    /// "Fill in placeholders" form fired when the about-to-run SQL
+    /// contains `$N` or `:name` markers. Enter submits substituted
+    /// SQL back through the dispatch path; Esc cancels and returns
+    /// to the editor.
+    ParamsPrompt(ParamsPromptState),
     /// Chat agent asked to use a filesystem read tool while
     /// `ReadToolsMode::Ask` is active. The actual `oneshot::Sender`
     /// the worker is waiting on lives in `app.pending_approval_tools`

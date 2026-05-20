@@ -56,6 +56,10 @@ impl Widget for BottomBar<'_> {
                 render_update(current, latest, area, buf, &self.app.theme);
                 return;
             }
+            Some(Overlay::ParamsPrompt(_)) => {
+                // Popup owns its own footer line.
+                return;
+            }
             Some(Overlay::ConfirmToolUse {
                 name, args_json, ..
             }) => {

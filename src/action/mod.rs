@@ -10,6 +10,7 @@ mod completion;
 mod conn_form;
 mod conn_list;
 mod llm_settings;
+mod params_prompt;
 
 use crate::app::{App, MAX_SCHEMA_WIDTH, MIN_SCHEMA_WIDTH};
 use crate::clipboard;
@@ -98,6 +99,7 @@ pub enum Action {
     Worker(WorkerEvent),
     Auth(AuthAction),
     ConnForm(ConnFormAction),
+    ParamsPrompt(ParamsPromptAction),
     ConnList(ConnListAction),
     OpenHelp,
     CloseHelp,
@@ -230,6 +232,22 @@ pub enum AuthAction {
     Copy,
     Cut,
     /// Wipe the password field (`Ctrl+U`).
+    ClearField,
+    Submit,
+    Cancel,
+}
+
+#[derive(Debug)]
+pub enum ParamsPromptAction {
+    Input(Input),
+    Paste(Option<String>),
+    Copy,
+    Cut,
+    /// Tab / Shift+Tab move between fields. The popup wraps around so
+    /// users with one field can still hit Tab harmlessly.
+    NextField,
+    PrevField,
+    /// Wipe the focused field (`Ctrl+U`).
     ClearField,
     Submit,
     Cancel,
@@ -468,6 +486,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::Worker(ev) => apply_worker_event(app, ev),
         Action::Auth(a) => auth::apply(app, a),
         Action::ConnForm(a) => conn_form::apply(app, a),
+        Action::ParamsPrompt(a) => params_prompt::apply(app, a),
         Action::ConnList(a) => conn_list::apply(app, a),
         Action::OpenHelp => {
             app.overlay = Some(Overlay::Help {
@@ -1315,22 +1334,65 @@ fn dispatch_query(app: &mut App, sql: String) {
         });
         return;
     }
-    // The user explicitly ran a new query — un-hide the preview so we
-    // can show whatever this run produces (or auto-hide it again from
-    // `on_query_done` if the new statement is DML).
+    // Placeholders (`$N` / `:name`) bounce through a popup so the user
+    // can fill values in. The original (unsubstituted) statement
+    // stays on the overlay; the substituted form is what we eventually
+    // send to the worker via `send_to_worker`.
+    if app.overlay.is_none()
+        && let Some(dialect) = destructive_dialect(app)
+    {
+        let scan = crate::datasource::sql::placeholders::scan(&trimmed, dialect.as_ref());
+        let unique = crate::datasource::sql::placeholders::unique_params(&scan);
+        if !unique.is_empty() {
+            open_params_prompt(app, trimmed, scan, unique);
+            return;
+        }
+    }
+    send_to_worker(app, trimmed);
+}
+
+/// Tail of `dispatch_query` — marks the query in flight and hands the
+/// (already finalised) SQL to the worker. Extracted so the params
+/// popup's Submit handler can reuse the exact same logging / status /
+/// in-flight bookkeeping after substitution.
+pub(super) fn send_to_worker(app: &mut App, sql: String) {
     app.preview_hidden = false;
     let req = app.requests.next();
     app.in_flight_query = Some(crate::app::InFlightQuery {
         req,
-        sql: trimmed.clone(),
+        sql: sql.clone(),
     });
     app.status = QueryStatus::Running {
-        query: trimmed.clone(),
+        query: sql.clone(),
         started_at: Instant::now(),
     };
-    let _ = app
-        .cmd_tx
-        .send(WorkerCommand::Execute { req, sql: trimmed });
+    let _ = app.cmd_tx.send(WorkerCommand::Execute { req, sql });
+}
+
+fn open_params_prompt(
+    app: &mut App,
+    statement: String,
+    placeholders: Vec<crate::datasource::sql::placeholders::Placeholder>,
+    keys: Vec<crate::datasource::sql::placeholders::ParamKey>,
+) {
+    // Pre-fill from per-connection history when we have a match for the
+    // exact same statement text. No active connection → no history.
+    let prefill_map = app
+        .active_connection
+        .clone()
+        .and_then(|conn| crate::param_history::lookup(app, &conn, &statement));
+
+    let state = crate::state::params_prompt::ParamsPromptState::new(
+        statement,
+        placeholders,
+        keys,
+        |key| {
+            prefill_map
+                .as_ref()
+                .and_then(|m| m.get(&key.label()).cloned())
+        },
+    );
+    app.overlay = Some(Overlay::ParamsPrompt(state));
 }
 
 /// Pick a sqlparser dialect to feed `requires_destructive_confirmation`.
