@@ -145,6 +145,13 @@ fn submit(app: &mut App) {
     let client = match build_client(&entry, keystore, &system_prompt) {
         Ok(c) => c,
         Err(err) => {
+            app.log.error(
+                "chat",
+                format!(
+                    "build_client failed (provider={:?}, model={}): {err}",
+                    entry.backend, entry.model
+                ),
+            );
             app.chat
                 .push_message(ChatMessage::assistant_text(format!("Build error: {err}")));
             return;
@@ -153,6 +160,8 @@ fn submit(app: &mut App) {
 
     let history = app.chat.messages.clone();
     let evt_tx = app.evt_tx.clone();
+    let log = app.log.clone();
+    let provider_tag = format!("{:?}/{}", entry.backend, entry.model).to_lowercase();
     // Snapshot the tool list at submit time so a mid-turn settings
     // change doesn't shift the catalog the model is reasoning against
     // (the gate in `on_tool_request` reads the *current* mode at call
@@ -166,6 +175,8 @@ fn submit(app: &mut App) {
         history,
         evt_tx,
         tools,
+        log,
+        provider_tag,
     });
     app.chat.streaming = true;
 }
