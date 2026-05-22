@@ -22,8 +22,11 @@ use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
+use crate::log::Logger;
 use crate::state::chat::{ChatBlock, ChatMessage, ChatRole};
 use crate::worker::{IntrospectTarget, WorkerEvent};
+
+const TARGET: &str = "chat";
 
 /// Cap on tool-call rounds in a single turn so a misbehaving model can't
 /// pin the worker. Sized to comfortably fit codebase-exploration tasks
@@ -79,6 +82,16 @@ pub struct ChatTurn {
     /// time, filtered by the user's `ReadToolsMode` preference (Off
     /// strips the fs read tools from the list entirely).
     pub tools: Vec<Tool>,
+    /// Rotating session log. The user only sees the short
+    /// `ChatDelta::Error(msg)` blurb in the chat panel; full provider
+    /// errors (including the original `LLMError` Debug shape) land here
+    /// so failures like "Error decoding response" can be diagnosed
+    /// after the fact.
+    pub log: Logger,
+    /// Human-readable provider tag for log lines —
+    /// `"<backend>/<model>"` (e.g. `"openai/gpt-4.1-mini"`). Logged on
+    /// every retry / error so it's obvious which provider misbehaved.
+    pub provider_tag: String,
 }
 
 /// A tool call whose execution is paused until an introspection result
@@ -125,19 +138,35 @@ async fn run_turn(turn: ChatTurn) {
         history,
         evt_tx,
         tools,
+        log,
+        provider_tag,
     } = turn;
 
     let mut messages: Vec<LlmChatMessage> = history.iter().map(translate_message).collect();
     let mut full_text = String::new();
 
+    log.info(
+        TARGET,
+        format!(
+            "turn start: provider={provider_tag} history_msgs={} tools={}",
+            messages.len(),
+            tools.len()
+        ),
+    );
+
     for round in 0..=MAX_TOOL_ROUNDS {
-        let mut stream = match open_stream_with_retry(&*client, &messages, &tools).await {
-            Ok(s) => s,
-            Err(err) => {
-                send_error(&evt_tx, err);
-                return;
-            }
-        };
+        let mut stream =
+            match open_stream_with_retry(&*client, &messages, &tools, &log, &provider_tag).await {
+                Ok(s) => s,
+                Err(err) => {
+                    log.error(
+                        TARGET,
+                        format!("turn aborted (round={round}, provider={provider_tag}): {err}"),
+                    );
+                    send_error(&evt_tx, err);
+                    return;
+                }
+            };
 
         let mut round_text = String::new();
         let mut completed_tool_calls: Vec<ToolCall> = Vec::new();
@@ -173,6 +202,12 @@ async fn run_turn(turn: ChatTurn) {
                         Err(_) => {
                             // Receiver dropped without replying — surface
                             // an error rather than hanging silently.
+                            log.error(
+                                TARGET,
+                                format!(
+                                    "tool dispatch dropped (provider={provider_tag}, round={round})"
+                                ),
+                            );
                             send_error(&evt_tx, "tool dispatch dropped".into());
                             return;
                         }
@@ -190,6 +225,19 @@ async fn run_turn(turn: ChatTurn) {
                 }
                 Ok(_) => {} // ToolUseStart, ToolUseInputDelta, Done — fine to ignore.
                 Err(err) => {
+                    // Mid-stream errors don't retry (partial deltas may
+                    // already be painted), so this is terminal for the
+                    // turn — log the full Debug shape because Display
+                    // on `LLMError` collapses provider HTTP / decode
+                    // detail into the short "Error decoding response"
+                    // / "HTTP error" wrappers we'd otherwise lose.
+                    log.error(
+                        TARGET,
+                        format!(
+                            "mid-stream error (provider={provider_tag}, round={round}, partial_text_len={}): {err}  debug={err:?}",
+                            round_text.len()
+                        ),
+                    );
                     send_error(&evt_tx, err.to_string());
                     return;
                 }
@@ -198,11 +246,25 @@ async fn run_turn(turn: ChatTurn) {
 
         if completed_tool_calls.is_empty() {
             // Model finished without calling another tool — done.
+            log.info(
+                TARGET,
+                format!(
+                    "turn done: provider={provider_tag} rounds={} full_text_len={}",
+                    round + 1,
+                    full_text.len()
+                ),
+            );
             let _ = evt_tx.send(WorkerEvent::ChatDelta(ChatDelta::Done { full_text }));
             return;
         }
 
         if round == MAX_TOOL_ROUNDS {
+            log.error(
+                TARGET,
+                format!(
+                    "tool-call budget exceeded (provider={provider_tag}, MAX_TOOL_ROUNDS={MAX_TOOL_ROUNDS})"
+                ),
+            );
             send_error(&evt_tx, "tool-call budget exceeded — aborting turn".into());
             return;
         }
@@ -236,6 +298,8 @@ async fn open_stream_with_retry(
     client: &dyn LLMProvider,
     messages: &[LlmChatMessage],
     tools: &[Tool],
+    log: &Logger,
+    provider_tag: &str,
 ) -> Result<
     std::pin::Pin<
         Box<dyn futures::stream::Stream<Item = Result<StreamChunk, llm::error::LLMError>> + Send>,
@@ -245,8 +309,28 @@ async fn open_stream_with_retry(
     let mut last_err: Option<String> = None;
     for attempt in 1..=MAX_STREAM_ATTEMPTS {
         match client.chat_stream_with_tools(messages, Some(tools)).await {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => {
+                if attempt > 1 {
+                    log.info(
+                        TARGET,
+                        format!(
+                            "chat stream opened on retry (provider={provider_tag}, attempt={attempt}/{MAX_STREAM_ATTEMPTS})"
+                        ),
+                    );
+                }
+                return Ok(stream);
+            }
             Err(err) => {
+                // Display strips a lot of provider detail (the "Error
+                // decoding response" wrapper, for instance, hides the
+                // actual JSON parse path and the source body). Log
+                // Debug too so the failure is recoverable from logs.
+                log.warn(
+                    TARGET,
+                    format!(
+                        "chat stream open failed (provider={provider_tag}, attempt={attempt}/{MAX_STREAM_ATTEMPTS}): {err}  debug={err:?}"
+                    ),
+                );
                 last_err = Some(err.to_string());
                 if attempt < MAX_STREAM_ATTEMPTS {
                     let backoff = STREAM_RETRY_BACKOFF_MS[(attempt - 1) as usize];
