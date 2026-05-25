@@ -1,5 +1,5 @@
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -44,7 +44,7 @@ impl Widget for InlineResult<'_> {
             self.theme,
             None,
         );
-        let widths = column_widths(visible_cols);
+        let widths = column_widths(visible_cols, inner.width);
         Widget::render(
             Table::new(table.rows, widths)
                 .header(table.header)
@@ -138,7 +138,7 @@ impl Widget for ExpandedResult<'_> {
             self.theme,
             self.selection,
         );
-        let widths = column_widths(self.visible_cols);
+        let widths = column_widths(self.visible_cols, table_area.width);
         Widget::render(
             Table::new(table.rows, widths)
                 .header(table.header)
@@ -284,12 +284,47 @@ fn build_row<'a>(
     }))
 }
 
-fn column_widths(n: usize) -> Vec<Constraint> {
-    (0..n).map(|_| Constraint::Min(8)).collect()
+/// Per-column widths summing (with the 1-cell column gaps) to
+/// `inner_width`. Returned as `Constraint::Length` rather than `Min`
+/// because ratatui's `Table` runs the kasuari solver over its column
+/// constraints, and kasuari hangs (issue #18) when fed many identical
+/// `Min(_)` constraints — the simplex pivots cycle on the degenerate
+/// ties. Pinning each column to an explicit `Length` keeps the solver
+/// off the pathological path entirely. We do the even-split arithmetic
+/// here so the result still scales with terminal width.
+fn column_widths(n: usize, inner_width: u16) -> Vec<Constraint> {
+    if n == 0 {
+        return Vec::new();
+    }
+    even_split(inner_width, n)
+        .into_iter()
+        .map(Constraint::Length)
+        .collect()
+}
+
+/// Split `total` into `n` integer pieces, accounting for the 1-cell
+/// gaps that sit *between* columns (so `n - 1` gaps total). The
+/// remainder is distributed across the leading pieces, mirroring how
+/// ratatui's Layout solver would have spread a leftover cell. If the
+/// available width is smaller than the gaps alone, every column is
+/// forced to width 0 — still well-defined, just nothing to render.
+fn even_split(total: u16, n: usize) -> Vec<u16> {
+    debug_assert!(n > 0);
+    let n_u = n as u32;
+    let gaps = n_u.saturating_sub(1);
+    let content = (total as u32).saturating_sub(gaps);
+    let base = content / n_u;
+    let extra = (content % n_u) as usize;
+    (0..n)
+        .map(|i| {
+            let w = if i < extra { base + 1 } else { base };
+            w as u16
+        })
+        .collect()
 }
 
 /// Distribute the inner area across `n` columns the same way ratatui's
-/// `Table` widget will, given `column_widths(n)` constraints and the
+/// `Table` widget will, given `column_widths(n, inner.width)` and the
 /// default 1-cell column spacing. Returns the cumulative X coordinates
 /// where each visible column starts, plus a sentinel at the right edge —
 /// i.e. a `Vec<u16>` of length `n + 1` such that column `i` spans
@@ -298,16 +333,19 @@ fn distribute_columns(inner: Rect, n: usize) -> Vec<u16> {
     if n == 0 || inner.width == 0 {
         return Vec::new();
     }
-    let constraints = column_widths(n);
-    // ratatui's Table inserts a 1-cell gap between columns (the default
-    // `column_spacing`); reproduce it via `Layout::spacing` so the boundaries
-    // match exactly. The Layout solver handles all the over/underflow
-    // arithmetic — we just read off the resulting rects.
-    let parts = Layout::horizontal(constraints).spacing(1).split(inner);
-    let mut out: Vec<u16> = parts.iter().map(|r| r.x).collect();
-    if let Some(last) = parts.last() {
-        out.push(last.x.saturating_add(last.width));
+    let widths = even_split(inner.width, n);
+    let mut out: Vec<u16> = Vec::with_capacity(n + 1);
+    let mut x = inner.x;
+    for w in &widths {
+        out.push(x);
+        x = x.saturating_add(*w).saturating_add(1); // +1 for column gap
     }
+    // Last entry was advanced past a trailing gap that doesn't exist;
+    // back it out so the sentinel sits flush with the right edge of
+    // the final column (matching the original Layout-derived behaviour).
+    let last_width = widths.last().copied().unwrap_or(0);
+    let last_x = *out.last().unwrap_or(&inner.x);
+    out.push(last_x.saturating_add(last_width));
     out
 }
 
