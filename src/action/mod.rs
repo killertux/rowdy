@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ratatui::crossterm::event::{Event as CtEvent, MouseEventKind};
 use ratatui_textarea::{Input, TextArea};
@@ -11,6 +11,11 @@ mod conn_form;
 mod conn_list;
 mod llm_settings;
 mod params_prompt;
+mod session;
+mod update;
+
+pub(crate) use session::{flush_session, schedule_session_save};
+pub use update::try_promote_pending_update;
 
 use crate::app::{App, MAX_SCHEMA_WIDTH, MIN_SCHEMA_WIDTH};
 use crate::clipboard;
@@ -19,7 +24,6 @@ use crate::command::{
 };
 use crate::datasource::{Cell, Column, QueryResult};
 use crate::export::{self, ExportFormat};
-use crate::session;
 use crate::state::command::CommandBuffer;
 use crate::state::conn_form::{ConnFormPostSave, ConnFormState};
 use crate::state::conn_list::ConnListState;
@@ -463,9 +467,9 @@ pub fn apply(app: &mut App, action: Action) {
         Action::PrepareConfirmRun => prepare_confirm_run(app),
         Action::ConfirmRunSubmit => confirm_run_submit(app),
         Action::ConfirmRunCancel => confirm_run_cancel(app),
-        Action::UpdateAccept => apply_update_accept(app),
-        Action::UpdateDismiss => apply_update_dismiss(app),
-        Action::CheckForUpdate => apply_check_for_update(app),
+        Action::UpdateAccept => update::apply_update_accept(app),
+        Action::UpdateDismiss => update::apply_update_dismiss(app),
+        Action::CheckForUpdate => update::apply_check_for_update(app),
         Action::RunStatementUnderCursor => run_statement_under_cursor(app),
         Action::RunSelection => run_selection(app),
         Action::CancelQuery => cancel_query(app),
@@ -499,15 +503,15 @@ pub fn apply(app: &mut App, action: Action) {
         Action::FormatEditor(scope) => format_editor(app, scope),
         Action::Completion(c) => completion::apply(app, c),
         Action::ReloadSchemaCache => reload_schema_cache(app),
-        Action::ResetSession => reset_session(app),
-        Action::ClearSession => clear_session(app),
+        Action::ResetSession => session::reset_session(app),
+        Action::ClearSession => session::clear_session(app),
         Action::Source => apply_source(app),
         Action::Mouse(target) => apply_mouse(app, target),
         Action::Chat(a) => chat::apply(app, a),
         Action::ToggleRightPanel => chat::toggle_right_panel(app),
         Action::SetRightPanel(mode) => chat::set_right_panel(app, mode),
         Action::LlmSettings(a) => llm_settings::apply(app, a),
-        Action::Session(s) => dispatch_session(app, s),
+        Action::Session(s) => session::dispatch_session(app, s),
         Action::ToolApproveAccept => chat::on_tool_approve_accept(app),
         Action::ToolApproveDeny => chat::on_tool_approve_deny(app),
     }
@@ -688,36 +692,6 @@ fn inline_result_jump(app: &mut App, row: usize, col: usize) {
         row_offset: 0,
         view: ResultViewMode::Normal,
         column_view: crate::state::results::ColumnView::new(max_cols),
-    };
-}
-
-fn reset_session(app: &mut App) {
-    if app.active_connection.is_none() {
-        app.status = QueryStatus::Failed {
-            error: "no active connection".into(),
-        };
-        return;
-    }
-    let _ = app.cmd_tx.send(WorkerCommand::ResetSession);
-    app.status = QueryStatus::Notice {
-        msg: "session reset — open transactions rolled back".into(),
-    };
-}
-
-fn clear_session(app: &mut App) {
-    // Editor buffer + results — local state we own, so wipe synchronously.
-    crate::state::editor::replace_buffer_text(&mut app.editor.state, "");
-    app.results.clear();
-    app.preview_hidden = false;
-    app.editor_dirty = true;
-    // And roll back the pinned connection so a fresh prompt doesn't
-    // inherit a stale BEGIN. Best-effort: if there's no connection, the
-    // local clear still stands.
-    if app.active_connection.is_some() {
-        let _ = app.cmd_tx.send(WorkerCommand::ResetSession);
-    }
-    app.status = QueryStatus::Notice {
-        msg: "session cleared".into(),
     };
 }
 
@@ -961,24 +935,8 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         C::Source => apply(app, Action::Source),
         C::Conn(sub) => dispatch_conn(app, sub),
         C::Chat(sub) => dispatch_chat(app, sub),
-        C::Session(sub) => apply(app, Action::Session(session_subcommand_to_action(sub))),
+        C::Session(sub) => apply(app, Action::Session(session::session_subcommand_to_action(sub))),
         C::Update => apply(app, Action::CheckForUpdate),
-    }
-}
-
-/// `:session …` ↔ `Action::Session(...)` translation. Keeps the
-/// command parser independent of `SessionAction` (which lives next
-/// to the dispatcher) so adding a new subcommand only touches
-/// `command.rs` + this conversion + the dispatcher.
-fn session_subcommand_to_action(sub: command::SessionSubcommand) -> SessionAction {
-    use command::SessionSubcommand as S;
-    match sub {
-        S::List => SessionAction::List,
-        S::Next => SessionAction::Next,
-        S::Prev => SessionAction::Prev,
-        S::New => SessionAction::New,
-        S::Switch(n) => SessionAction::Switch(n),
-        S::Delete(n) => SessionAction::Delete(n),
     }
 }
 
@@ -1567,154 +1525,12 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
             agents_md_loaded,
         } => chat::on_fs_tool_done(app, call_id, name, display, error, agents_md_loaded),
         WorkerEvent::UpdateAvailable { current, latest } => {
-            on_update_available(app, current, latest)
+            update::on_update_available(app, current, latest)
         }
-        WorkerEvent::UpdateInstalled { tag } => on_update_installed(app, tag),
-        WorkerEvent::UpdateInstallFailed { error } => on_update_install_failed(app, error),
-        WorkerEvent::UpdateUpToDate { current } => on_update_up_to_date(app, current),
-        WorkerEvent::UpdateCheckFailed { error } => on_update_check_failed(app, error),
-    }
-}
-
-fn on_update_up_to_date(app: &mut App, current: String) {
-    app.log.info(
-        "update",
-        format!("manual check: rowdy v{current} is the latest"),
-    );
-    app.status = QueryStatus::Notice {
-        msg: format!("✓ rowdy v{current} is the latest"),
-    };
-}
-
-fn on_update_check_failed(app: &mut App, error: String) {
-    app.log
-        .warn("update", format!("manual check failed: {error}"));
-    app.status = QueryStatus::Failed {
-        error: format!("update check: {error}"),
-    };
-}
-
-fn on_update_available(app: &mut App, current: String, latest: String) {
-    // Stash for later instead of opening the overlay immediately.
-    // Showing the prompt during startup (Auth screen, ConnectionList,
-    // Connecting overlay) would steal keyboard input from the password
-    // prompt or silently dismiss itself if the user types `n` in their
-    // password. `try_promote_pending_update` (called once per main-loop
-    // tick) does the deferred handoff once the user reaches Normal.
-    app.log.info(
-        "update",
-        format!("update {latest} pending; will prompt when user is idle"),
-    );
-    app.pending_update_prompt = Some((current, latest));
-}
-
-/// Move a queued update prompt from `App::pending_update_prompt` onto
-/// the live `Overlay` once the user is on `Screen::Normal` with no
-/// active overlay and is not actively typing. Idempotent and cheap —
-/// safe to call from the run loop on every iteration.
-pub fn try_promote_pending_update(app: &mut App) {
-    if app.pending_update_prompt.is_none() {
-        return;
-    }
-    if !matches!(app.screen, Screen::Normal) {
-        return;
-    }
-    if app.overlay.is_some() {
-        return;
-    }
-    // Don't capture keystrokes from a user actively typing.
-    if matches!(app.focus, Focus::ChatComposer) {
-        return;
-    }
-    if matches!(app.focus, Focus::Editor)
-        && !matches!(
-            app.editor.editor_mode(),
-            edtui::EditorMode::Normal | edtui::EditorMode::Visual
-        )
-    {
-        return;
-    }
-    let Some((current, latest)) = app.pending_update_prompt.take() else {
-        return;
-    };
-    app.overlay = Some(Overlay::UpdateAvailable { current, latest });
-}
-
-fn on_update_installed(app: &mut App, tag: String) {
-    app.log
-        .info("update", format!("install.sh succeeded for {tag}"));
-    app.status = QueryStatus::Notice {
-        msg: format!("✓ updated to {tag} — restart rowdy to use it"),
-    };
-}
-
-fn on_update_install_failed(app: &mut App, error: String) {
-    app.log
-        .warn("update", format!("install.sh failed: {error}"));
-    app.status = QueryStatus::Failed {
-        error: format!("update failed: {error}"),
-    };
-}
-
-fn apply_update_accept(app: &mut App) {
-    let Some(Overlay::UpdateAvailable { latest, .. }) = app.overlay.take() else {
-        return;
-    };
-    app.status = QueryStatus::Notice {
-        msg: format!("⬇ downloading {latest}…"),
-    };
-    let install_dir = match std::env::current_exe() {
-        Ok(exe) => exe.parent().map(std::path::Path::to_path_buf),
-        Err(err) => {
-            app.log.warn("update", format!("current_exe failed: {err}"));
-            None
-        }
-    };
-    let Some(install_dir) = install_dir else {
-        app.status = QueryStatus::Failed {
-            error: "update failed: cannot resolve install dir".into(),
-        };
-        return;
-    };
-    let evt_tx = app.evt_tx.clone();
-    let logger = app.log.clone();
-    let tag = latest.clone();
-    tokio::spawn(async move {
-        let event = match crate::update::run_installer(&tag, &install_dir).await {
-            Ok(()) => WorkerEvent::UpdateInstalled { tag },
-            Err(error) => {
-                logger.warn("update", format!("installer error: {error}"));
-                WorkerEvent::UpdateInstallFailed { error }
-            }
-        };
-        let _ = evt_tx.send(event);
-    });
-}
-
-fn apply_check_for_update(app: &mut App) {
-    app.status = QueryStatus::Notice {
-        msg: "checking for updates…".into(),
-    };
-    // Drop any stale auto-check that hasn't been promoted yet — the
-    // manual check is authoritative and will re-stash if a newer
-    // release is still available.
-    app.pending_update_prompt = None;
-    crate::update::spawn_manual_check(app.evt_tx.clone(), env!("CARGO_PKG_VERSION").to_string());
-}
-
-fn apply_update_dismiss(app: &mut App) {
-    let Some(Overlay::UpdateAvailable { latest, .. }) = app.overlay.take() else {
-        return;
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    if let Err(err) = app.user_config.record_check(now, Some(latest.clone())) {
-        app.log
-            .warn("update", format!("persisting dismissal failed: {err}"));
-    } else {
-        app.log.info("update", format!("user dismissed {latest}"));
+        WorkerEvent::UpdateInstalled { tag } => update::on_update_installed(app, tag),
+        WorkerEvent::UpdateInstallFailed { error } => update::on_update_install_failed(app, error),
+        WorkerEvent::UpdateUpToDate { current } => update::on_update_up_to_date(app, current),
+        WorkerEvent::UpdateCheckFailed { error } => update::on_update_check_failed(app, error),
     }
 }
 
@@ -1760,12 +1576,12 @@ fn on_connected(app: &mut App, name: String) {
     // and re-fire the catalog load.
     app.schema = SchemaPanel::new(app.schema.width);
     app.results.clear();
-    app.session_indices = session::list_indices(&app.data_dir, &name);
+    app.session_indices = crate::session::list_indices(&app.data_dir, &name);
     // `list_indices` always returns at least `[0]`, so the unwrap-by-index
     // is safe; default to session 0 on connect.
     app.active_session_index = app.session_indices[0];
-    load_session(app, &name, app.active_session_index);
-    load_chat_session(app, &name);
+    session::load_session(app, &name, app.active_session_index);
+    session::load_chat_session(app, &name);
     app.schema.begin_root_load();
     let _ = app.cmd_tx.send(WorkerCommand::Introspect {
         target: IntrospectTarget::Catalogs,
@@ -2528,257 +2344,6 @@ fn render_selection_sql(app: &App, id: ResultId, rect: &SelectionRect) -> Result
     ))
 }
 
-// ---------------------------------------------------------------------------
-// Editor session persistence
-// ---------------------------------------------------------------------------
-
-const SESSION_DEBOUNCE: Duration = Duration::from_millis(800);
-
-/// Push the next debounced save 800ms into the future. Skips when there's
-/// no active connection — the editor isn't user-reachable in those modes,
-/// but the early return keeps us honest if that ever changes.
-pub(super) fn schedule_session_save(app: &mut App) {
-    if app.active_connection.is_none() {
-        return;
-    }
-    app.editor_dirty = true;
-    app.pending_save_at = Some(tokio::time::Instant::now() + SESSION_DEBOUNCE);
-}
-
-/// Write the current editor buffer to the active connection's
-/// active session file (`session_<active_session_index>.sql`).
-/// Best-effort: failures are logged and swallowed so a flaky disk
-/// can't break the editor.
-pub(crate) fn flush_session(app: &mut App) {
-    let Some(name) = app.active_connection.clone() else {
-        app.editor_dirty = false;
-        app.pending_save_at = None;
-        return;
-    };
-    let path = session::path_for(&app.data_dir, &name, app.active_session_index);
-    let text = app.editor.text();
-    match session::save(&path, &text) {
-        Ok(()) => app.log.info("session", format!("saved {}", path.display())),
-        Err(err) => app
-            .log
-            .warn("session", format!("save {} failed: {err}", path.display())),
-    }
-    app.editor_dirty = false;
-    app.pending_save_at = None;
-}
-
-/// Route a `SessionAction` against the active connection. No-ops with a
-/// status notice when there's no connection — the editor isn't
-/// reachable in those modes, but the early return keeps an
-/// accidentally-bound `<Space>n` from silently doing nothing.
-fn dispatch_session(app: &mut App, action: SessionAction) {
-    let Some(name) = app.active_connection.clone() else {
-        app.status = QueryStatus::Failed {
-            error: "no active connection".into(),
-        };
-        return;
-    };
-    match action {
-        SessionAction::List => session_list_status(app),
-        SessionAction::Next => session_switch_relative(app, &name, 1),
-        SessionAction::Prev => session_switch_relative(app, &name, -1),
-        SessionAction::New => session_create_and_switch(app, &name),
-        SessionAction::Switch(n) => session_switch_to_index(app, &name, n),
-        SessionAction::Delete(n) => session_delete(app, &name, n),
-    }
-}
-
-fn session_list_status(app: &mut App) {
-    let list: Vec<String> = app.session_indices.iter().map(usize::to_string).collect();
-    app.status = QueryStatus::Notice {
-        msg: format!(
-            "sessions: {} (active {})",
-            list.join(", "),
-            app.active_session_index
-        ),
-    };
-}
-
-fn session_switch_relative(app: &mut App, name: &str, delta: i32) {
-    if app.session_indices.len() < 2 {
-        app.status = QueryStatus::Notice {
-            msg: format!(
-                "only one session ({}) — use `:session new` to create another",
-                app.active_session_index
-            ),
-        };
-        return;
-    }
-    let pos = app
-        .session_indices
-        .iter()
-        .position(|&i| i == app.active_session_index)
-        .unwrap_or(0) as i32;
-    let len = app.session_indices.len() as i32;
-    let next_pos = (pos + delta).rem_euclid(len) as usize;
-    let target = app.session_indices[next_pos];
-    session_switch_to_existing(app, name, target);
-}
-
-fn session_create_and_switch(app: &mut App, name: &str) {
-    let new_index = session::next_free_index(&app.session_indices);
-    // Touch the new file so subsequent `list_indices` calls (and any
-    // external `ls`) see it. An empty session file round-trips
-    // through `load` as an empty buffer.
-    let path = session::path_for(&app.data_dir, name, new_index);
-    if let Err(err) = session::save(&path, "") {
-        app.log.warn(
-            "session",
-            format!("create {} failed: {err}", path.display()),
-        );
-        app.status = QueryStatus::Failed {
-            error: format!("create session {new_index} failed: {err}"),
-        };
-        return;
-    }
-    flush_session(app);
-    app.session_indices.push(new_index);
-    app.session_indices.sort_unstable();
-    app.active_session_index = new_index;
-    load_session(app, name, new_index);
-    app.status = QueryStatus::Notice {
-        msg: format!("created session {new_index}"),
-    };
-}
-
-fn session_switch_to_index(app: &mut App, name: &str, target: usize) {
-    if !app.session_indices.contains(&target) {
-        app.status = QueryStatus::Failed {
-            error: format!(
-                "no session {target} (existing: {})",
-                app.session_indices
-                    .iter()
-                    .map(usize::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        };
-        return;
-    }
-    if target == app.active_session_index {
-        // No-op switches still refresh the indicator so the user
-        // gets a confirmation of where they are.
-        app.status = QueryStatus::Notice {
-            msg: format!("session {target} (already active)"),
-        };
-        return;
-    }
-    session_switch_to_existing(app, name, target);
-}
-
-fn session_switch_to_existing(app: &mut App, name: &str, target: usize) {
-    flush_session(app);
-    app.active_session_index = target;
-    load_session(app, name, target);
-    app.status = QueryStatus::Notice {
-        msg: format!("switched to session {target}"),
-    };
-}
-
-fn session_delete(app: &mut App, name: &str, target: usize) {
-    if !app.session_indices.contains(&target) {
-        app.status = QueryStatus::Failed {
-            error: format!("no session {target} to delete"),
-        };
-        return;
-    }
-    if app.session_indices.len() == 1 {
-        app.status = QueryStatus::Failed {
-            error: "can't delete the only remaining session".into(),
-        };
-        return;
-    }
-    let active_being_deleted = app.active_session_index == target;
-    if let Err(err) = session::delete(&app.data_dir, name, target) {
-        app.log
-            .warn("session", format!("delete {target} failed: {err}"));
-        app.status = QueryStatus::Failed {
-            error: format!("delete session {target} failed: {err}"),
-        };
-        return;
-    }
-    app.session_indices.retain(|&i| i != target);
-    if active_being_deleted {
-        // The buffer the user was editing belonged to the deleted
-        // file — discard it (deliberately *not* flushing) and load
-        // the previous index in the list. `session_indices` is
-        // guaranteed non-empty here because we refused on len==1.
-        let fallback = app
-            .session_indices
-            .iter()
-            .copied()
-            .rev()
-            .find(|&i| i < target)
-            .unwrap_or(app.session_indices[0]);
-        // Suppress the pending debounced save for the just-killed
-        // index — without this clear the next tick would re-write
-        // the file we just deleted.
-        app.editor_dirty = false;
-        app.pending_save_at = None;
-        app.active_session_index = fallback;
-        load_session(app, name, fallback);
-    }
-    app.status = QueryStatus::Notice {
-        msg: format!("deleted session {target}"),
-    };
-}
-
-/// Load the session at `index` for `name` into the editor. Treats a
-/// missing file as an empty buffer — first save will create it.
-/// Resets the dirty/timer state so the load itself doesn't trigger
-/// another save.
-fn load_session(app: &mut App, name: &str, index: usize) {
-    let path = session::path_for(&app.data_dir, name, index);
-    match session::load(&path) {
-        Ok(text) => {
-            app.editor.replace_text(&text);
-            app.log
-                .info("session", format!("loaded {}", path.display()));
-        }
-        Err(err) => {
-            app.log
-                .warn("session", format!("load {} failed: {err}", path.display()));
-            app.editor.replace_text("");
-        }
-    }
-    app.editor_dirty = false;
-    app.pending_save_at = None;
-}
-
-/// Load the persisted chat-session messages for `name` into
-/// `app.chat.messages`. Missing file → empty history. Failures are
-/// surfaced as a warning + empty history rather than a hard error;
-/// chat is non-essential to the rest of the UI.
-fn load_chat_session(app: &mut App, name: &str) {
-    let path = crate::chat_session::path_for(&app.data_dir, name);
-    match crate::chat_session::load(&path) {
-        Ok(messages) => {
-            let count = messages.len();
-            app.chat.messages = messages;
-            // Land at the bottom of the loaded history — that's where
-            // the conversation left off, and what the user expects when
-            // resuming a session.
-            app.chat.scroll_to_bottom();
-            app.chat.streaming = false;
-            app.chat.error = None;
-            app.log.info(
-                "chat",
-                format!("loaded {count} message(s) from {}", path.display()),
-            );
-        }
-        Err(err) => {
-            app.log
-                .warn("chat", format!("load {} failed: {err}", path.display()));
-            app.chat.messages.clear();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2959,7 +2524,7 @@ mod tests {
         app.overlay = Some(Overlay::Connecting {
             name: "main".into(),
         });
-        super::on_update_available(&mut app, "0.7.0".into(), "0.7.1".into());
+        super::update::on_update_available(&mut app, "0.7.0".into(), "0.7.1".into());
         assert!(
             matches!(app.overlay, Some(Overlay::Connecting { .. })),
             "Connecting overlay must not be replaced",
@@ -2995,7 +2560,7 @@ mod tests {
         let (mut app, _cmd_rx, _evt_rx) = fixture_app(dir);
 
         app.screen = Screen::Auth(AuthState::new(crate::state::auth::AuthKind::FirstSetup));
-        super::on_update_available(&mut app, "0.7.0".into(), "0.7.1".into());
+        super::update::on_update_available(&mut app, "0.7.0".into(), "0.7.1".into());
         super::try_promote_pending_update(&mut app);
 
         // Auth screen must keep its keyboard input — overlay must NOT
