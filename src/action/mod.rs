@@ -780,7 +780,10 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         C::Source => apply(app, Action::Source),
         C::Conn(sub) => dispatch_conn(app, sub),
         C::Chat(sub) => dispatch_chat(app, sub),
-        C::Session(sub) => apply(app, Action::Session(session::session_subcommand_to_action(sub))),
+        C::Session(sub) => apply(
+            app,
+            Action::Session(session::session_subcommand_to_action(sub)),
+        ),
         C::Update => apply(app, Action::CheckForUpdate),
     }
 }
@@ -1001,7 +1004,9 @@ fn apply_theme_picker(app: &mut App, action: ThemePickerAction) {
 fn apply_worker_event(app: &mut App, event: WorkerEvent) {
     match event {
         WorkerEvent::QueryDone { req, result } => query::on_query_done(app, req, result),
-        WorkerEvent::QueryFailed { req, error } => query::on_query_failed(app, req, error.to_string()),
+        WorkerEvent::QueryFailed { req, error } => {
+            query::on_query_failed(app, req, error.to_string())
+        }
         WorkerEvent::SchemaLoaded { target, payload } => {
             schema::on_schema_loaded(app, target, payload)
         }

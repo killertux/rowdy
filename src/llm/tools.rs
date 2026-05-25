@@ -129,7 +129,6 @@ pub fn for_mode(mode: crate::user_config::ReadToolsMode) -> Vec<Tool> {
     }
 }
 
-
 /// True when `name` reads from the in-memory schema cache. The chat
 /// dispatcher uses this to decide whether a cache miss should trigger an
 /// auto-introspection (schema tools) or fall through to the regular

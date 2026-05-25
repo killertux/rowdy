@@ -1685,14 +1685,11 @@ mod tests {
     /// still resolve even when a scalar subquery sits in the projection.
     #[test]
     fn scalar_subquery_in_projection_does_not_break_outer_alias() {
-        let stmt =
-            "SELECT u.id, (SELECT count(*) FROM posts) AS n, u. FROM users u WHERE u.id > 0";
+        let stmt = "SELECT u.id, (SELECT count(*) FROM posts) AS n, u. FROM users u WHERE u.id > 0";
         let cursor = stmt.rfind("u.").unwrap() + 2;
         let r = classify_at(stmt, cursor);
         match r.context {
-            CompletionContext::Column {
-                qualifier: Some(b),
-            } => assert_eq!(b.table, "users"),
+            CompletionContext::Column { qualifier: Some(b) } => assert_eq!(b.table, "users"),
             other => panic!("expected u.* to resolve to users; got {other:?}"),
         }
     }
@@ -1721,9 +1718,7 @@ mod tests {
         let cursor = stmt.len();
         let r = classify_with_dialect(stmt, cursor, DriverKind::Postgres);
         match r.context {
-            CompletionContext::Column {
-                qualifier: Some(b),
-            } => assert_eq!(b.table, "Users"),
+            CompletionContext::Column { qualifier: Some(b) } => assert_eq!(b.table, "Users"),
             other => panic!("expected u.* qualified-by-Users; got {other:?}"),
         }
     }
@@ -1736,9 +1731,7 @@ mod tests {
         let cursor = stmt.len();
         let r = classify_with_dialect(stmt, cursor, DriverKind::Mysql);
         match r.context {
-            CompletionContext::Column {
-                qualifier: Some(b),
-            } => assert_eq!(b.table, "Users"),
+            CompletionContext::Column { qualifier: Some(b) } => assert_eq!(b.table, "Users"),
             other => panic!("expected u.* qualified-by-Users; got {other:?}"),
         }
     }

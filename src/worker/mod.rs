@@ -649,7 +649,6 @@ async fn prime_cache(
     }
 }
 
-
 async fn handle_introspect(datasource: &dyn Datasource, target: IntrospectTarget) -> WorkerEvent {
     let outcome = match &target {
         IntrospectTarget::Catalogs => datasource
@@ -886,7 +885,10 @@ mod tests {
         {
             let guard = cache.read().unwrap();
             assert!(
-                guard.schemas.values().any(|v| v.iter().any(|s| s == "main")),
+                guard
+                    .schemas
+                    .values()
+                    .any(|v| v.iter().any(|s| s == "main")),
                 "expected 'main' schema in primed cache; got {:?}",
                 guard.schemas,
             );
@@ -907,4 +909,3 @@ mod tests {
         assert!(evt_rx.try_recv().is_err());
     }
 }
-

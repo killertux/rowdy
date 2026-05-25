@@ -1912,10 +1912,7 @@ mod tests {
     use std::sync::{Arc, RwLock};
 
     fn temp_dir(label: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "rowdy-event-{label}-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let p = std::env::temp_dir().join(format!("rowdy-event-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -1931,7 +1928,15 @@ mod tests {
         let (evt_tx, _evt_rx) = mpsc::unbounded_channel();
         let schema_cache = Arc::new(RwLock::new(SchemaCache::new()));
         App::new(
-            cmd_tx, evt_tx, config, user_config, keymap, None, logger, dir, schema_cache,
+            cmd_tx,
+            evt_tx,
+            config,
+            user_config,
+            keymap,
+            None,
+            logger,
+            dir,
+            schema_cache,
         )
     }
 
