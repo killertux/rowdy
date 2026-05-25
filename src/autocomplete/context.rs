@@ -1633,4 +1633,161 @@ mod tests {
         let cte = r.bindings.iter().find(|b| b.table == "u").unwrap();
         assert_eq!(cte.synthetic_columns.as_deref(), Some([].as_slice()));
     }
+
+    // -----------------------------------------------------------------
+    // Nested subqueries / UNION / dialect quoting edge cases
+    // (review gap: parameterized coverage for these areas)
+    // -----------------------------------------------------------------
+
+    fn classify_with_dialect(stmt: &str, cursor: usize, dialect: DriverKind) -> ClassifyResult {
+        classify(
+            stmt,
+            cursor,
+            dialect,
+            ResolveContext {
+                default_catalog: Some("main"),
+                default_schema: Some("main"),
+            },
+            &SchemaCache::new(),
+        )
+    }
+
+    /// Cursor in the outer SELECT of `SELECT … FROM (SELECT … FROM users) AS u`
+    /// must see the derived-table alias `u`, not the inner `users`. The
+    /// inner FROM is shadowed by the subquery boundary.
+    #[test]
+    fn subquery_in_from_exposes_only_outer_alias() {
+        let stmt = "SELECT  FROM (SELECT id FROM users) AS u";
+        let cursor = stmt.find("  FROM").unwrap() + 1;
+        let r = classify_at(stmt, cursor);
+        let names: Vec<&str> = r.bindings.iter().map(|b| b.table.as_str()).collect();
+        assert!(
+            names.contains(&"u"),
+            "outer query should see derived alias 'u'; got {names:?}"
+        );
+    }
+
+    /// Subquery in JOIN position — the alias is bound, inner tables stay hidden.
+    #[test]
+    fn subquery_in_join_position_binds_alias() {
+        let stmt =
+            "SELECT * FROM users u JOIN (SELECT post_id FROM posts) p ON p.post_id = u.id WHERE ";
+        let r = classify_at_end(stmt);
+        let names: Vec<&str> = r.bindings.iter().map(|b| b.table.as_str()).collect();
+        assert!(names.contains(&"users"), "{names:?}");
+        assert!(
+            names.contains(&"p"),
+            "subquery alias 'p' should be a binding; got {names:?}"
+        );
+    }
+
+    /// `SELECT u.<cursor> FROM users u` works; the qualifier should
+    /// still resolve even when a scalar subquery sits in the projection.
+    #[test]
+    fn scalar_subquery_in_projection_does_not_break_outer_alias() {
+        let stmt =
+            "SELECT u.id, (SELECT count(*) FROM posts) AS n, u. FROM users u WHERE u.id > 0";
+        let cursor = stmt.rfind("u.").unwrap() + 2;
+        let r = classify_at(stmt, cursor);
+        match r.context {
+            CompletionContext::Column {
+                qualifier: Some(b),
+            } => assert_eq!(b.table, "users"),
+            other => panic!("expected u.* to resolve to users; got {other:?}"),
+        }
+    }
+
+    /// `UNION` shouldn't fuse the two FROM clauses into one binding set
+    /// at the cursor — but it also shouldn't lose the alias visible in
+    /// the arm containing the cursor.
+    #[test]
+    fn union_arm_keeps_local_binding_in_scope() {
+        let stmt = "SELECT id FROM users WHERE  UNION SELECT id FROM admins";
+        let cursor = stmt.find("WHERE ").unwrap() + 6;
+        let r = classify_at(stmt, cursor);
+        let names: Vec<&str> = r.bindings.iter().map(|b| b.table.as_str()).collect();
+        assert!(
+            names.contains(&"users"),
+            "WHERE in the left arm must see 'users'; got {names:?}"
+        );
+    }
+
+    /// PostgreSQL `"Quoted"` identifiers must round-trip through the
+    /// tokenizer when the parser is set to Postgres — the binding's
+    /// table name should match the unquoted form.
+    #[test]
+    fn postgres_double_quoted_identifier_binds() {
+        let stmt = "SELECT * FROM \"Users\" u WHERE u.";
+        let cursor = stmt.len();
+        let r = classify_with_dialect(stmt, cursor, DriverKind::Postgres);
+        match r.context {
+            CompletionContext::Column {
+                qualifier: Some(b),
+            } => assert_eq!(b.table, "Users"),
+            other => panic!("expected u.* qualified-by-Users; got {other:?}"),
+        }
+    }
+
+    /// MySQL backtick identifiers must round-trip when the parser is set
+    /// to MySQL. `\`Users\`` aliased as `u` should still resolve via u.
+    #[test]
+    fn mysql_backtick_identifier_binds() {
+        let stmt = "SELECT * FROM `Users` u WHERE u.";
+        let cursor = stmt.len();
+        let r = classify_with_dialect(stmt, cursor, DriverKind::Mysql);
+        match r.context {
+            CompletionContext::Column {
+                qualifier: Some(b),
+            } => assert_eq!(b.table, "Users"),
+            other => panic!("expected u.* qualified-by-Users; got {other:?}"),
+        }
+    }
+
+    /// Three-way join with chained aliases: every alias on the path to
+    /// the cursor must be collected.
+    #[test]
+    fn three_way_join_collects_all_aliases() {
+        let stmt = "SELECT * FROM a JOIN b ON a.id = b.a_id JOIN c ON c.b_id = b.id WHERE ";
+        let r = classify_at_end(stmt);
+        let names: Vec<&str> = r.bindings.iter().map(|b| b.table.as_str()).collect();
+        for t in ["a", "b", "c"] {
+            assert!(names.contains(&t), "missing {t} in {names:?}");
+        }
+    }
+
+    /// Nested CTEs: `WITH a AS (…), b AS (SELECT … FROM a) SELECT …
+    /// FROM b` — both `a` and `b` should be CTE bindings in the outer
+    /// scope.
+    #[test]
+    fn chained_ctes_both_collected_in_outer_scope() {
+        let stmt =
+            "WITH a AS (SELECT id FROM users), b AS (SELECT id FROM a) SELECT * FROM b WHERE ";
+        let r = classify_at_end(stmt);
+        let ctes: Vec<&str> = r
+            .bindings
+            .iter()
+            .filter(|b| b.is_cte)
+            .map(|b| b.table.as_str())
+            .collect();
+        assert!(ctes.contains(&"a"), "{ctes:?}");
+        assert!(ctes.contains(&"b"), "{ctes:?}");
+    }
+
+    /// `EXCEPT` and `INTERSECT` behave like `UNION` for binding scope.
+    /// Smoke-test the parser doesn't drop bindings when these keywords
+    /// appear (regression guard — they used to bail out of the
+    /// collector early).
+    #[test]
+    fn except_and_intersect_do_not_lose_bindings() {
+        for kw in ["EXCEPT", "INTERSECT"] {
+            let stmt = format!("SELECT id FROM users WHERE  {kw} SELECT id FROM admins");
+            let cursor = stmt.find("WHERE ").unwrap() + 6;
+            let r = classify_at(&stmt, cursor);
+            let names: Vec<&str> = r.bindings.iter().map(|b| b.table.as_str()).collect();
+            assert!(
+                names.contains(&"users"),
+                "{kw}: WHERE arm must keep 'users'; got {names:?}"
+            );
+        }
+    }
 }
