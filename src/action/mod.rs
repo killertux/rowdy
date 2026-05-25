@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::time::Instant;
 
 use ratatui::crossterm::event::{Event as CtEvent, MouseEventKind};
 use ratatui_textarea::{Input, TextArea};
@@ -11,6 +10,7 @@ mod conn_form;
 mod conn_list;
 mod llm_settings;
 mod params_prompt;
+mod query;
 mod session;
 mod update;
 
@@ -22,7 +22,7 @@ use crate::clipboard;
 use crate::command::{
     self, ChatSubcommand, ConnSubcommand, FormatScope, ParsedTarget, ThemeChoice,
 };
-use crate::datasource::{Cell, Column, QueryResult};
+use crate::datasource::{Cell, Column};
 use crate::export::{self, ExportFormat};
 use crate::state::command::CommandBuffer;
 use crate::state::conn_form::{ConnFormPostSave, ConnFormState};
@@ -464,15 +464,15 @@ pub fn apply(app: &mut App, action: Action) {
         Action::OpenCommand => app.overlay = Some(Overlay::Command(CommandBuffer::default())),
         Action::Command(cmd) => apply_command(app, cmd),
         Action::Schema(s) => apply_schema(app, s),
-        Action::PrepareConfirmRun => prepare_confirm_run(app),
-        Action::ConfirmRunSubmit => confirm_run_submit(app),
-        Action::ConfirmRunCancel => confirm_run_cancel(app),
+        Action::PrepareConfirmRun => query::prepare_confirm_run(app),
+        Action::ConfirmRunSubmit => query::confirm_run_submit(app),
+        Action::ConfirmRunCancel => query::confirm_run_cancel(app),
         Action::UpdateAccept => update::apply_update_accept(app),
         Action::UpdateDismiss => update::apply_update_dismiss(app),
         Action::CheckForUpdate => update::apply_check_for_update(app),
-        Action::RunStatementUnderCursor => run_statement_under_cursor(app),
-        Action::RunSelection => run_selection(app),
-        Action::CancelQuery => cancel_query(app),
+        Action::RunStatementUnderCursor => query::run_statement_under_cursor(app),
+        Action::RunSelection => query::run_selection(app),
+        Action::CancelQuery => query::cancel_query(app),
         Action::ExpandLatestResult => expand_latest(app),
         Action::CollapseResult => app.screen = Screen::Normal,
         Action::DismissResult => dismiss_result(app),
@@ -1195,173 +1195,6 @@ fn dispatch_introspect(app: &mut App, target: IntrospectTarget) {
     let _ = app.cmd_tx.send(WorkerCommand::Introspect { target });
 }
 
-fn prepare_confirm_run(app: &mut App) {
-    let Some(range) = crate::state::editor::statement_under_cursor(&app.editor.state) else {
-        app.status = QueryStatus::Failed {
-            error: "no statement under cursor".into(),
-        };
-        return;
-    };
-    let style = crate::state::editor::confirm_highlight_style(
-        app.theme.selection_bg,
-        app.theme.selection_fg,
-    );
-    crate::state::editor::highlight_range(&mut app.editor.state, &range, style);
-    app.overlay = Some(Overlay::ConfirmRun {
-        statement: range.text,
-        reason: crate::state::overlay::ConfirmRunReason::Manual,
-    });
-}
-
-fn confirm_run_submit(app: &mut App) {
-    let Some(Overlay::ConfirmRun { statement, .. }) = app.overlay.take() else {
-        return;
-    };
-    crate::state::editor::clear_confirm_highlight(&mut app.editor.state);
-    dispatch_query(app, statement);
-}
-
-fn confirm_run_cancel(app: &mut App) {
-    if !matches!(app.overlay, Some(Overlay::ConfirmRun { .. })) {
-        return;
-    }
-    app.overlay = None;
-    crate::state::editor::clear_confirm_highlight(&mut app.editor.state);
-}
-
-fn run_statement_under_cursor(app: &mut App) {
-    let Some(range) = crate::state::editor::statement_under_cursor(&app.editor.state) else {
-        app.status = QueryStatus::Failed {
-            error: "no statement under cursor".into(),
-        };
-        return;
-    };
-    dispatch_query(app, range.text);
-}
-
-fn run_selection(app: &mut App) {
-    let Some(text) = crate::state::editor::selection_text(&app.editor.state) else {
-        app.status = QueryStatus::Failed {
-            error: "no selection to run".into(),
-        };
-        return;
-    };
-    dispatch_query(app, text);
-}
-
-fn cancel_query(app: &mut App) {
-    if app.in_flight_query.is_none() {
-        app.status = QueryStatus::Failed {
-            error: "no query running".into(),
-        };
-        return;
-    }
-    app.in_flight_query = None;
-    app.status = QueryStatus::Cancelled;
-    let _ = app.cmd_tx.send(WorkerCommand::Cancel);
-}
-
-fn dispatch_query(app: &mut App, sql: String) {
-    if app.in_flight_query.is_some() {
-        app.status = QueryStatus::Failed {
-            error: "query already in progress — :cancel first".into(),
-        };
-        return;
-    }
-    let trimmed = sql.trim().to_string();
-    if trimmed.is_empty() {
-        app.status = QueryStatus::Failed {
-            error: "no query to run".into(),
-        };
-        return;
-    }
-    // Destructive-statement guardrail: bare UPDATE/DELETE without WHERE
-    // and any TRUNCATE bounce through a confirm overlay. Reuses the
-    // `<leader>r` confirm machinery — Enter dispatches the held SQL
-    // (which lands back here, but the overlay is gone by then so we
-    // don't loop). Skipped when the user already passed through a
-    // manual confirm (overlay is consumed before re-dispatch).
-    if app.overlay.is_none()
-        && let Some(dialect) = destructive_dialect(app)
-        && let Some(reason) =
-            crate::datasource::sql::requires_destructive_confirmation(&trimmed, dialect.as_ref())
-    {
-        app.overlay = Some(Overlay::ConfirmRun {
-            statement: trimmed,
-            reason: crate::state::overlay::ConfirmRunReason::Destructive(reason),
-        });
-        return;
-    }
-    // Placeholders (`$N` / `:name`) bounce through a popup so the user
-    // can fill values in. The original (unsubstituted) statement
-    // stays on the overlay; the substituted form is what we eventually
-    // send to the worker via `send_to_worker`.
-    if app.overlay.is_none()
-        && let Some(dialect) = destructive_dialect(app)
-    {
-        let scan = crate::datasource::sql::placeholders::scan(&trimmed, dialect.as_ref());
-        let unique = crate::datasource::sql::placeholders::unique_params(&scan);
-        if !unique.is_empty() {
-            open_params_prompt(app, trimmed, scan, unique);
-            return;
-        }
-    }
-    send_to_worker(app, trimmed);
-}
-
-/// Tail of `dispatch_query` — marks the query in flight and hands the
-/// (already finalised) SQL to the worker. Extracted so the params
-/// popup's Submit handler can reuse the exact same logging / status /
-/// in-flight bookkeeping after substitution.
-pub(super) fn send_to_worker(app: &mut App, sql: String) {
-    app.preview_hidden = false;
-    let req = app.requests.next();
-    app.in_flight_query = Some(crate::app::InFlightQuery {
-        req,
-        sql: sql.clone(),
-    });
-    app.status = QueryStatus::Running {
-        query: sql.clone(),
-        started_at: Instant::now(),
-    };
-    let _ = app.cmd_tx.send(WorkerCommand::Execute { req, sql });
-}
-
-fn open_params_prompt(
-    app: &mut App,
-    statement: String,
-    placeholders: Vec<crate::datasource::sql::placeholders::Placeholder>,
-    keys: Vec<crate::datasource::sql::placeholders::ParamKey>,
-) {
-    // Pre-fill from per-connection history when we have a match for the
-    // exact same statement text. No active connection → no history.
-    let prefill_map = app
-        .active_connection
-        .clone()
-        .and_then(|conn| crate::param_history::lookup(app, &conn, &statement));
-
-    let state =
-        crate::state::params_prompt::ParamsPromptState::new(statement, placeholders, keys, |key| {
-            prefill_map
-                .as_ref()
-                .and_then(|m| m.get(&key.label()).cloned())
-        });
-    app.overlay = Some(Overlay::ParamsPrompt(state));
-}
-
-/// Pick a sqlparser dialect to feed `requires_destructive_confirmation`.
-/// Falls back to `Generic` when no connection is active so the guardrail
-/// still fires for queries typed before connecting (rare but possible).
-fn destructive_dialect(app: &App) -> Option<Box<dyn sqlparser::dialect::Dialect>> {
-    use crate::datasource::DriverKind;
-    let kind = app.active_dialect.unwrap_or(DriverKind::Sqlite);
-    Some(match kind {
-        DriverKind::Postgres => Box::new(sqlparser::dialect::PostgreSqlDialect {}),
-        DriverKind::Mysql => Box::new(sqlparser::dialect::MySqlDialect {}),
-        DriverKind::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
-    })
-}
-
 fn expand_latest(app: &mut App) {
     let Some(block) = app.results.last() else {
         app.status = QueryStatus::Failed {
@@ -1493,8 +1326,8 @@ fn apply_nav_step(
 
 fn apply_worker_event(app: &mut App, event: WorkerEvent) {
     match event {
-        WorkerEvent::QueryDone { req, result } => on_query_done(app, req, result),
-        WorkerEvent::QueryFailed { req, error } => on_query_failed(app, req, error.to_string()),
+        WorkerEvent::QueryDone { req, result } => query::on_query_done(app, req, result),
+        WorkerEvent::QueryFailed { req, error } => query::on_query_failed(app, req, error.to_string()),
         WorkerEvent::SchemaLoaded { target, payload } => on_schema_loaded(app, target, payload),
         WorkerEvent::SchemaFailed { target, error } => {
             on_schema_failed(app, target, error.to_string())
@@ -1739,80 +1572,6 @@ fn cache_introspect_payload(
         // Indices aren't in the cache and aren't surfaced as a tool.
         _ => {}
     }
-}
-
-fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResult) {
-    let Some(in_flight) = app.in_flight_query.as_ref() else {
-        return;
-    };
-    if in_flight.req != req {
-        return;
-    }
-    let in_flight = app.in_flight_query.take().expect("checked above");
-
-    // DDL detection: if the just-executed SQL reshaped the schema,
-    // re-prime the autocomplete cache so the next popover sees the
-    // new state. Best-effort — failures are surfaced through the
-    // normal cache-stage failure path.
-    if crate::autocomplete::ddl::affects_schema_cache(&in_flight.sql)
-        && let Some(name) = app.active_connection.clone()
-    {
-        // Coalesce back-to-back DDLs: if a prior reload hasn't reported
-        // `CacheStage::Reloaded` yet, skip this one. The in-flight
-        // reload's final stage already covers the new schema state, so
-        // queueing a second pass just doubles the introspection cost on
-        // large catalogs (a real freeze symptom we've hit in practice).
-        if !app.schema_reload_in_flight {
-            app.schema_reload_in_flight = true;
-            let _ = app.cmd_tx.send(WorkerCommand::Reload { connection: name });
-        }
-    }
-
-    let took = result.elapsed;
-    let total_rows = result.rows.len();
-    let affected = result.affected;
-
-    // Statements run via `execute()` (DML/DDL) report no columns — there's
-    // nothing to render in a result block, so skip pushing one. Also hide
-    // the inline preview so a stale grid from an earlier SELECT doesn't
-    // linger on screen after a `DELETE`/`UPDATE` lands.
-    if !result.columns.is_empty() {
-        let id = ResultId(app.results.len());
-        // `active_dialect` should always be Some here (we only run queries
-        // through an active connection), but fall back to Sqlite rather than
-        // panic if the invariant ever breaks.
-        let dialect = app
-            .active_dialect
-            .unwrap_or(crate::datasource::DriverKind::Sqlite);
-        app.results.push(ResultBlock {
-            id,
-            took,
-            columns: result.columns,
-            rows: result.rows,
-            sql: in_flight.sql,
-            dialect,
-        });
-    } else {
-        app.preview_hidden = true;
-    }
-
-    app.status = QueryStatus::Succeeded {
-        rows: total_rows,
-        affected,
-        took,
-        statements_run: result.statements_run.max(1),
-    };
-}
-
-fn on_query_failed(app: &mut App, req: crate::worker::RequestId, error: String) {
-    let Some(in_flight) = app.in_flight_query.as_ref() else {
-        return;
-    };
-    if in_flight.req != req {
-        return;
-    }
-    app.in_flight_query = None;
-    app.status = QueryStatus::Failed { error };
 }
 
 // ---------------------------------------------------------------------------

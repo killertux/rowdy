@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 
-use super::{ParamsPromptAction, copy_from, cut_from, paste_into, send_to_worker};
+use super::query::send_to_worker;
+use super::{ParamsPromptAction, copy_from, cut_from, paste_into};
 use crate::app::App;
 use crate::datasource::sql::placeholders;
 use crate::state::overlay::Overlay;
