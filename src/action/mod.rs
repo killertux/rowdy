@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{Event as CtEvent, MouseEventKind};
 use ratatui_textarea::{Input, TextArea};
@@ -11,24 +10,28 @@ mod conn_form;
 mod conn_list;
 mod llm_settings;
 mod params_prompt;
+mod query;
+mod results;
+mod schema;
+mod session;
+mod update;
 
-use crate::app::{App, MAX_SCHEMA_WIDTH, MIN_SCHEMA_WIDTH};
+pub(crate) use session::{flush_session, schedule_session_save};
+pub use update::try_promote_pending_update;
+
+use crate::app::App;
 use crate::clipboard;
 use crate::command::{
     self, ChatSubcommand, ConnSubcommand, FormatScope, ParsedTarget, ThemeChoice,
 };
-use crate::datasource::{Cell, Column, QueryResult};
-use crate::export::{self, ExportFormat};
-use crate::session;
+use crate::export::ExportFormat;
 use crate::state::command::CommandBuffer;
 use crate::state::conn_form::{ConnFormPostSave, ConnFormState};
 use crate::state::conn_list::ConnListState;
 use crate::state::focus::{Focus, PendingChord};
-use crate::state::layout::DragState;
 use crate::state::overlay::Overlay;
-use crate::state::results::{ResultBlock, ResultCursor, ResultId, ResultViewMode, SelectionRect};
 use crate::state::right_panel::RightPanelMode;
-use crate::state::schema::{ExpandOutcome, NodeId, SchemaPanel};
+use crate::state::schema::{NodeId, SchemaPanel};
 use crate::state::screen::Screen;
 use crate::state::status::QueryStatus;
 use crate::state::theme_picker::ThemePickerState;
@@ -424,29 +427,11 @@ pub enum ResultColumnAction {
     Reset,
 }
 
-fn schema_toggle_at(app: &mut App, id: NodeId) {
-    app.schema.selected = Some(id);
-    let outcome = app.schema.toggle_selected();
-    maybe_dispatch(app, outcome);
-}
-
-fn schema_scroll(app: &mut App, delta: i32) {
-    let total = app.schema.visible_rows().len();
-    if total == 0 {
-        return;
-    }
-    app.schema.snap_to_selection = false;
-    let max_offset = total.saturating_sub(1);
-    let next = (app.schema.scroll_offset as i32).saturating_add(delta);
-    let next = next.clamp(0, max_offset as i32) as usize;
-    app.schema.scroll_offset = next;
-}
-
 pub fn apply(app: &mut App, action: Action) {
     match action {
         Action::Quit => app.should_quit = true,
         Action::FocusPanel(f) => focus_panel(app, f),
-        Action::ResizeSchema(delta) => resize_schema(app, delta),
+        Action::ResizeSchema(delta) => schema::resize_schema(app, delta),
         Action::SetPendingChord(c) => app.pending = c,
         Action::EditorEvent(ev) => {
             app.editor.events.on_event(ev, &mut app.editor.state);
@@ -459,28 +444,28 @@ pub fn apply(app: &mut App, action: Action) {
         }
         Action::OpenCommand => app.overlay = Some(Overlay::Command(CommandBuffer::default())),
         Action::Command(cmd) => apply_command(app, cmd),
-        Action::Schema(s) => apply_schema(app, s),
-        Action::PrepareConfirmRun => prepare_confirm_run(app),
-        Action::ConfirmRunSubmit => confirm_run_submit(app),
-        Action::ConfirmRunCancel => confirm_run_cancel(app),
-        Action::UpdateAccept => apply_update_accept(app),
-        Action::UpdateDismiss => apply_update_dismiss(app),
-        Action::CheckForUpdate => apply_check_for_update(app),
-        Action::RunStatementUnderCursor => run_statement_under_cursor(app),
-        Action::RunSelection => run_selection(app),
-        Action::CancelQuery => cancel_query(app),
-        Action::ExpandLatestResult => expand_latest(app),
+        Action::Schema(s) => schema::apply_schema(app, s),
+        Action::PrepareConfirmRun => query::prepare_confirm_run(app),
+        Action::ConfirmRunSubmit => query::confirm_run_submit(app),
+        Action::ConfirmRunCancel => query::confirm_run_cancel(app),
+        Action::UpdateAccept => update::apply_update_accept(app),
+        Action::UpdateDismiss => update::apply_update_dismiss(app),
+        Action::CheckForUpdate => update::apply_check_for_update(app),
+        Action::RunStatementUnderCursor => query::run_statement_under_cursor(app),
+        Action::RunSelection => query::run_selection(app),
+        Action::CancelQuery => query::cancel_query(app),
+        Action::ExpandLatestResult => results::expand_latest(app),
         Action::CollapseResult => app.screen = Screen::Normal,
-        Action::DismissResult => dismiss_result(app),
-        Action::ResultNav(nav) => apply_result_nav(app, nav),
-        Action::ResultColumn(op) => apply_result_column(app, op),
-        Action::ResultEnterVisual => result_enter_visual(app),
-        Action::ResultExitVisual => result_exit_visual(app),
-        Action::ResultYank => result_yank(app),
-        Action::ResultYankFormat(fmt) => result_yank_format(app, fmt),
-        Action::ResultCancelYankFormat => result_cancel_yank_format(app),
-        Action::Export { fmt, target } => export_command(app, fmt, target),
-        Action::ExportSql { table, target } => export_sql_command(app, table, target),
+        Action::DismissResult => results::dismiss_result(app),
+        Action::ResultNav(nav) => results::apply_result_nav(app, nav),
+        Action::ResultColumn(op) => results::apply_result_column(app, op),
+        Action::ResultEnterVisual => results::result_enter_visual(app),
+        Action::ResultExitVisual => results::result_exit_visual(app),
+        Action::ResultYank => results::result_yank(app),
+        Action::ResultYankFormat(fmt) => results::result_yank_format(app, fmt),
+        Action::ResultCancelYankFormat => results::result_cancel_yank_format(app),
+        Action::Export { fmt, target } => results::export_command(app, fmt, target),
+        Action::ExportSql { table, target } => results::export_sql_command(app, table, target),
         Action::OpenThemePicker => open_theme_picker(app),
         Action::ThemePicker(a) => apply_theme_picker(app, a),
         Action::Worker(ev) => apply_worker_event(app, ev),
@@ -498,16 +483,16 @@ pub fn apply(app: &mut App, action: Action) {
         Action::HelpScroll(axis, delta) => apply_help_scroll(app, axis, delta),
         Action::FormatEditor(scope) => format_editor(app, scope),
         Action::Completion(c) => completion::apply(app, c),
-        Action::ReloadSchemaCache => reload_schema_cache(app),
-        Action::ResetSession => reset_session(app),
-        Action::ClearSession => clear_session(app),
+        Action::ReloadSchemaCache => schema::reload_schema_cache(app),
+        Action::ResetSession => session::reset_session(app),
+        Action::ClearSession => session::clear_session(app),
         Action::Source => apply_source(app),
         Action::Mouse(target) => apply_mouse(app, target),
         Action::Chat(a) => chat::apply(app, a),
         Action::ToggleRightPanel => chat::toggle_right_panel(app),
         Action::SetRightPanel(mode) => chat::set_right_panel(app, mode),
         Action::LlmSettings(a) => llm_settings::apply(app, a),
-        Action::Session(s) => dispatch_session(app, s),
+        Action::Session(s) => session::dispatch_session(app, s),
         Action::ToolApproveAccept => chat::on_tool_approve_accept(app),
         Action::ToolApproveDeny => chat::on_tool_approve_deny(app),
     }
@@ -541,16 +526,16 @@ fn apply_mouse(app: &mut App, target: MouseTarget) {
         }
         MouseTarget::SchemaToggle(id) => {
             app.focus = Focus::Schema;
-            schema_toggle_at(app, id);
+            schema::schema_toggle_at(app, id);
         }
         MouseTarget::SchemaScroll(delta) => {
-            schema_scroll(app, delta);
+            schema::schema_scroll(app, delta);
         }
-        MouseTarget::ResultDragStart { row, col } => result_drag_start(app, row, col),
-        MouseTarget::ResultDragTo { row, col } => result_drag_to(app, row, col),
-        MouseTarget::ResultDragEnd => result_drag_end(app),
-        MouseTarget::ResultScroll(delta) => result_scroll(app, delta),
-        MouseTarget::InlineResultJump { row, col } => inline_result_jump(app, row, col),
+        MouseTarget::ResultDragStart { row, col } => results::result_drag_start(app, row, col),
+        MouseTarget::ResultDragTo { row, col } => results::result_drag_to(app, row, col),
+        MouseTarget::ResultDragEnd => results::result_drag_end(app),
+        MouseTarget::ResultScroll(delta) => results::result_scroll(app, delta),
+        MouseTarget::InlineResultJump { row, col } => results::inline_result_jump(app, row, col),
         MouseTarget::OverlayDismiss => overlay_dismiss(app),
     }
 }
@@ -575,165 +560,6 @@ fn overlay_dismiss(app: &mut App) {
     }
 }
 
-fn result_drag_start(app: &mut App, row: usize, col: usize) {
-    let Screen::ResultExpanded { id, .. } = &app.screen else {
-        return;
-    };
-    let id = *id;
-    let Some(block) = app.results.iter().find(|b| b.id == id) else {
-        return;
-    };
-    let max_rows = block.rows().len();
-    let max_cols = block.columns.len();
-    if max_rows == 0 || max_cols == 0 {
-        return;
-    }
-    let Screen::ResultExpanded { cursor, view, .. } = &mut app.screen else {
-        return;
-    };
-    if matches!(view, ResultViewMode::YankFormat { .. }) {
-        return;
-    }
-    let r = row.min(max_rows - 1);
-    let c = col.min(max_cols - 1);
-    cursor.jump_to(r, c);
-    // Anchor visual selection at the click cell; subsequent Drag events
-    // extend `cursor` while `anchor` stays put.
-    *view = ResultViewMode::Visual { anchor: *cursor };
-    app.layout.drag = Some(DragState::ResultSelect);
-}
-
-fn result_drag_to(app: &mut App, row: usize, col: usize) {
-    if !matches!(app.layout.drag, Some(DragState::ResultSelect)) {
-        return;
-    }
-    let Screen::ResultExpanded { id, .. } = &app.screen else {
-        return;
-    };
-    let id = *id;
-    let Some(block) = app.results.iter().find(|b| b.id == id) else {
-        return;
-    };
-    let max_rows = block.rows().len();
-    let max_cols = block.columns.len();
-    if max_rows == 0 || max_cols == 0 {
-        return;
-    }
-    let Screen::ResultExpanded { cursor, view, .. } = &mut app.screen else {
-        return;
-    };
-    if matches!(view, ResultViewMode::YankFormat { .. }) {
-        return;
-    }
-    let r = row.min(max_rows - 1);
-    let c = col.min(max_cols - 1);
-    cursor.jump_to(r, c);
-}
-
-fn result_drag_end(app: &mut App) {
-    if !matches!(app.layout.drag, Some(DragState::ResultSelect)) {
-        return;
-    }
-    app.layout.drag = None;
-    // If anchor == cursor (no actual drag), drop visual mode back to
-    // Normal — the user just clicked a single cell.
-    let Screen::ResultExpanded { cursor, view, .. } = &mut app.screen else {
-        return;
-    };
-    if let ResultViewMode::Visual { anchor } = *view
-        && anchor.row == cursor.row
-        && anchor.col == cursor.col
-    {
-        *view = ResultViewMode::Normal;
-    }
-}
-
-fn result_scroll(app: &mut App, delta: i32) {
-    let Screen::ResultExpanded { id, row_offset, .. } = &mut app.screen else {
-        return;
-    };
-    let id = *id;
-    let Some(block) = app.results.iter().find(|b| b.id == id) else {
-        return;
-    };
-    let total = block.rows().len();
-    if total == 0 {
-        return;
-    }
-    let max_offset = total.saturating_sub(1) as i32;
-    let next = (*row_offset as i32)
-        .saturating_add(delta)
-        .clamp(0, max_offset);
-    *row_offset = next as usize;
-}
-
-fn inline_result_jump(app: &mut App, row: usize, col: usize) {
-    let Some(block) = app.results.last() else {
-        return;
-    };
-    let max_rows = block.rows().len();
-    let max_cols = block.columns.len();
-    if max_rows == 0 || max_cols == 0 {
-        return;
-    }
-    let id = block.id;
-    let r = row.min(max_rows - 1);
-    let c = col.min(max_cols - 1);
-    let mut cursor = ResultCursor::default();
-    cursor.jump_to(r, c);
-    app.screen = Screen::ResultExpanded {
-        id,
-        cursor,
-        col_offset: 0,
-        row_offset: 0,
-        view: ResultViewMode::Normal,
-        column_view: crate::state::results::ColumnView::new(max_cols),
-    };
-}
-
-fn reset_session(app: &mut App) {
-    if app.active_connection.is_none() {
-        app.status = QueryStatus::Failed {
-            error: "no active connection".into(),
-        };
-        return;
-    }
-    let _ = app.cmd_tx.send(WorkerCommand::ResetSession);
-    app.status = QueryStatus::Notice {
-        msg: "session reset — open transactions rolled back".into(),
-    };
-}
-
-fn clear_session(app: &mut App) {
-    // Editor buffer + results — local state we own, so wipe synchronously.
-    crate::state::editor::replace_buffer_text(&mut app.editor.state, "");
-    app.results.clear();
-    app.preview_hidden = false;
-    app.editor_dirty = true;
-    // And roll back the pinned connection so a fresh prompt doesn't
-    // inherit a stale BEGIN. Best-effort: if there's no connection, the
-    // local clear still stands.
-    if app.active_connection.is_some() {
-        let _ = app.cmd_tx.send(WorkerCommand::ResetSession);
-    }
-    app.status = QueryStatus::Notice {
-        msg: "session cleared".into(),
-    };
-}
-
-fn reload_schema_cache(app: &mut App) {
-    let Some(name) = app.active_connection.clone() else {
-        app.status = QueryStatus::Failed {
-            error: "no active connection".into(),
-        };
-        return;
-    };
-    let _ = app.cmd_tx.send(WorkerCommand::Reload { connection: name });
-    app.status = QueryStatus::Notice {
-        msg: "reloading schema cache…".into(),
-    };
-}
-
 fn apply_help_scroll(app: &mut App, axis: HelpAxis, delta: HelpScrollDelta) {
     let Some(Overlay::Help { scroll, h_scroll }) = &mut app.overlay else {
         return;
@@ -753,13 +579,6 @@ fn apply_help_scroll(app: &mut App, axis: HelpAxis, delta: HelpScrollDelta) {
         HelpScrollDelta::Top => *target = 0,
         HelpScrollDelta::Bottom => *target = u16::MAX,
     }
-}
-
-fn resize_schema(app: &mut App, delta: i16) {
-    let next = (app.schema.width as i32 + delta as i32)
-        .clamp(MIN_SCHEMA_WIDTH as i32, MAX_SCHEMA_WIDTH as i32);
-    app.schema.width = next as u16;
-    persist_schema_width(app);
 }
 
 fn apply_command(app: &mut App, action: CommandAction) {
@@ -932,7 +751,7 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
     match cmd {
         C::Quit => app.should_quit = true,
         C::Help => apply(app, Action::OpenHelp),
-        C::SetSchemaWidth(w) => set_schema_width(app, w),
+        C::SetSchemaWidth(w) => schema::set_schema_width(app, w),
         C::Run => apply(app, Action::RunStatementUnderCursor),
         C::Cancel => apply(app, Action::CancelQuery),
         C::Expand => apply(app, Action::ExpandLatestResult),
@@ -961,24 +780,11 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         C::Source => apply(app, Action::Source),
         C::Conn(sub) => dispatch_conn(app, sub),
         C::Chat(sub) => dispatch_chat(app, sub),
-        C::Session(sub) => apply(app, Action::Session(session_subcommand_to_action(sub))),
+        C::Session(sub) => apply(
+            app,
+            Action::Session(session::session_subcommand_to_action(sub)),
+        ),
         C::Update => apply(app, Action::CheckForUpdate),
-    }
-}
-
-/// `:session …` ↔ `Action::Session(...)` translation. Keeps the
-/// command parser independent of `SessionAction` (which lives next
-/// to the dispatcher) so adding a new subcommand only touches
-/// `command.rs` + this conversion + the dispatcher.
-fn session_subcommand_to_action(sub: command::SessionSubcommand) -> SessionAction {
-    use command::SessionSubcommand as S;
-    match sub {
-        S::List => SessionAction::List,
-        S::Next => SessionAction::Next,
-        S::Prev => SessionAction::Prev,
-        S::New => SessionAction::New,
-        S::Switch(n) => SessionAction::Switch(n),
-        S::Delete(n) => SessionAction::Delete(n),
     }
 }
 
@@ -1131,11 +937,6 @@ pub(super) fn use_connection(app: &mut App, name: &str) {
     dispatch_connect(app, name.to_string(), url);
 }
 
-fn set_schema_width(app: &mut App, value: u16) {
-    app.schema.width = value.clamp(MIN_SCHEMA_WIDTH, MAX_SCHEMA_WIDTH);
-    persist_schema_width(app);
-}
-
 /// Resolve `:theme <name>` against the bundled registry. Unknown names
 /// surface as a status-bar error rather than aborting the command loop.
 fn apply_theme_named(app: &mut App, name: &str) {
@@ -1200,346 +1001,17 @@ fn apply_theme_picker(app: &mut App, action: ThemePickerAction) {
     }
 }
 
-fn persist_schema_width(app: &mut App) {
-    if let Err(err) = app.config.set_schema_width(app.schema.width) {
-        app.log
-            .warn("config", format!("save schema_width failed: {err}"));
-    }
-}
-
-fn apply_schema(app: &mut App, action: SchemaAction) {
-    match action {
-        SchemaAction::Down => app.schema.move_selection(1),
-        SchemaAction::Up => app.schema.move_selection(-1),
-        SchemaAction::ExpandOrDescend => {
-            let outcome = app.schema.expand_or_descend();
-            maybe_dispatch(app, outcome);
-        }
-        SchemaAction::CollapseOrAscend => app.schema.collapse_or_ascend(),
-        SchemaAction::Toggle => {
-            let outcome = app.schema.toggle_selected();
-            maybe_dispatch(app, outcome);
-        }
-        SchemaAction::Top => app.schema.select_first(),
-        SchemaAction::Bottom => app.schema.select_last(),
-    }
-}
-
-fn maybe_dispatch(app: &mut App, outcome: ExpandOutcome) {
-    if let ExpandOutcome::Dispatch(targets) = outcome {
-        for target in targets {
-            dispatch_introspect(app, target);
-        }
-    }
-}
-
-fn dispatch_introspect(app: &mut App, target: IntrospectTarget) {
-    let _ = app.cmd_tx.send(WorkerCommand::Introspect { target });
-}
-
-fn prepare_confirm_run(app: &mut App) {
-    let Some(range) = crate::state::editor::statement_under_cursor(&app.editor.state) else {
-        app.status = QueryStatus::Failed {
-            error: "no statement under cursor".into(),
-        };
-        return;
-    };
-    let style = crate::state::editor::confirm_highlight_style(
-        app.theme.selection_bg,
-        app.theme.selection_fg,
-    );
-    crate::state::editor::highlight_range(&mut app.editor.state, &range, style);
-    app.overlay = Some(Overlay::ConfirmRun {
-        statement: range.text,
-        reason: crate::state::overlay::ConfirmRunReason::Manual,
-    });
-}
-
-fn confirm_run_submit(app: &mut App) {
-    let Some(Overlay::ConfirmRun { statement, .. }) = app.overlay.take() else {
-        return;
-    };
-    crate::state::editor::clear_confirm_highlight(&mut app.editor.state);
-    dispatch_query(app, statement);
-}
-
-fn confirm_run_cancel(app: &mut App) {
-    if !matches!(app.overlay, Some(Overlay::ConfirmRun { .. })) {
-        return;
-    }
-    app.overlay = None;
-    crate::state::editor::clear_confirm_highlight(&mut app.editor.state);
-}
-
-fn run_statement_under_cursor(app: &mut App) {
-    let Some(range) = crate::state::editor::statement_under_cursor(&app.editor.state) else {
-        app.status = QueryStatus::Failed {
-            error: "no statement under cursor".into(),
-        };
-        return;
-    };
-    dispatch_query(app, range.text);
-}
-
-fn run_selection(app: &mut App) {
-    let Some(text) = crate::state::editor::selection_text(&app.editor.state) else {
-        app.status = QueryStatus::Failed {
-            error: "no selection to run".into(),
-        };
-        return;
-    };
-    dispatch_query(app, text);
-}
-
-fn cancel_query(app: &mut App) {
-    if app.in_flight_query.is_none() {
-        app.status = QueryStatus::Failed {
-            error: "no query running".into(),
-        };
-        return;
-    }
-    app.in_flight_query = None;
-    app.status = QueryStatus::Cancelled;
-    let _ = app.cmd_tx.send(WorkerCommand::Cancel);
-}
-
-fn dispatch_query(app: &mut App, sql: String) {
-    if app.in_flight_query.is_some() {
-        app.status = QueryStatus::Failed {
-            error: "query already in progress — :cancel first".into(),
-        };
-        return;
-    }
-    let trimmed = sql.trim().to_string();
-    if trimmed.is_empty() {
-        app.status = QueryStatus::Failed {
-            error: "no query to run".into(),
-        };
-        return;
-    }
-    // Destructive-statement guardrail: bare UPDATE/DELETE without WHERE
-    // and any TRUNCATE bounce through a confirm overlay. Reuses the
-    // `<leader>r` confirm machinery — Enter dispatches the held SQL
-    // (which lands back here, but the overlay is gone by then so we
-    // don't loop). Skipped when the user already passed through a
-    // manual confirm (overlay is consumed before re-dispatch).
-    if app.overlay.is_none()
-        && let Some(dialect) = destructive_dialect(app)
-        && let Some(reason) =
-            crate::datasource::sql::requires_destructive_confirmation(&trimmed, dialect.as_ref())
-    {
-        app.overlay = Some(Overlay::ConfirmRun {
-            statement: trimmed,
-            reason: crate::state::overlay::ConfirmRunReason::Destructive(reason),
-        });
-        return;
-    }
-    // Placeholders (`$N` / `:name`) bounce through a popup so the user
-    // can fill values in. The original (unsubstituted) statement
-    // stays on the overlay; the substituted form is what we eventually
-    // send to the worker via `send_to_worker`.
-    if app.overlay.is_none()
-        && let Some(dialect) = destructive_dialect(app)
-    {
-        let scan = crate::datasource::sql::placeholders::scan(&trimmed, dialect.as_ref());
-        let unique = crate::datasource::sql::placeholders::unique_params(&scan);
-        if !unique.is_empty() {
-            open_params_prompt(app, trimmed, scan, unique);
-            return;
-        }
-    }
-    send_to_worker(app, trimmed);
-}
-
-/// Tail of `dispatch_query` — marks the query in flight and hands the
-/// (already finalised) SQL to the worker. Extracted so the params
-/// popup's Submit handler can reuse the exact same logging / status /
-/// in-flight bookkeeping after substitution.
-pub(super) fn send_to_worker(app: &mut App, sql: String) {
-    app.preview_hidden = false;
-    let req = app.requests.next();
-    app.in_flight_query = Some(crate::app::InFlightQuery {
-        req,
-        sql: sql.clone(),
-    });
-    app.status = QueryStatus::Running {
-        query: sql.clone(),
-        started_at: Instant::now(),
-    };
-    let _ = app.cmd_tx.send(WorkerCommand::Execute { req, sql });
-}
-
-fn open_params_prompt(
-    app: &mut App,
-    statement: String,
-    placeholders: Vec<crate::datasource::sql::placeholders::Placeholder>,
-    keys: Vec<crate::datasource::sql::placeholders::ParamKey>,
-) {
-    // Pre-fill from per-connection history when we have a match for the
-    // exact same statement text. No active connection → no history.
-    let prefill_map = app
-        .active_connection
-        .clone()
-        .and_then(|conn| crate::param_history::lookup(app, &conn, &statement));
-
-    let state =
-        crate::state::params_prompt::ParamsPromptState::new(statement, placeholders, keys, |key| {
-            prefill_map
-                .as_ref()
-                .and_then(|m| m.get(&key.label()).cloned())
-        });
-    app.overlay = Some(Overlay::ParamsPrompt(state));
-}
-
-/// Pick a sqlparser dialect to feed `requires_destructive_confirmation`.
-/// Falls back to `Generic` when no connection is active so the guardrail
-/// still fires for queries typed before connecting (rare but possible).
-fn destructive_dialect(app: &App) -> Option<Box<dyn sqlparser::dialect::Dialect>> {
-    use crate::datasource::DriverKind;
-    let kind = app.active_dialect.unwrap_or(DriverKind::Sqlite);
-    Some(match kind {
-        DriverKind::Postgres => Box::new(sqlparser::dialect::PostgreSqlDialect {}),
-        DriverKind::Mysql => Box::new(sqlparser::dialect::MySqlDialect {}),
-        DriverKind::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
-    })
-}
-
-fn expand_latest(app: &mut App) {
-    let Some(block) = app.results.last() else {
-        app.status = QueryStatus::Failed {
-            error: "no results to expand".into(),
-        };
-        return;
-    };
-    let total_cols = block.columns.len();
-    app.screen = Screen::ResultExpanded {
-        id: block.id,
-        cursor: ResultCursor::default(),
-        col_offset: 0,
-        row_offset: 0,
-        view: ResultViewMode::Normal,
-        column_view: crate::state::results::ColumnView::new(total_cols),
-    };
-}
-
-/// User-driven dismiss of the inline result preview. Doesn't touch
-/// `app.results` so `:expand` can still pull the same block back up;
-/// the next `dispatch_query` un-hides automatically.
-fn dismiss_result(app: &mut App) {
-    if app.results.last().is_none() {
-        app.status = QueryStatus::Failed {
-            error: "no result preview to close".into(),
-        };
-        return;
-    }
-    app.preview_hidden = true;
-}
-
-fn apply_result_column(app: &mut App, op: ResultColumnAction) {
-    let Screen::ResultExpanded {
-        cursor,
-        view,
-        column_view,
-        ..
-    } = &mut app.screen
-    else {
-        return;
-    };
-    // Reordering invalidates a Visual rectangle (anchor and cursor are
-    // physical column indices, but the user's selection was visual);
-    // drop back to Normal so we don't leave a stale highlight on the grid.
-    if matches!(view, ResultViewMode::Visual { .. }) {
-        *view = ResultViewMode::Normal;
-    }
-    // Locked while the format prompt is open — mirrors the nav guard.
-    if matches!(view, ResultViewMode::YankFormat { .. }) {
-        return;
-    }
-    match op {
-        ResultColumnAction::MoveLeft => column_view.move_left(cursor.col),
-        ResultColumnAction::MoveRight => column_view.move_right(cursor.col),
-        ResultColumnAction::Hide => {
-            if let Some(next_col) = column_view.hide(cursor.col) {
-                cursor.col = next_col;
-            } else {
-                app.status = QueryStatus::Failed {
-                    error: "can't hide the last visible column".into(),
-                };
-            }
-        }
-        ResultColumnAction::Reset => column_view.reset(),
-    }
-}
-
-fn apply_result_nav(app: &mut App, nav: ResultNavAction) {
-    let Screen::ResultExpanded {
-        id,
-        cursor,
-        view,
-        column_view,
-        ..
-    } = &mut app.screen
-    else {
-        return;
-    };
-    // Movement is locked while the format prompt is open — we don't want
-    // navigation keys to silently extend the selection while we're waiting
-    // for `c`/`t`/`j`.
-    if matches!(view, ResultViewMode::YankFormat { .. }) {
-        return;
-    }
-    let Some(block) = app.results.iter().find(|b| b.id == *id) else {
-        return;
-    };
-    let max_rows = block.rows().len();
-    apply_nav_step(cursor, nav, max_rows, column_view.visible());
-}
-
-fn apply_nav_step(
-    cursor: &mut ResultCursor,
-    nav: ResultNavAction,
-    max_rows: usize,
-    visible: &[usize],
-) {
-    if visible.is_empty() {
-        return;
-    }
-    let visual = visible.iter().position(|&p| p == cursor.col).unwrap_or(0);
-    match nav {
-        ResultNavAction::Left => {
-            if visual > 0 {
-                cursor.jump_to(cursor.row, visible[visual - 1]);
-            }
-        }
-        ResultNavAction::Right => {
-            if visual + 1 < visible.len() {
-                cursor.jump_to(cursor.row, visible[visual + 1]);
-            }
-        }
-        ResultNavAction::Up => {
-            if cursor.row > 0 {
-                cursor.row -= 1;
-            }
-        }
-        ResultNavAction::Down => {
-            if cursor.row + 1 < max_rows {
-                cursor.row += 1;
-            }
-        }
-        ResultNavAction::LineStart => cursor.jump_to(cursor.row, visible[0]),
-        ResultNavAction::LineEnd => cursor.jump_to(cursor.row, *visible.last().unwrap()),
-        ResultNavAction::Top => cursor.jump_to(0, cursor.col),
-        ResultNavAction::Bottom => cursor.jump_to(max_rows.saturating_sub(1), cursor.col),
-    }
-}
-
 fn apply_worker_event(app: &mut App, event: WorkerEvent) {
     match event {
-        WorkerEvent::QueryDone { req, result } => on_query_done(app, req, result),
-        WorkerEvent::QueryFailed { req, error } => on_query_failed(app, req, error.to_string()),
-        WorkerEvent::SchemaLoaded { target, payload } => on_schema_loaded(app, target, payload),
+        WorkerEvent::QueryDone { req, result } => query::on_query_done(app, req, result),
+        WorkerEvent::QueryFailed { req, error } => {
+            query::on_query_failed(app, req, error.to_string())
+        }
+        WorkerEvent::SchemaLoaded { target, payload } => {
+            schema::on_schema_loaded(app, target, payload)
+        }
         WorkerEvent::SchemaFailed { target, error } => {
-            on_schema_failed(app, target, error.to_string())
+            schema::on_schema_failed(app, target, error.to_string())
         }
         WorkerEvent::Connected { name } => on_connected(app, name),
         WorkerEvent::ConnectFailed { name, error } => {
@@ -1548,9 +1020,9 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
         WorkerEvent::TestConnectionResult { success, error, .. } => {
             on_test_result(app, success, error)
         }
-        WorkerEvent::CompletionCacheStage { stage } => on_cache_stage(app, stage),
+        WorkerEvent::CompletionCacheStage { stage } => schema::on_cache_stage(app, stage),
         WorkerEvent::CompletionCacheFailed { stage, error } => {
-            on_cache_failed(app, stage, error.to_string())
+            schema::on_cache_failed(app, stage, error.to_string())
         }
         WorkerEvent::ChatDelta(delta) => chat::on_delta(app, delta),
         WorkerEvent::ChatToolRequest {
@@ -1567,177 +1039,13 @@ fn apply_worker_event(app: &mut App, event: WorkerEvent) {
             agents_md_loaded,
         } => chat::on_fs_tool_done(app, call_id, name, display, error, agents_md_loaded),
         WorkerEvent::UpdateAvailable { current, latest } => {
-            on_update_available(app, current, latest)
+            update::on_update_available(app, current, latest)
         }
-        WorkerEvent::UpdateInstalled { tag } => on_update_installed(app, tag),
-        WorkerEvent::UpdateInstallFailed { error } => on_update_install_failed(app, error),
-        WorkerEvent::UpdateUpToDate { current } => on_update_up_to_date(app, current),
-        WorkerEvent::UpdateCheckFailed { error } => on_update_check_failed(app, error),
+        WorkerEvent::UpdateInstalled { tag } => update::on_update_installed(app, tag),
+        WorkerEvent::UpdateInstallFailed { error } => update::on_update_install_failed(app, error),
+        WorkerEvent::UpdateUpToDate { current } => update::on_update_up_to_date(app, current),
+        WorkerEvent::UpdateCheckFailed { error } => update::on_update_check_failed(app, error),
     }
-}
-
-fn on_update_up_to_date(app: &mut App, current: String) {
-    app.log.info(
-        "update",
-        format!("manual check: rowdy v{current} is the latest"),
-    );
-    app.status = QueryStatus::Notice {
-        msg: format!("✓ rowdy v{current} is the latest"),
-    };
-}
-
-fn on_update_check_failed(app: &mut App, error: String) {
-    app.log
-        .warn("update", format!("manual check failed: {error}"));
-    app.status = QueryStatus::Failed {
-        error: format!("update check: {error}"),
-    };
-}
-
-fn on_update_available(app: &mut App, current: String, latest: String) {
-    // Stash for later instead of opening the overlay immediately.
-    // Showing the prompt during startup (Auth screen, ConnectionList,
-    // Connecting overlay) would steal keyboard input from the password
-    // prompt or silently dismiss itself if the user types `n` in their
-    // password. `try_promote_pending_update` (called once per main-loop
-    // tick) does the deferred handoff once the user reaches Normal.
-    app.log.info(
-        "update",
-        format!("update {latest} pending; will prompt when user is idle"),
-    );
-    app.pending_update_prompt = Some((current, latest));
-}
-
-/// Move a queued update prompt from `App::pending_update_prompt` onto
-/// the live `Overlay` once the user is on `Screen::Normal` with no
-/// active overlay and is not actively typing. Idempotent and cheap —
-/// safe to call from the run loop on every iteration.
-pub fn try_promote_pending_update(app: &mut App) {
-    if app.pending_update_prompt.is_none() {
-        return;
-    }
-    if !matches!(app.screen, Screen::Normal) {
-        return;
-    }
-    if app.overlay.is_some() {
-        return;
-    }
-    // Don't capture keystrokes from a user actively typing.
-    if matches!(app.focus, Focus::ChatComposer) {
-        return;
-    }
-    if matches!(app.focus, Focus::Editor)
-        && !matches!(
-            app.editor.editor_mode(),
-            edtui::EditorMode::Normal | edtui::EditorMode::Visual
-        )
-    {
-        return;
-    }
-    let Some((current, latest)) = app.pending_update_prompt.take() else {
-        return;
-    };
-    app.overlay = Some(Overlay::UpdateAvailable { current, latest });
-}
-
-fn on_update_installed(app: &mut App, tag: String) {
-    app.log
-        .info("update", format!("install.sh succeeded for {tag}"));
-    app.status = QueryStatus::Notice {
-        msg: format!("✓ updated to {tag} — restart rowdy to use it"),
-    };
-}
-
-fn on_update_install_failed(app: &mut App, error: String) {
-    app.log
-        .warn("update", format!("install.sh failed: {error}"));
-    app.status = QueryStatus::Failed {
-        error: format!("update failed: {error}"),
-    };
-}
-
-fn apply_update_accept(app: &mut App) {
-    let Some(Overlay::UpdateAvailable { latest, .. }) = app.overlay.take() else {
-        return;
-    };
-    app.status = QueryStatus::Notice {
-        msg: format!("⬇ downloading {latest}…"),
-    };
-    let install_dir = match std::env::current_exe() {
-        Ok(exe) => exe.parent().map(std::path::Path::to_path_buf),
-        Err(err) => {
-            app.log.warn("update", format!("current_exe failed: {err}"));
-            None
-        }
-    };
-    let Some(install_dir) = install_dir else {
-        app.status = QueryStatus::Failed {
-            error: "update failed: cannot resolve install dir".into(),
-        };
-        return;
-    };
-    let evt_tx = app.evt_tx.clone();
-    let logger = app.log.clone();
-    let tag = latest.clone();
-    tokio::spawn(async move {
-        let event = match crate::update::run_installer(&tag, &install_dir).await {
-            Ok(()) => WorkerEvent::UpdateInstalled { tag },
-            Err(error) => {
-                logger.warn("update", format!("installer error: {error}"));
-                WorkerEvent::UpdateInstallFailed { error }
-            }
-        };
-        let _ = evt_tx.send(event);
-    });
-}
-
-fn apply_check_for_update(app: &mut App) {
-    app.status = QueryStatus::Notice {
-        msg: "checking for updates…".into(),
-    };
-    // Drop any stale auto-check that hasn't been promoted yet — the
-    // manual check is authoritative and will re-stash if a newer
-    // release is still available.
-    app.pending_update_prompt = None;
-    crate::update::spawn_manual_check(app.evt_tx.clone(), env!("CARGO_PKG_VERSION").to_string());
-}
-
-fn apply_update_dismiss(app: &mut App) {
-    let Some(Overlay::UpdateAvailable { latest, .. }) = app.overlay.take() else {
-        return;
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    if let Err(err) = app.user_config.record_check(now, Some(latest.clone())) {
-        app.log
-            .warn("update", format!("persisting dismissal failed: {err}"));
-    } else {
-        app.log.info("update", format!("user dismissed {latest}"));
-    }
-}
-
-fn on_cache_stage(app: &mut App, stage: crate::worker::CacheStage) {
-    use crate::worker::CacheStage;
-    if matches!(stage, CacheStage::Reloaded) {
-        app.schema_reload_in_flight = false;
-        app.status = QueryStatus::Notice {
-            msg: "schema cache reloaded".into(),
-        };
-    }
-    // Columns just landed — if the popover is currently waiting on
-    // them (likely showing a "loading…" placeholder), recompute.
-    if matches!(stage, CacheStage::Columns { .. }) && app.completion.is_some() {
-        completion::refresh(app);
-    }
-}
-
-fn on_cache_failed(app: &mut App, stage: crate::worker::CacheStage, error: String) {
-    app.log.warn(
-        "autocomplete",
-        format!("cache load failed at {stage:?}: {error}"),
-    );
 }
 
 fn on_connected(app: &mut App, name: String) {
@@ -1760,12 +1068,12 @@ fn on_connected(app: &mut App, name: String) {
     // and re-fire the catalog load.
     app.schema = SchemaPanel::new(app.schema.width);
     app.results.clear();
-    app.session_indices = session::list_indices(&app.data_dir, &name);
+    app.session_indices = crate::session::list_indices(&app.data_dir, &name);
     // `list_indices` always returns at least `[0]`, so the unwrap-by-index
     // is safe; default to session 0 on connect.
     app.active_session_index = app.session_indices[0];
-    load_session(app, &name, app.active_session_index);
-    load_chat_session(app, &name);
+    session::load_session(app, &name, app.active_session_index);
+    session::load_chat_session(app, &name);
     app.schema.begin_root_load();
     let _ = app.cmd_tx.send(WorkerCommand::Introspect {
         target: IntrospectTarget::Catalogs,
@@ -1842,163 +1150,6 @@ fn on_test_result(app: &mut App, success: bool, error: Option<String>) {
     }
 }
 
-fn on_schema_loaded(
-    app: &mut App,
-    target: IntrospectTarget,
-    payload: crate::worker::SchemaPayload,
-) {
-    use crate::worker::SchemaPayload;
-    if let Ok(mut guard) = app.schema_cache.write() {
-        cache_introspect_payload(&mut guard, &target, &payload);
-    }
-    match payload {
-        SchemaPayload::Catalogs(catalogs) => app.schema.populate_catalogs(catalogs),
-        other => app.schema.populate(&target, other),
-    }
-    chat::complete_pending_for_target(app, &target, None);
-}
-
-fn on_schema_failed(app: &mut App, target: IntrospectTarget, error: String) {
-    if matches!(target, IntrospectTarget::Catalogs) {
-        app.schema.fail_root_load(error.clone());
-    } else {
-        app.schema.record_failure(&target, error.clone());
-    }
-    chat::complete_pending_for_target(app, &target, Some(error));
-}
-
-/// Mirror an introspection result into the autocomplete `SchemaCache`.
-/// `worker::prime_cache` and `worker::load_columns` already do this for
-/// the cache-prime / lazy-column paths; the chat auto-expand path
-/// reaches the cache through here instead so a schema tool that
-/// triggered the introspect can re-run against fresh data.
-fn cache_introspect_payload(
-    cache: &mut crate::autocomplete::SchemaCache,
-    target: &IntrospectTarget,
-    payload: &crate::worker::SchemaPayload,
-) {
-    use crate::autocomplete::cache::{CachedColumn, CachedTable};
-    use crate::worker::SchemaPayload;
-    match (target, payload) {
-        (IntrospectTarget::Catalogs, SchemaPayload::Catalogs(catalogs)) => {
-            cache.catalogs = catalogs.iter().map(|c| c.name.clone()).collect();
-        }
-        (IntrospectTarget::Schemas { catalog }, SchemaPayload::Schemas(schemas)) => {
-            cache.schemas.insert(
-                catalog.clone(),
-                schemas.iter().map(|s| s.name.clone()).collect(),
-            );
-        }
-        (IntrospectTarget::Tables { catalog, schema }, SchemaPayload::Tables(tables)) => {
-            let cached: Vec<CachedTable> = tables
-                .iter()
-                .map(|t| CachedTable {
-                    name: t.name.clone(),
-                    kind: t.kind,
-                })
-                .collect();
-            cache
-                .tables
-                .insert((catalog.clone(), schema.clone()), cached);
-        }
-        (
-            IntrospectTarget::Columns {
-                catalog,
-                schema,
-                table,
-            },
-            SchemaPayload::Columns(columns),
-        ) => {
-            let cached: Vec<CachedColumn> = columns
-                .iter()
-                .map(|c| CachedColumn {
-                    name: c.name.clone(),
-                    type_name: c.type_name.clone(),
-                })
-                .collect();
-            cache
-                .columns
-                .insert((catalog.clone(), schema.clone(), table.clone()), cached);
-        }
-        // Indices aren't in the cache and aren't surfaced as a tool.
-        _ => {}
-    }
-}
-
-fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResult) {
-    let Some(in_flight) = app.in_flight_query.as_ref() else {
-        return;
-    };
-    if in_flight.req != req {
-        return;
-    }
-    let in_flight = app.in_flight_query.take().expect("checked above");
-
-    // DDL detection: if the just-executed SQL reshaped the schema,
-    // re-prime the autocomplete cache so the next popover sees the
-    // new state. Best-effort — failures are surfaced through the
-    // normal cache-stage failure path.
-    if crate::autocomplete::ddl::affects_schema_cache(&in_flight.sql)
-        && let Some(name) = app.active_connection.clone()
-    {
-        // Coalesce back-to-back DDLs: if a prior reload hasn't reported
-        // `CacheStage::Reloaded` yet, skip this one. The in-flight
-        // reload's final stage already covers the new schema state, so
-        // queueing a second pass just doubles the introspection cost on
-        // large catalogs (a real freeze symptom we've hit in practice).
-        if !app.schema_reload_in_flight {
-            app.schema_reload_in_flight = true;
-            let _ = app.cmd_tx.send(WorkerCommand::Reload { connection: name });
-        }
-    }
-
-    let took = result.elapsed;
-    let total_rows = result.rows.len();
-    let affected = result.affected;
-
-    // Statements run via `execute()` (DML/DDL) report no columns — there's
-    // nothing to render in a result block, so skip pushing one. Also hide
-    // the inline preview so a stale grid from an earlier SELECT doesn't
-    // linger on screen after a `DELETE`/`UPDATE` lands.
-    if !result.columns.is_empty() {
-        let id = ResultId(app.results.len());
-        // `active_dialect` should always be Some here (we only run queries
-        // through an active connection), but fall back to Sqlite rather than
-        // panic if the invariant ever breaks.
-        let dialect = app
-            .active_dialect
-            .unwrap_or(crate::datasource::DriverKind::Sqlite);
-        app.results.push(ResultBlock {
-            id,
-            took,
-            columns: result.columns,
-            rows: result.rows,
-            sql: in_flight.sql,
-            dialect,
-        });
-    } else {
-        app.preview_hidden = true;
-    }
-
-    app.status = QueryStatus::Succeeded {
-        rows: total_rows,
-        affected,
-        took,
-        statements_run: result.statements_run.max(1),
-    };
-}
-
-fn on_query_failed(app: &mut App, req: crate::worker::RequestId, error: String) {
-    let Some(in_flight) = app.in_flight_query.as_ref() else {
-        return;
-    };
-    if in_flight.req != req {
-        return;
-    }
-    app.in_flight_query = None;
-    app.status = QueryStatus::Failed { error };
-}
-
 // ---------------------------------------------------------------------------
 // Auth flow
 // ---------------------------------------------------------------------------
@@ -2068,323 +1219,6 @@ pub(super) fn cut_from(input: &mut TextArea<'static>, log: &crate::log::Logger) 
     let did_cut = input.cut();
     if did_cut {
         clipboard::write(log, &input.yank_text());
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Result view: visual selection, yank, export
-// ---------------------------------------------------------------------------
-
-fn result_enter_visual(app: &mut App) {
-    let Screen::ResultExpanded { cursor, view, .. } = &mut app.screen else {
-        return;
-    };
-    if matches!(view, ResultViewMode::Normal) {
-        *view = ResultViewMode::Visual { anchor: *cursor };
-    }
-}
-
-fn result_exit_visual(app: &mut App) {
-    let Screen::ResultExpanded { view, .. } = &mut app.screen else {
-        return;
-    };
-    *view = ResultViewMode::Normal;
-}
-
-fn result_yank(app: &mut App) {
-    let Screen::ResultExpanded {
-        id, cursor, view, ..
-    } = &mut app.screen
-    else {
-        return;
-    };
-    match *view {
-        ResultViewMode::Normal => {
-            // Single cell — copy the rendered string straight to the clipboard.
-            // No header, no quoting, no prompt.
-            let cur = *cursor;
-            let id = *id;
-            let Some(block) = app.results.iter().find(|b| b.id == id) else {
-                return;
-            };
-            let text = block
-                .rows()
-                .get(cur.row)
-                .and_then(|row| row.get(cur.col))
-                .map(|cell| cell.display().into_owned())
-                .unwrap_or_default();
-            clipboard::write(&app.log, &text);
-            app.status = QueryStatus::Notice {
-                msg: format!("yanked cell ({}, {})", cur.row + 1, cur.col + 1),
-            };
-        }
-        ResultViewMode::Visual { anchor } => {
-            *view = ResultViewMode::YankFormat { anchor };
-        }
-        ResultViewMode::YankFormat { .. } => {}
-    }
-}
-
-fn result_yank_format(app: &mut App, fmt: ExportFormat) {
-    let (id, cursor, anchor) = {
-        let Screen::ResultExpanded {
-            id, cursor, view, ..
-        } = &app.screen
-        else {
-            return;
-        };
-        let ResultViewMode::YankFormat { anchor } = view else {
-            return;
-        };
-        (*id, *cursor, *anchor)
-    };
-    let rect = SelectionRect::new(anchor, cursor);
-    let payload = match fmt {
-        ExportFormat::Sql => match render_selection_sql(app, id, &rect) {
-            Ok(p) => p,
-            Err(e) => {
-                // Stay in Visual on error — the user might want to copy the
-                // selection in another format, or expand it.
-                if let Screen::ResultExpanded { view, .. } = &mut app.screen {
-                    *view = ResultViewMode::Visual { anchor };
-                }
-                app.status = QueryStatus::Failed { error: e };
-                return;
-            }
-        },
-        _ => match render_selection(app, id, &rect, fmt) {
-            Some(p) => p,
-            None => {
-                // Block disappeared between expand and yank — drop back to
-                // Normal and surface the error.
-                if let Screen::ResultExpanded { view, .. } = &mut app.screen {
-                    *view = ResultViewMode::Normal;
-                }
-                app.status = QueryStatus::Failed {
-                    error: "result no longer available".into(),
-                };
-                return;
-            }
-        },
-    };
-    clipboard::write(&app.log, &payload);
-    if let Screen::ResultExpanded { view, .. } = &mut app.screen {
-        *view = ResultViewMode::Normal;
-    }
-    app.status = QueryStatus::Notice {
-        msg: format!(
-            "yanked {}×{} as {} ({} bytes)",
-            rect.rows(),
-            rect.cols(),
-            fmt.label(),
-            payload.len()
-        ),
-    };
-}
-
-fn result_cancel_yank_format(app: &mut App) {
-    let Screen::ResultExpanded { view, .. } = &mut app.screen else {
-        return;
-    };
-    if let ResultViewMode::YankFormat { anchor } = *view {
-        *view = ResultViewMode::Visual { anchor };
-    }
-}
-
-/// `:export sql` handler. Mirrors `export_command` (selection wins over
-/// whole-block) but resolves the target table via inference when the
-/// caller didn't provide one. Failure modes surface as a status error
-/// so the user knows to retry with `:export sql <table>`.
-fn export_sql_command(app: &mut App, table: Option<String>, target: ExportTarget) {
-    // Same selection-vs-block dispatch shape as `export_command`. The
-    // selection branch passes the column-index slice down to inference
-    // so a Visual subset can succeed even when the full projection
-    // wouldn't.
-    if let Screen::ResultExpanded {
-        id, cursor, view, ..
-    } = &app.screen
-        && let Some(anchor) = view.anchor()
-    {
-        let id = *id;
-        let cursor = *cursor;
-        let rect = SelectionRect::new(anchor, cursor);
-        let Some(block) = app.results.iter().find(|b| b.id == id) else {
-            app.status = QueryStatus::Failed {
-                error: "result no longer available".into(),
-            };
-            return;
-        };
-        let col_end = (rect.col_end + 1).min(block.columns.len());
-        let col_start = rect.col_start.min(col_end);
-        let row_end = (rect.row_end + 1).min(block.rows().len());
-        let row_start = rect.row_start.min(row_end);
-        let column_indices: Vec<usize> = (col_start..col_end).collect();
-        let resolved_table = match resolve_export_table(table, block, Some(&column_indices)) {
-            Ok(t) => t,
-            Err(e) => {
-                app.status = QueryStatus::Failed { error: e };
-                return;
-            }
-        };
-        let columns: Vec<&Column> = block.columns[col_start..col_end].iter().collect();
-        let rows: Vec<Vec<&Cell>> = block.rows()[row_start..row_end]
-            .iter()
-            .map(|row| {
-                let end = col_end.min(row.len());
-                let start = col_start.min(end);
-                row[start..end].iter().collect()
-            })
-            .collect();
-        let dialect = block.dialect;
-        let payload = export::format_insert(dialect, &resolved_table, &columns, &rows);
-        let drop_visual = matches!(target, ExportTarget::Clipboard);
-        finish_export(
-            app,
-            ExportFormat::Sql,
-            target,
-            rect.rows(),
-            rect.cols(),
-            payload,
-        );
-        if drop_visual && let Screen::ResultExpanded { view, .. } = &mut app.screen {
-            *view = ResultViewMode::Normal;
-        }
-        return;
-    }
-    let Some(block) = app.results.last() else {
-        app.status = QueryStatus::Failed {
-            error: "no result to export".into(),
-        };
-        return;
-    };
-    let resolved_table = match resolve_export_table(table, block, None) {
-        Ok(t) => t,
-        Err(e) => {
-            app.status = QueryStatus::Failed { error: e };
-            return;
-        }
-    };
-    let columns: Vec<&Column> = block.columns.iter().collect();
-    let rows: Vec<Vec<&Cell>> = block
-        .rows()
-        .iter()
-        .map(|row| row.iter().collect())
-        .collect();
-    let dialect = block.dialect;
-    let payload = export::format_insert(dialect, &resolved_table, &columns, &rows);
-    let row_count = rows.len();
-    let col_count = columns.len();
-    finish_export(
-        app,
-        ExportFormat::Sql,
-        target,
-        row_count,
-        col_count,
-        payload,
-    );
-}
-
-/// Returns the target table for `:export sql`. If the user passed one
-/// explicitly, use it; otherwise run inference and surface the (always
-/// human-readable) failure reason verbatim.
-fn resolve_export_table(
-    explicit: Option<String>,
-    block: &ResultBlock,
-    column_indices: Option<&[usize]>,
-) -> Result<String, String> {
-    if let Some(t) = explicit {
-        return Ok(t);
-    }
-    crate::sql_infer::infer_source_table(&block.sql, block.dialect, column_indices)
-        .map_err(|e| format!("can't infer source table — {e}"))
-}
-
-fn export_command(app: &mut App, fmt: ExportFormat, target: ExportTarget) {
-    // Two routes:
-    // - Inside an expanded result with an active selection → export the rect.
-    // - Otherwise → export the latest result block in full.
-    if let Screen::ResultExpanded {
-        id, cursor, view, ..
-    } = &app.screen
-        && let Some(anchor) = view.anchor()
-    {
-        let id = *id;
-        let cursor = *cursor;
-        let rect = SelectionRect::new(anchor, cursor);
-        let Some(payload) = render_selection(app, id, &rect, fmt) else {
-            app.status = QueryStatus::Failed {
-                error: "result no longer available".into(),
-            };
-            return;
-        };
-        let drop_visual = matches!(target, ExportTarget::Clipboard);
-        finish_export(app, fmt, target, rect.rows(), rect.cols(), payload);
-        if drop_visual && let Screen::ResultExpanded { view, .. } = &mut app.screen {
-            *view = ResultViewMode::Normal;
-        }
-        return;
-    }
-    let Some(block) = app.results.last() else {
-        app.status = QueryStatus::Failed {
-            error: "no result to export".into(),
-        };
-        return;
-    };
-    let columns: Vec<&Column> = block.columns.iter().collect();
-    let rows: Vec<Vec<&Cell>> = block
-        .rows()
-        .iter()
-        .map(|row| row.iter().collect())
-        .collect();
-    let payload = export::format(fmt, &columns, &rows);
-    let row_count = rows.len();
-    let col_count = columns.len();
-    finish_export(app, fmt, target, row_count, col_count, payload);
-}
-
-/// Deliver `payload` to `target` and set the status line. The clipboard path
-/// is fire-and-forget (failures get logged inside `clipboard::write`); the
-/// file path surfaces I/O errors to the user since they typed the path.
-fn finish_export(
-    app: &mut App,
-    fmt: ExportFormat,
-    target: ExportTarget,
-    rows: usize,
-    cols: usize,
-    payload: String,
-) {
-    match target {
-        ExportTarget::Clipboard => {
-            clipboard::write(&app.log, &payload);
-            app.status = QueryStatus::Notice {
-                msg: format!(
-                    "exported {}×{} as {} ({} bytes)",
-                    rows,
-                    cols,
-                    fmt.label(),
-                    payload.len()
-                ),
-            };
-        }
-        ExportTarget::File(path) => match std::fs::write(&path, &payload) {
-            Ok(()) => {
-                app.status = QueryStatus::Notice {
-                    msg: format!(
-                        "exported {}×{} as {} to {} ({} bytes)",
-                        rows,
-                        cols,
-                        fmt.label(),
-                        path.display(),
-                        payload.len()
-                    ),
-                };
-            }
-            Err(err) => {
-                app.status = QueryStatus::Failed {
-                    error: format!("export failed: {err}"),
-                };
-            }
-        },
     }
 }
 
@@ -2468,320 +1302,11 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Slice the selected rectangle out of `block` and run it through the
-/// chosen formatter. Returns `None` only if the block has gone missing.
-fn render_selection(
-    app: &App,
-    id: ResultId,
-    rect: &SelectionRect,
-    fmt: ExportFormat,
-) -> Option<String> {
-    let block = app.results.iter().find(|b| b.id == id)?;
-    let col_end = (rect.col_end + 1).min(block.columns.len());
-    let col_start = rect.col_start.min(col_end);
-    let columns: Vec<&Column> = block.columns[col_start..col_end].iter().collect();
-    let row_end = (rect.row_end + 1).min(block.rows().len());
-    let row_start = rect.row_start.min(row_end);
-    let rows: Vec<Vec<&Cell>> = block.rows()[row_start..row_end]
-        .iter()
-        .map(|row| {
-            let end = col_end.min(row.len());
-            let start = col_start.min(end);
-            row[start..end].iter().collect()
-        })
-        .collect();
-    Some(export::format(fmt, &columns, &rows))
-}
-
-/// SQL-flavoured render path for the Visual yank prompt. There's no
-/// place to type a table from inside the prompt, so this always relies
-/// on `infer_source_table`; on miss the caller surfaces the error and
-/// keeps the user in Visual so they can retry via `:export sql <table>`.
-fn render_selection_sql(app: &App, id: ResultId, rect: &SelectionRect) -> Result<String, String> {
-    let block = app
-        .results
-        .iter()
-        .find(|b| b.id == id)
-        .ok_or_else(|| "result no longer available".to_string())?;
-    let col_end = (rect.col_end + 1).min(block.columns.len());
-    let col_start = rect.col_start.min(col_end);
-    let row_end = (rect.row_end + 1).min(block.rows().len());
-    let row_start = rect.row_start.min(row_end);
-    let column_indices: Vec<usize> = (col_start..col_end).collect();
-    let table =
-        crate::sql_infer::infer_source_table(&block.sql, block.dialect, Some(&column_indices))
-            .map_err(|e| format!("can't infer source table — {e}"))?;
-    let columns: Vec<&Column> = block.columns[col_start..col_end].iter().collect();
-    let rows: Vec<Vec<&Cell>> = block.rows()[row_start..row_end]
-        .iter()
-        .map(|row| {
-            let end = col_end.min(row.len());
-            let start = col_start.min(end);
-            row[start..end].iter().collect()
-        })
-        .collect();
-    Ok(export::format_insert(
-        block.dialect,
-        &table,
-        &columns,
-        &rows,
-    ))
-}
-
-// ---------------------------------------------------------------------------
-// Editor session persistence
-// ---------------------------------------------------------------------------
-
-const SESSION_DEBOUNCE: Duration = Duration::from_millis(800);
-
-/// Push the next debounced save 800ms into the future. Skips when there's
-/// no active connection — the editor isn't user-reachable in those modes,
-/// but the early return keeps us honest if that ever changes.
-pub(super) fn schedule_session_save(app: &mut App) {
-    if app.active_connection.is_none() {
-        return;
-    }
-    app.editor_dirty = true;
-    app.pending_save_at = Some(tokio::time::Instant::now() + SESSION_DEBOUNCE);
-}
-
-/// Write the current editor buffer to the active connection's
-/// active session file (`session_<active_session_index>.sql`).
-/// Best-effort: failures are logged and swallowed so a flaky disk
-/// can't break the editor.
-pub(crate) fn flush_session(app: &mut App) {
-    let Some(name) = app.active_connection.clone() else {
-        app.editor_dirty = false;
-        app.pending_save_at = None;
-        return;
-    };
-    let path = session::path_for(&app.data_dir, &name, app.active_session_index);
-    let text = app.editor.text();
-    match session::save(&path, &text) {
-        Ok(()) => app.log.info("session", format!("saved {}", path.display())),
-        Err(err) => app
-            .log
-            .warn("session", format!("save {} failed: {err}", path.display())),
-    }
-    app.editor_dirty = false;
-    app.pending_save_at = None;
-}
-
-/// Route a `SessionAction` against the active connection. No-ops with a
-/// status notice when there's no connection — the editor isn't
-/// reachable in those modes, but the early return keeps an
-/// accidentally-bound `<Space>n` from silently doing nothing.
-fn dispatch_session(app: &mut App, action: SessionAction) {
-    let Some(name) = app.active_connection.clone() else {
-        app.status = QueryStatus::Failed {
-            error: "no active connection".into(),
-        };
-        return;
-    };
-    match action {
-        SessionAction::List => session_list_status(app),
-        SessionAction::Next => session_switch_relative(app, &name, 1),
-        SessionAction::Prev => session_switch_relative(app, &name, -1),
-        SessionAction::New => session_create_and_switch(app, &name),
-        SessionAction::Switch(n) => session_switch_to_index(app, &name, n),
-        SessionAction::Delete(n) => session_delete(app, &name, n),
-    }
-}
-
-fn session_list_status(app: &mut App) {
-    let list: Vec<String> = app.session_indices.iter().map(usize::to_string).collect();
-    app.status = QueryStatus::Notice {
-        msg: format!(
-            "sessions: {} (active {})",
-            list.join(", "),
-            app.active_session_index
-        ),
-    };
-}
-
-fn session_switch_relative(app: &mut App, name: &str, delta: i32) {
-    if app.session_indices.len() < 2 {
-        app.status = QueryStatus::Notice {
-            msg: format!(
-                "only one session ({}) — use `:session new` to create another",
-                app.active_session_index
-            ),
-        };
-        return;
-    }
-    let pos = app
-        .session_indices
-        .iter()
-        .position(|&i| i == app.active_session_index)
-        .unwrap_or(0) as i32;
-    let len = app.session_indices.len() as i32;
-    let next_pos = (pos + delta).rem_euclid(len) as usize;
-    let target = app.session_indices[next_pos];
-    session_switch_to_existing(app, name, target);
-}
-
-fn session_create_and_switch(app: &mut App, name: &str) {
-    let new_index = session::next_free_index(&app.session_indices);
-    // Touch the new file so subsequent `list_indices` calls (and any
-    // external `ls`) see it. An empty session file round-trips
-    // through `load` as an empty buffer.
-    let path = session::path_for(&app.data_dir, name, new_index);
-    if let Err(err) = session::save(&path, "") {
-        app.log.warn(
-            "session",
-            format!("create {} failed: {err}", path.display()),
-        );
-        app.status = QueryStatus::Failed {
-            error: format!("create session {new_index} failed: {err}"),
-        };
-        return;
-    }
-    flush_session(app);
-    app.session_indices.push(new_index);
-    app.session_indices.sort_unstable();
-    app.active_session_index = new_index;
-    load_session(app, name, new_index);
-    app.status = QueryStatus::Notice {
-        msg: format!("created session {new_index}"),
-    };
-}
-
-fn session_switch_to_index(app: &mut App, name: &str, target: usize) {
-    if !app.session_indices.contains(&target) {
-        app.status = QueryStatus::Failed {
-            error: format!(
-                "no session {target} (existing: {})",
-                app.session_indices
-                    .iter()
-                    .map(usize::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        };
-        return;
-    }
-    if target == app.active_session_index {
-        // No-op switches still refresh the indicator so the user
-        // gets a confirmation of where they are.
-        app.status = QueryStatus::Notice {
-            msg: format!("session {target} (already active)"),
-        };
-        return;
-    }
-    session_switch_to_existing(app, name, target);
-}
-
-fn session_switch_to_existing(app: &mut App, name: &str, target: usize) {
-    flush_session(app);
-    app.active_session_index = target;
-    load_session(app, name, target);
-    app.status = QueryStatus::Notice {
-        msg: format!("switched to session {target}"),
-    };
-}
-
-fn session_delete(app: &mut App, name: &str, target: usize) {
-    if !app.session_indices.contains(&target) {
-        app.status = QueryStatus::Failed {
-            error: format!("no session {target} to delete"),
-        };
-        return;
-    }
-    if app.session_indices.len() == 1 {
-        app.status = QueryStatus::Failed {
-            error: "can't delete the only remaining session".into(),
-        };
-        return;
-    }
-    let active_being_deleted = app.active_session_index == target;
-    if let Err(err) = session::delete(&app.data_dir, name, target) {
-        app.log
-            .warn("session", format!("delete {target} failed: {err}"));
-        app.status = QueryStatus::Failed {
-            error: format!("delete session {target} failed: {err}"),
-        };
-        return;
-    }
-    app.session_indices.retain(|&i| i != target);
-    if active_being_deleted {
-        // The buffer the user was editing belonged to the deleted
-        // file — discard it (deliberately *not* flushing) and load
-        // the previous index in the list. `session_indices` is
-        // guaranteed non-empty here because we refused on len==1.
-        let fallback = app
-            .session_indices
-            .iter()
-            .copied()
-            .rev()
-            .find(|&i| i < target)
-            .unwrap_or(app.session_indices[0]);
-        // Suppress the pending debounced save for the just-killed
-        // index — without this clear the next tick would re-write
-        // the file we just deleted.
-        app.editor_dirty = false;
-        app.pending_save_at = None;
-        app.active_session_index = fallback;
-        load_session(app, name, fallback);
-    }
-    app.status = QueryStatus::Notice {
-        msg: format!("deleted session {target}"),
-    };
-}
-
-/// Load the session at `index` for `name` into the editor. Treats a
-/// missing file as an empty buffer — first save will create it.
-/// Resets the dirty/timer state so the load itself doesn't trigger
-/// another save.
-fn load_session(app: &mut App, name: &str, index: usize) {
-    let path = session::path_for(&app.data_dir, name, index);
-    match session::load(&path) {
-        Ok(text) => {
-            app.editor.replace_text(&text);
-            app.log
-                .info("session", format!("loaded {}", path.display()));
-        }
-        Err(err) => {
-            app.log
-                .warn("session", format!("load {} failed: {err}", path.display()));
-            app.editor.replace_text("");
-        }
-    }
-    app.editor_dirty = false;
-    app.pending_save_at = None;
-}
-
-/// Load the persisted chat-session messages for `name` into
-/// `app.chat.messages`. Missing file → empty history. Failures are
-/// surfaced as a warning + empty history rather than a hard error;
-/// chat is non-essential to the rest of the UI.
-fn load_chat_session(app: &mut App, name: &str) {
-    let path = crate::chat_session::path_for(&app.data_dir, name);
-    match crate::chat_session::load(&path) {
-        Ok(messages) => {
-            let count = messages.len();
-            app.chat.messages = messages;
-            // Land at the bottom of the loaded history — that's where
-            // the conversation left off, and what the user expects when
-            // resuming a session.
-            app.chat.scroll_to_bottom();
-            app.chat.streaming = false;
-            app.chat.error = None;
-            app.log.info(
-                "chat",
-                format!("loaded {count} message(s) from {}", path.display()),
-            );
-        }
-        Err(err) => {
-            app.log
-                .warn("chat", format!("load {} failed: {err}", path.display()));
-            app.chat.messages.clear();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::results::apply_nav_step;
     use super::*;
+    use crate::state::results::ResultCursor;
 
     #[test]
     fn expand_tilde_substitutes_home() {
@@ -2959,7 +1484,7 @@ mod tests {
         app.overlay = Some(Overlay::Connecting {
             name: "main".into(),
         });
-        super::on_update_available(&mut app, "0.7.0".into(), "0.7.1".into());
+        super::update::on_update_available(&mut app, "0.7.0".into(), "0.7.1".into());
         assert!(
             matches!(app.overlay, Some(Overlay::Connecting { .. })),
             "Connecting overlay must not be replaced",
@@ -2995,7 +1520,7 @@ mod tests {
         let (mut app, _cmd_rx, _evt_rx) = fixture_app(dir);
 
         app.screen = Screen::Auth(AuthState::new(crate::state::auth::AuthKind::FirstSetup));
-        super::on_update_available(&mut app, "0.7.0".into(), "0.7.1".into());
+        super::update::on_update_available(&mut app, "0.7.0".into(), "0.7.1".into());
         super::try_promote_pending_update(&mut app);
 
         // Auth screen must keep its keyboard input — overlay must NOT

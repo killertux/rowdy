@@ -1887,4 +1887,243 @@ mod tests {
         // Unknown keys yield None.
         assert!(translate_theme_picker_key(key(KeyCode::Char('x'))).is_none());
     }
+
+    // -----------------------------------------------------------------
+    // Overlay × Screen routing matrix (App-backed integration tests)
+    //
+    // The pure translator tests above cover one branch at a time. These
+    // exercise `translate(&app, event)` end-to-end so a future refactor
+    // of the overlay-vs-screen precedence rules in `translate_key`
+    // breaks here rather than silently corrupting input routing.
+    // -----------------------------------------------------------------
+
+    use crate::app::App;
+    use crate::autocomplete::SchemaCache;
+    use crate::config::ConfigStore;
+    use crate::keybindings::keymap::Keymap;
+    use crate::log::Logger;
+    use crate::state::auth::{AuthKind, AuthState};
+    use crate::state::command::CommandBuffer;
+    use crate::state::conn_form::ConnFormState;
+    use crate::state::overlay::ConfirmRunReason;
+    use crate::state::screen::Screen;
+    use crate::user_config::UserConfigStore;
+    use std::path::PathBuf;
+    use std::sync::{Arc, RwLock};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("rowdy-event-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn fixture_app() -> App {
+        use tokio::sync::mpsc;
+        let dir = temp_dir("matrix");
+        let logger = Logger::open(&dir.join("test.log")).unwrap();
+        let config = ConfigStore::load(&dir).unwrap();
+        let user_config = UserConfigStore::empty(&dir);
+        let keymap = Arc::new(Keymap::defaults());
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (evt_tx, _evt_rx) = mpsc::unbounded_channel();
+        let schema_cache = Arc::new(RwLock::new(SchemaCache::new()));
+        App::new(
+            cmd_tx,
+            evt_tx,
+            config,
+            user_config,
+            keymap,
+            None,
+            logger,
+            dir,
+            schema_cache,
+        )
+    }
+
+    fn dbg_action(a: Option<Action>) -> String {
+        a.map(|x| format!("{x:?}")).unwrap_or_else(|| "None".into())
+    }
+
+    /// `j` over Normal+Help routes to HelpScroll, not into the editor.
+    #[test]
+    fn help_overlay_preempts_normal_screen() {
+        let mut app = fixture_app();
+        app.overlay = Some(Overlay::Help {
+            scroll: 0,
+            h_scroll: 0,
+        });
+        let action = translate(&app, CtEvent::Key(key(KeyCode::Char('j'))));
+        assert!(
+            matches_action(&action, "HelpScroll"),
+            "expected HelpScroll, got {}",
+            dbg_action(action)
+        );
+    }
+
+    /// Command overlay must intercept every printable key — even when
+    /// the underlying screen is something modal like ConnectionList.
+    #[test]
+    fn command_overlay_preempts_modal_screen() {
+        let mut app = fixture_app();
+        app.overlay = Some(Overlay::Command(CommandBuffer::default()));
+        app.screen = Screen::Auth(AuthState::new(AuthKind::FirstSetup));
+        let action = translate(&app, CtEvent::Key(key(KeyCode::Char('q'))));
+        assert!(
+            matches_action(&action, "Command"),
+            "expected Action::Command(_), got {}",
+            dbg_action(action)
+        );
+    }
+
+    /// `Connecting` is in-flight — keys are inert, period.
+    #[test]
+    fn connecting_overlay_swallows_all_keys() {
+        let mut app = fixture_app();
+        app.overlay = Some(Overlay::Connecting { name: "x".into() });
+        // Plain `q`, arrow keys, and Enter all yield None.
+        for k in [
+            key(KeyCode::Char('q')),
+            key(KeyCode::Enter),
+            key(KeyCode::Esc),
+            key(KeyCode::Down),
+        ] {
+            assert!(
+                translate(&app, CtEvent::Key(k)).is_none(),
+                "Connecting must not produce an action for {k:?}"
+            );
+        }
+    }
+
+    /// Ctrl+C must still quit even when Connecting is up — the user
+    /// should never be stranded with no way out of a stuck connect.
+    #[test]
+    fn ctrl_c_still_quits_under_connecting_overlay() {
+        let mut app = fixture_app();
+        app.overlay = Some(Overlay::Connecting { name: "x".into() });
+        let action = translate(&app, CtEvent::Key(ctrl(KeyCode::Char('c'))));
+        assert!(matches!(action, Some(Action::Quit)));
+    }
+
+    /// ConfirmRun overlay: `Enter` → submit, `Esc` → cancel. Bare
+    /// letters intentionally don't bind (avoids accidental confirm on
+    /// editor-style muscle memory).
+    #[test]
+    fn confirm_run_overlay_enter_and_esc() {
+        let mut app = fixture_app();
+        app.overlay = Some(Overlay::ConfirmRun {
+            statement: "DELETE FROM t".into(),
+            reason: ConfirmRunReason::Manual,
+        });
+        assert!(matches!(
+            translate(&app, CtEvent::Key(key(KeyCode::Enter))),
+            Some(Action::ConfirmRunSubmit)
+        ));
+        assert!(matches!(
+            translate(&app, CtEvent::Key(key(KeyCode::Esc))),
+            Some(Action::ConfirmRunCancel)
+        ));
+        // Bare `y` / `n` are NOT bound — must yield None.
+        assert!(translate(&app, CtEvent::Key(key(KeyCode::Char('y')))).is_none());
+        assert!(translate(&app, CtEvent::Key(key(KeyCode::Char('n')))).is_none());
+    }
+
+    /// UpdateAvailable overlay: `y` → accept, `n`/`Esc` → dismiss.
+    #[test]
+    fn update_overlay_y_and_n() {
+        let mut app = fixture_app();
+        app.overlay = Some(Overlay::UpdateAvailable {
+            current: "0.1".into(),
+            latest: "0.2".into(),
+        });
+        assert!(matches!(
+            translate(&app, CtEvent::Key(key(KeyCode::Char('y')))),
+            Some(Action::UpdateAccept)
+        ));
+        assert!(matches!(
+            translate(&app, CtEvent::Key(key(KeyCode::Char('n')))),
+            Some(Action::UpdateDismiss)
+        ));
+        assert!(matches!(
+            translate(&app, CtEvent::Key(key(KeyCode::Esc))),
+            Some(Action::UpdateDismiss)
+        ));
+    }
+
+    /// ConfirmToolUse routes y/n to the dedicated tool-approve actions —
+    /// must not collide with ConfirmRun's y/n.
+    #[test]
+    fn tool_confirm_overlay_uses_dedicated_actions() {
+        let mut app = fixture_app();
+        app.overlay = Some(Overlay::ConfirmToolUse {
+            call_id: "id".into(),
+            name: "fs.read".into(),
+            args_json: "{}".into(),
+        });
+        assert!(matches!(
+            translate(&app, CtEvent::Key(key(KeyCode::Char('y')))),
+            Some(Action::ToolApproveAccept)
+        ));
+        assert!(matches!(
+            translate(&app, CtEvent::Key(key(KeyCode::Char('n')))),
+            Some(Action::ToolApproveDeny)
+        ));
+    }
+
+    /// Help-over-Help-over-ConfirmRun isn't a thing — App holds one
+    /// overlay at a time — but we still want to verify the dispatch picks
+    /// the *currently set* overlay's translator on every call (no stale
+    /// caching). Swap the overlay between calls and confirm both routes
+    /// fire.
+    #[test]
+    fn overlay_swap_redirects_routing_immediately() {
+        let mut app = fixture_app();
+        app.overlay = Some(Overlay::Help {
+            scroll: 0,
+            h_scroll: 0,
+        });
+        assert!(matches_action(
+            &translate(&app, CtEvent::Key(key(KeyCode::Char('j')))),
+            "HelpScroll",
+        ));
+        app.overlay = Some(Overlay::Command(CommandBuffer::default()));
+        assert!(matches_action(
+            &translate(&app, CtEvent::Key(key(KeyCode::Char('j')))),
+            "Command",
+        ));
+    }
+
+    /// EditConnection screen with no overlay: typing characters routes
+    /// into the conn-form handler, not into Normal-mode handlers.
+    #[test]
+    fn conn_form_screen_consumes_input_when_no_overlay() {
+        let mut app = fixture_app();
+        app.screen = Screen::EditConnection(ConnFormState::new_create());
+        let action = translate(&app, CtEvent::Key(key(KeyCode::Char('a'))));
+        assert!(
+            matches_action(&action, "ConnForm"),
+            "expected ConnForm action, got {}",
+            dbg_action(action)
+        );
+    }
+
+    /// Bracketed paste lands in Command overlay first, then falls back
+    /// to the editor on Normal screen. Help intercepts (drops) paste so
+    /// it doesn't leak text under the popover.
+    #[test]
+    fn paste_routing_respects_overlay_precedence() {
+        let mut app = fixture_app();
+        // Command overlay → routes to Command(Paste).
+        app.overlay = Some(Overlay::Command(CommandBuffer::default()));
+        assert!(matches_action(
+            &translate(&app, CtEvent::Paste("hi".into())),
+            "Command(Paste",
+        ));
+        // Help overlay → swallows paste (returns None) so the editor
+        // underneath doesn't get unexpected text.
+        app.overlay = Some(Overlay::Help {
+            scroll: 0,
+            h_scroll: 0,
+        });
+        assert!(translate(&app, CtEvent::Paste("hi".into())).is_none());
+    }
 }

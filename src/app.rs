@@ -121,6 +121,16 @@ pub struct App {
     /// connect / `:reload` / lazy column loads; the engine reads here on
     /// every popover open. `Arc<RwLock<…>>` so the worker and the main
     /// loop can both hold handles without cloning the contents.
+    ///
+    /// **Lock-ordering contract.** Writers: only the worker task
+    /// (`spawn_prime_cache` / `spawn_load_columns` write under `.write()`;
+    /// the main-loop action handlers only ever take `.read()`). The lock
+    /// is never held across an `.await` and never nested with any other
+    /// lock — every call site takes the guard, mutates or reads, and
+    /// drops it within the same synchronous block. Keep it that way: if
+    /// you add a writer on the main loop, do it from `apply_*` (sync,
+    /// before any worker dispatch) and not from an async path, or
+    /// reader/writer contention will start showing up under heavy DDL.
     pub schema_cache: Arc<RwLock<SchemaCache>>,
     /// Set while a `WorkerCommand::Reload` is in flight (sent but the
     /// terminal `CacheStage::Reloaded` event hasn't arrived yet). Used
