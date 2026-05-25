@@ -649,6 +649,44 @@ async fn prime_cache(
     }
 }
 
+
+async fn handle_introspect(datasource: &dyn Datasource, target: IntrospectTarget) -> WorkerEvent {
+    let outcome = match &target {
+        IntrospectTarget::Catalogs => datasource
+            .introspect_catalogs()
+            .await
+            .map(SchemaPayload::Catalogs),
+        IntrospectTarget::Schemas { catalog } => datasource
+            .introspect_schemas(catalog)
+            .await
+            .map(SchemaPayload::Schemas),
+        IntrospectTarget::Tables { catalog, schema } => datasource
+            .introspect_tables(catalog, schema)
+            .await
+            .map(SchemaPayload::Tables),
+        IntrospectTarget::Columns {
+            catalog,
+            schema,
+            table,
+        } => datasource
+            .introspect_columns(catalog, schema, table)
+            .await
+            .map(SchemaPayload::Columns),
+        IntrospectTarget::Indices {
+            catalog,
+            schema,
+            table,
+        } => datasource
+            .introspect_indices(catalog, schema, table)
+            .await
+            .map(SchemaPayload::Indices),
+    };
+    match outcome {
+        Ok(payload) => WorkerEvent::SchemaLoaded { target, payload },
+        Err(error) => WorkerEvent::SchemaFailed { target, error },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,13 +883,14 @@ mod tests {
         assert!(saw_reloaded, "expected CacheStage::Reloaded");
 
         // Default sqlite database has one schema named "main".
-        let cache = cache.read().unwrap();
-        assert!(
-            cache.schemas.values().any(|v| v.iter().any(|s| s == "main")),
-            "expected 'main' schema in primed cache; got {:?}",
-            cache.schemas,
-        );
-        drop(cache);
+        {
+            let guard = cache.read().unwrap();
+            assert!(
+                guard.schemas.values().any(|v| v.iter().any(|s| s == "main")),
+                "expected 'main' schema in primed cache; got {:?}",
+                guard.schemas,
+            );
+        }
 
         cmd_tx.send(WorkerCommand::Close).ok();
         handle.await.ok();
@@ -869,39 +908,3 @@ mod tests {
     }
 }
 
-async fn handle_introspect(datasource: &dyn Datasource, target: IntrospectTarget) -> WorkerEvent {
-    let outcome = match &target {
-        IntrospectTarget::Catalogs => datasource
-            .introspect_catalogs()
-            .await
-            .map(SchemaPayload::Catalogs),
-        IntrospectTarget::Schemas { catalog } => datasource
-            .introspect_schemas(catalog)
-            .await
-            .map(SchemaPayload::Schemas),
-        IntrospectTarget::Tables { catalog, schema } => datasource
-            .introspect_tables(catalog, schema)
-            .await
-            .map(SchemaPayload::Tables),
-        IntrospectTarget::Columns {
-            catalog,
-            schema,
-            table,
-        } => datasource
-            .introspect_columns(catalog, schema, table)
-            .await
-            .map(SchemaPayload::Columns),
-        IntrospectTarget::Indices {
-            catalog,
-            schema,
-            table,
-        } => datasource
-            .introspect_indices(catalog, schema, table)
-            .await
-            .map(SchemaPayload::Indices),
-    };
-    match outcome {
-        Ok(payload) => WorkerEvent::SchemaLoaded { target, payload },
-        Err(error) => WorkerEvent::SchemaFailed { target, error },
-    }
-}
