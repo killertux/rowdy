@@ -649,6 +649,226 @@ async fn prime_cache(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log::Logger;
+    use std::sync::{Arc, RwLock};
+    use std::time::Duration;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    fn fixture() -> (
+        UnboundedSender<WorkerCommand>,
+        UnboundedReceiver<WorkerEvent>,
+        Arc<RwLock<SchemaCache>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let logger = Logger::discard();
+        let (cmd_tx, cmd_rx) = unbounded_channel::<WorkerCommand>();
+        let (evt_tx, evt_rx) = unbounded_channel::<WorkerEvent>();
+        let cache = Arc::new(RwLock::new(SchemaCache::default()));
+        let cache_for_run = cache.clone();
+        let handle = tokio::spawn(async move {
+            run(logger, cmd_rx, evt_tx, cache_for_run).await;
+        });
+        (cmd_tx, evt_rx, cache, handle)
+    }
+
+    /// Pull the next event off the receiver with a generous timeout so a hung
+    /// worker fails the test instead of stalling CI forever.
+    async fn next_event(rx: &mut UnboundedReceiver<WorkerEvent>) -> WorkerEvent {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("worker did not send an event in time")
+            .expect("worker dropped event channel before sending")
+    }
+
+    #[tokio::test]
+    async fn worker_exits_cleanly_on_close_command() {
+        let (cmd_tx, _evt_rx, _cache, handle) = fixture();
+        cmd_tx.send(WorkerCommand::Close).expect("send Close");
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("worker did not exit after Close")
+            .expect("worker task panicked");
+    }
+
+    #[tokio::test]
+    async fn worker_exits_when_command_channel_drops() {
+        // No Close — just drop the sender. The recv loop should fall through.
+        let (cmd_tx, _evt_rx, _cache, handle) = fixture();
+        drop(cmd_tx);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("worker did not exit after channel drop")
+            .expect("worker task panicked");
+    }
+
+    #[tokio::test]
+    async fn cancel_without_connection_does_not_panic() {
+        let (cmd_tx, mut evt_rx, _cache, handle) = fixture();
+        cmd_tx.send(WorkerCommand::Cancel).expect("send Cancel");
+        // No event is emitted (warn-only). Follow up with Close to drain.
+        cmd_tx.send(WorkerCommand::Close).expect("send Close");
+        handle.await.expect("worker task panicked");
+        // The receiver should be empty (Cancel emits nothing).
+        assert!(evt_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_without_connection_emits_query_failed() {
+        let (cmd_tx, mut evt_rx, _cache, handle) = fixture();
+        let req = RequestId(42);
+        cmd_tx
+            .send(WorkerCommand::Execute {
+                req,
+                sql: "SELECT 1".into(),
+            })
+            .expect("send Execute");
+        match next_event(&mut evt_rx).await {
+            WorkerEvent::QueryFailed { req: got, error } => {
+                assert_eq!(got, req);
+                assert!(
+                    matches!(error, DatasourceError::Connect(_)),
+                    "expected Connect error, got {error:?}",
+                );
+            }
+            other => panic!("expected QueryFailed, got {other:?}"),
+        }
+        cmd_tx.send(WorkerCommand::Close).ok();
+        handle.await.ok();
+    }
+
+    #[tokio::test]
+    async fn introspect_without_connection_emits_schema_failed() {
+        let (cmd_tx, mut evt_rx, _cache, handle) = fixture();
+        cmd_tx
+            .send(WorkerCommand::Introspect {
+                target: IntrospectTarget::Catalogs,
+            })
+            .expect("send Introspect");
+        match next_event(&mut evt_rx).await {
+            WorkerEvent::SchemaFailed { target, error } => {
+                assert_eq!(target, IntrospectTarget::Catalogs);
+                assert!(matches!(error, DatasourceError::Connect(_)));
+            }
+            other => panic!("expected SchemaFailed, got {other:?}"),
+        }
+        cmd_tx.send(WorkerCommand::Close).ok();
+        handle.await.ok();
+    }
+
+    #[tokio::test]
+    async fn connect_then_execute_sqlite_emits_query_done() {
+        let (cmd_tx, mut evt_rx, _cache, handle) = fixture();
+        cmd_tx
+            .send(WorkerCommand::Connect {
+                name: "mem".into(),
+                url: "sqlite::memory:".into(),
+            })
+            .expect("send Connect");
+        match next_event(&mut evt_rx).await {
+            WorkerEvent::Connected { name } => assert_eq!(name, "mem"),
+            other => panic!("expected Connected, got {other:?}"),
+        }
+
+        let req = RequestId(1);
+        cmd_tx
+            .send(WorkerCommand::Execute {
+                req,
+                sql: "SELECT 1 AS one".into(),
+            })
+            .expect("send Execute");
+        match next_event(&mut evt_rx).await {
+            WorkerEvent::QueryDone { req: got, result } => {
+                assert_eq!(got, req);
+                assert_eq!(result.columns.len(), 1);
+                assert_eq!(result.rows.len(), 1);
+            }
+            other => panic!("expected QueryDone, got {other:?}"),
+        }
+        cmd_tx.send(WorkerCommand::Close).ok();
+        handle.await.ok();
+    }
+
+    #[tokio::test]
+    async fn connect_failure_emits_connect_failed() {
+        let (cmd_tx, mut evt_rx, _cache, handle) = fixture();
+        cmd_tx
+            .send(WorkerCommand::Connect {
+                name: "broken".into(),
+                url: "totally-not-a-real-url".into(),
+            })
+            .expect("send Connect");
+        match next_event(&mut evt_rx).await {
+            WorkerEvent::ConnectFailed { name, .. } => assert_eq!(name, "broken"),
+            other => panic!("expected ConnectFailed, got {other:?}"),
+        }
+        cmd_tx.send(WorkerCommand::Close).ok();
+        handle.await.ok();
+    }
+
+    #[tokio::test]
+    async fn prime_completion_cache_populates_schema_cache() {
+        let (cmd_tx, mut evt_rx, cache, handle) = fixture();
+        cmd_tx
+            .send(WorkerCommand::Connect {
+                name: "mem".into(),
+                url: "sqlite::memory:".into(),
+            })
+            .expect("send Connect");
+        // Drain the Connected event.
+        next_event(&mut evt_rx).await;
+
+        // `Reload` emits the terminal `Reloaded` stage that signals the
+        // prime is done; `PrimeCompletionCache` walks the same stages but
+        // doesn't emit a terminal marker.
+        cmd_tx
+            .send(WorkerCommand::Reload {
+                connection: "mem".into(),
+            })
+            .expect("send Reload");
+        // Spin until we see the terminal Reloaded stage (or timeout in
+        // next_event). Other stages may arrive first; ignore them.
+        let mut saw_reloaded = false;
+        for _ in 0..16 {
+            match next_event(&mut evt_rx).await {
+                WorkerEvent::CompletionCacheStage {
+                    stage: CacheStage::Reloaded,
+                } => {
+                    saw_reloaded = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert!(saw_reloaded, "expected CacheStage::Reloaded");
+
+        // Default sqlite database has one schema named "main".
+        let cache = cache.read().unwrap();
+        assert!(
+            cache.schemas.values().any(|v| v.iter().any(|s| s == "main")),
+            "expected 'main' schema in primed cache; got {:?}",
+            cache.schemas,
+        );
+        drop(cache);
+
+        cmd_tx.send(WorkerCommand::Close).ok();
+        handle.await.ok();
+    }
+
+    #[tokio::test]
+    async fn reset_session_without_connection_does_not_panic() {
+        let (cmd_tx, mut evt_rx, _cache, handle) = fixture();
+        cmd_tx
+            .send(WorkerCommand::ResetSession)
+            .expect("send ResetSession");
+        cmd_tx.send(WorkerCommand::Close).expect("send Close");
+        handle.await.expect("worker task panicked");
+        assert!(evt_rx.try_recv().is_err());
+    }
+}
+
 async fn handle_introspect(datasource: &dyn Datasource, target: IntrospectTarget) -> WorkerEvent {
     let outcome = match &target {
         IntrospectTarget::Catalogs => datasource
