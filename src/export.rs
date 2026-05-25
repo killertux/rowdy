@@ -353,7 +353,7 @@ fn display_or_empty(cell: &Cell) -> Cow<'_, str> {
         Cell::Null => Cow::Borrowed(""),
         Cell::Text(s) => Cow::Borrowed(s.as_str()),
         Cell::Bytes(v) => Cow::Owned(bytes_to_hex(v)),
-        other => Cow::Owned(other.display()),
+        other => other.display(),
     }
 }
 

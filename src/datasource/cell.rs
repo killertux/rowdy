@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use uuid::Uuid;
 
@@ -28,25 +30,31 @@ pub enum Cell {
 
 impl Cell {
     /// Compact, single-line rendering for the TUI grid. Not a serialization format.
-    pub fn display(&self) -> String {
+    ///
+    /// Returns a `Cow` so the common cases that already own a string
+    /// (`Text`, `Decimal`, `Other { repr }`) borrow instead of cloning.
+    /// The renderer calls this per visible cell on every frame; with
+    /// large TEXT/JSON values the clone alone could allocate megabytes
+    /// per redraw.
+    pub fn display(&self) -> Cow<'_, str> {
         match self {
-            Self::Null => "NULL".into(),
-            Self::Bool(v) => v.to_string(),
-            Self::Int(v) => v.to_string(),
-            Self::UInt(v) => v.to_string(),
-            Self::Float(v) => v.to_string(),
-            Self::Decimal(v) => v.clone(),
-            Self::Text(v) => v.clone(),
-            Self::Bytes(v) => format!("<{} bytes>", v.len()),
-            Self::Timestamp(v) => v.to_rfc3339(),
-            Self::Date(v) => v.to_string(),
-            Self::Time(v) => v.to_string(),
-            Self::Uuid(v) => v.to_string(),
+            Self::Null => Cow::Borrowed("NULL"),
+            Self::Bool(v) => Cow::Owned(v.to_string()),
+            Self::Int(v) => Cow::Owned(v.to_string()),
+            Self::UInt(v) => Cow::Owned(v.to_string()),
+            Self::Float(v) => Cow::Owned(v.to_string()),
+            Self::Decimal(v) => Cow::Borrowed(v.as_str()),
+            Self::Text(v) => Cow::Borrowed(v.as_str()),
+            Self::Bytes(v) => Cow::Owned(format!("<{} bytes>", v.len())),
+            Self::Timestamp(v) => Cow::Owned(v.to_rfc3339()),
+            Self::Date(v) => Cow::Owned(v.to_string()),
+            Self::Time(v) => Cow::Owned(v.to_string()),
+            Self::Uuid(v) => Cow::Owned(v.to_string()),
             Self::Other { type_name, repr } => {
                 if repr.is_empty() {
-                    format!("<{type_name}>")
+                    Cow::Owned(format!("<{type_name}>"))
                 } else {
-                    repr.clone()
+                    Cow::Borrowed(repr.as_str())
                 }
             }
         }

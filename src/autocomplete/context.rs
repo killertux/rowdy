@@ -638,6 +638,14 @@ fn extract_projection_columns(
             }
             i += 1;
         }
+        // Liveness guard: if the inner scan broke without advancing `i`
+        // (e.g. an unmatched RParen left in the body when `tokens` was
+        // sliced past the balanced parens), the outer `continue` would
+        // re-enter at the same index and spin forever. Stop instead —
+        // we'd rather drop a half-parsed projection than freeze the UI.
+        if i == item_start && !matches!(tokens.get(i), Some(Token::Comma)) {
+            break;
+        }
         let item_slice = trim_trivia_slice(&tokens[item_start..i]);
 
         // Resolve `*` and `t.*` from the FROM table's schema cache

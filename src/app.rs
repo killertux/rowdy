@@ -122,6 +122,12 @@ pub struct App {
     /// every popover open. `Arc<RwLock<…>>` so the worker and the main
     /// loop can both hold handles without cloning the contents.
     pub schema_cache: Arc<RwLock<SchemaCache>>,
+    /// Set while a `WorkerCommand::Reload` is in flight (sent but the
+    /// terminal `CacheStage::Reloaded` event hasn't arrived yet). Used
+    /// to dedupe back-to-back DDLs that would otherwise queue up
+    /// redundant full-schema reintrospections. Cleared when `Reloaded`
+    /// lands or when a fresh `Connect` resets the worker's view.
+    pub schema_reload_in_flight: bool,
     /// Active autocomplete popover, if any. `Some` flips the keymap into
     /// "intercept popover keys before edtui" mode (see
     /// `event::translate_normal_key`).
@@ -271,6 +277,7 @@ impl App {
             editor_dirty: false,
             pending_save_at: None,
             schema_cache,
+            schema_reload_in_flight: false,
             completion: None,
             completion_snoozed_at: None,
             layout: LayoutCache::default(),
