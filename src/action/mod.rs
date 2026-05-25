@@ -1721,6 +1721,7 @@ fn apply_update_dismiss(app: &mut App) {
 fn on_cache_stage(app: &mut App, stage: crate::worker::CacheStage) {
     use crate::worker::CacheStage;
     if matches!(stage, CacheStage::Reloaded) {
+        app.schema_reload_in_flight = false;
         app.status = QueryStatus::Notice {
             msg: "schema cache reloaded".into(),
         };
@@ -1751,6 +1752,10 @@ fn on_connected(app: &mut App, name: String) {
     app.overlay = None;
     app.screen = Screen::Normal;
     app.status = QueryStatus::Idle;
+    // The previous connection's reload (if any) won't deliver
+    // `Reloaded` against this new pool — drop the flag so the first
+    // DDL here can reprime.
+    app.schema_reload_in_flight = false;
     // Fresh tree — drop any nodes left over from the previous connection
     // and re-fire the catalog load.
     app.schema = SchemaPanel::new(app.schema.width);
@@ -1936,7 +1941,15 @@ fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResu
     if crate::autocomplete::ddl::affects_schema_cache(&in_flight.sql)
         && let Some(name) = app.active_connection.clone()
     {
-        let _ = app.cmd_tx.send(WorkerCommand::Reload { connection: name });
+        // Coalesce back-to-back DDLs: if a prior reload hasn't reported
+        // `CacheStage::Reloaded` yet, skip this one. The in-flight
+        // reload's final stage already covers the new schema state, so
+        // queueing a second pass just doubles the introspection cost on
+        // large catalogs (a real freeze symptom we've hit in practice).
+        if !app.schema_reload_in_flight {
+            app.schema_reload_in_flight = true;
+            let _ = app.cmd_tx.send(WorkerCommand::Reload { connection: name });
+        }
     }
 
     let took = result.elapsed;
@@ -2098,7 +2111,7 @@ fn result_yank(app: &mut App) {
                 .rows()
                 .get(cur.row)
                 .and_then(|row| row.get(cur.col))
-                .map(|cell| cell.display())
+                .map(|cell| cell.display().into_owned())
                 .unwrap_or_default();
             clipboard::write(&app.log, &text);
             app.status = QueryStatus::Notice {

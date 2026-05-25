@@ -172,12 +172,12 @@ fn render_cell_badge(
         .get(cursor.col)
         .map(|c| c.name.as_str())
         .unwrap_or("");
-    let raw_value = block
+    let raw_value: std::borrow::Cow<'_, str> = block
         .rows()
         .get(cursor.row)
         .and_then(|r| r.get(cursor.col))
         .map(|c| c.display())
-        .unwrap_or_default();
+        .unwrap_or(std::borrow::Cow::Borrowed(""));
     // Flatten so a multi-line TEXT value stays on one line — it gets clipped
     // either way, but newlines would push the badge off its own row.
     let value: String = raw_value
@@ -242,7 +242,7 @@ fn build_table<'a>(
 }
 
 fn build_row<'a>(
-    row: &[Cell],
+    row: &'a [Cell],
     absolute_row: usize,
     visible_cols: &[usize],
     cursor: Option<ResultCursor>,
