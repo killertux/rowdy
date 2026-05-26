@@ -5,7 +5,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui_textarea::TextArea;
 
 use crate::state::params_prompt::ParamsPromptState;
@@ -30,6 +30,22 @@ impl Widget for ParamsPrompt<'_> {
         let Some(box_area) = inner_box(area, self.state.fields.len()) else {
             return;
         };
+
+        // Wipe the cells under the popover first. Block::style only sets
+        // each cell's style — it doesn't overwrite the glyph — so without
+        // an explicit Clear the editor's characters show through the
+        // popover background.
+        Clear.render(box_area, buf);
+        // Repaint with the theme bg so the cleared cells aren't terminal
+        // default (which can be transparent in some emulators).
+        for y in box_area.y..box_area.y + box_area.height {
+            for x in box_area.x..box_area.x + box_area.width {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_bg(self.theme.bg);
+                    cell.set_fg(self.theme.fg);
+                }
+            }
+        }
 
         let block = Block::default()
             .borders(Borders::ALL)
