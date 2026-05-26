@@ -59,6 +59,15 @@ pub enum Command {
     /// version → "v0.7.x is the latest" notice; network failure →
     /// error in the bottom bar.
     Update,
+    /// `:save <name>` — persist the selection (or statement under cursor)
+    /// as a named query scoped to the active connection.
+    Save(String),
+    /// `:load <name>` — insert a previously saved query at the cursor.
+    Load(String),
+    /// `:run-saved [name]` — execute a saved query. Bare form opens a
+    /// picker overlay; with a name, dispatches straight through the
+    /// existing query pipeline (placeholders prompt, etc.).
+    RunSaved(Option<String>),
 }
 
 /// `:chat` subcommands. Bare `:chat` toggles the right panel between
@@ -334,6 +343,21 @@ pub static COMMAND_TREE: &[CommandSpec] = &[
         aliases: &[],
         children: &[],
     },
+    CommandSpec {
+        name: "save",
+        aliases: &[],
+        children: &[],
+    },
+    CommandSpec {
+        name: "load",
+        aliases: &[],
+        children: &[],
+    },
+    CommandSpec {
+        name: "run-saved",
+        aliases: &[],
+        children: &[],
+    },
 ];
 
 /// Parse a single `:` line. `Ok(None)` is the empty-line case (treat
@@ -365,9 +389,40 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
         "chat" => Command::Chat(parse_chat(&args)?),
         "session" | "sess" => Command::Session(parse_session(&args)?),
         "update" => Command::Update,
+        "save" => parse_save(&args)?,
+        "load" => parse_load(&args)?,
+        "run-saved" => parse_run_saved(&args),
         _ => return Err(format!("unknown command: {cmd}")),
     };
     Ok(Some(parsed))
+}
+
+fn parse_save(args: &[&str]) -> Result<Command, String> {
+    let name = args.join(" ");
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("usage: :save <name>".to_string());
+    }
+    Ok(Command::Save(name.to_string()))
+}
+
+fn parse_load(args: &[&str]) -> Result<Command, String> {
+    let name = args.join(" ");
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("usage: :load <name>".to_string());
+    }
+    Ok(Command::Load(name.to_string()))
+}
+
+fn parse_run_saved(args: &[&str]) -> Command {
+    let joined = args.join(" ");
+    let trimmed = joined.trim();
+    if trimmed.is_empty() {
+        Command::RunSaved(None)
+    } else {
+        Command::RunSaved(Some(trimmed.to_string()))
+    }
 }
 
 fn parse_format(args: &[&str]) -> Result<Command, String> {
@@ -944,6 +999,32 @@ mod tests {
     #[test]
     fn session_unknown_subcommand_errors() {
         assert!(matches!(parse("session yikes"), Err(msg) if msg.contains("unknown")));
+    }
+
+    #[test]
+    fn save_requires_name() {
+        assert_eq!(parse("save daily"), Ok(Some(Command::Save("daily".into()))));
+        // Names with spaces survive (sanitizer maps them on save).
+        assert_eq!(
+            parse("save weekly cohort"),
+            Ok(Some(Command::Save("weekly cohort".into())))
+        );
+        assert!(matches!(parse("save"), Err(msg) if msg.contains("usage:")));
+    }
+
+    #[test]
+    fn load_requires_name() {
+        assert_eq!(parse("load daily"), Ok(Some(Command::Load("daily".into()))));
+        assert!(matches!(parse("load"), Err(msg) if msg.contains("usage:")));
+    }
+
+    #[test]
+    fn run_saved_optional_name() {
+        assert_eq!(parse("run-saved"), Ok(Some(Command::RunSaved(None))));
+        assert_eq!(
+            parse("run-saved daily"),
+            Ok(Some(Command::RunSaved(Some("daily".into()))))
+        );
     }
 
     #[test]

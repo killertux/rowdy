@@ -1,5 +1,6 @@
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
@@ -14,27 +15,43 @@ use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
-use crate::datasource::sql::decode_to;
+use crate::datasource::sql::{TxEffect, decode_to, tx_effect};
 use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
 
 const DEFAULT_POOL_SIZE: u32 = 3;
+const IDLE_TIMEOUT_SECS: u64 = 60;
 const MARIADB_SCHEME: &str = "mariadb:";
 const MYSQL_SCHEME: &str = "mysql:";
 const TARGET: &str = "mysql";
 
+/// Pinned session connection — see `postgres::Session` for the shape;
+/// here the cancel handle is the `CONNECTION_ID()` we already mirror to
+/// `session_conn_id`.
+struct Session {
+    conn: PoolConnection<MySql>,
+}
+
 pub struct MysqlDatasource {
-    pool: MySqlPool,
+    pool: StdMutex<MySqlPool>,
+    url: String,
     log: Logger,
     // CONNECTION_ID() of the pinned session connection, or 0 when no
     // session is currently held. Recorded once on acquire and kept
     // across executes so `cancel()` can `KILL QUERY <id>` even when
     // the spawn_query task is mid-await.
     session_conn_id: AtomicU64,
-    // Pinned connection across `execute()` calls so BEGIN / COMMIT /
-    // ROLLBACK survive between statements. Introspection and cancel
-    // talk to the pool directly.
-    session: Mutex<Option<PoolConnection<MySql>>>,
+    /// Pinned connection held only while a transaction is open.
+    /// Introspection and cancel always talk to the pool.
+    session: Mutex<Option<Session>>,
+}
+
+fn build_pool(url: &str) -> Result<MySqlPool, sqlx::Error> {
+    MySqlPoolOptions::new()
+        .max_connections(DEFAULT_POOL_SIZE)
+        .min_connections(0)
+        .idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS)))
+        .connect_lazy(url)
 }
 
 impl MysqlDatasource {
@@ -50,21 +67,28 @@ impl MysqlDatasource {
             TARGET,
             format!("connecting to {}", super::redact_url(&normalized)),
         );
-        let pool = MySqlPoolOptions::new()
-            .max_connections(DEFAULT_POOL_SIZE)
-            .connect(&normalized)
-            .await
-            .map_err(|e| {
-                log.error(TARGET, format!("connect failed: {e}"));
-                DatasourceError::Connect(e.to_string())
-            })?;
+        let pool = build_pool(&normalized).map_err(|e| {
+            log.error(TARGET, format!("pool build failed: {e}"));
+            DatasourceError::Connect(e.to_string())
+        })?;
+        // Upfront ping so bad URLs surface here, not on the first query.
+        let verify_conn = pool.acquire().await.map_err(|e| {
+            log.error(TARGET, format!("connect verify failed: {e}"));
+            DatasourceError::Connect(e.to_string())
+        })?;
+        drop(verify_conn);
         log.info(TARGET, "connected");
         Ok(Self {
-            pool,
+            pool: StdMutex::new(pool),
+            url: normalized,
             log,
             session_conn_id: AtomicU64::new(0),
             session: Mutex::new(None),
         })
+    }
+
+    fn pool(&self) -> MySqlPool {
+        self.pool.lock().expect("pool mutex poisoned").clone()
     }
 }
 
@@ -75,6 +99,7 @@ impl Datasource for MysqlDatasource {
         // database") comes from the connection URL via `DATABASE()`. If the
         // user connected without selecting a database, we return an empty
         // string so the caller can decide what to do (skip prime, etc.).
+        let pool = self.pool();
         let row = sqlx::query(
             "SELECT \
                 COALESCE(\
@@ -83,7 +108,7 @@ impl Datasource for MysqlDatasource {
                 ) AS catalog, \
                 COALESCE(DATABASE(), '') AS schema",
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&pool)
         .await
         .map_err(introspect_err)?;
         let catalog = try_string(&row, "catalog").unwrap_or_else(|| "def".to_string());
@@ -94,9 +119,10 @@ impl Datasource for MysqlDatasource {
     async fn introspect_catalogs(&self) -> DatasourceResult<Vec<CatalogInfo>> {
         // MySQL exposes a single static catalog (`def`); we read it from
         // information_schema rather than hard-coding it.
+        let pool = self.pool();
         let rows =
             sqlx::query("SELECT DISTINCT catalog_name AS name FROM information_schema.schemata")
-                .fetch_all(&self.pool)
+                .fetch_all(&pool)
                 .await
                 .map_err(introspect_err)?;
         Ok(rows
@@ -107,6 +133,7 @@ impl Datasource for MysqlDatasource {
     }
 
     async fn introspect_schemas(&self, catalog: &str) -> DatasourceResult<Vec<SchemaInfo>> {
+        let pool = self.pool();
         let rows = sqlx::query(
             "SELECT schema_name AS name FROM information_schema.schemata \
              WHERE catalog_name = ? \
@@ -114,7 +141,7 @@ impl Datasource for MysqlDatasource {
              ORDER BY schema_name",
         )
         .bind(catalog)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await
         .map_err(introspect_err)?;
         Ok(rows
@@ -129,6 +156,7 @@ impl Datasource for MysqlDatasource {
         catalog: &str,
         schema: &str,
     ) -> DatasourceResult<Vec<TableInfo>> {
+        let pool = self.pool();
         let rows = sqlx::query(
             "SELECT table_name AS name, table_type AS kind \
              FROM information_schema.tables \
@@ -137,7 +165,7 @@ impl Datasource for MysqlDatasource {
         )
         .bind(catalog)
         .bind(schema)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await
         .map_err(introspect_err)?;
         Ok(rows
@@ -162,6 +190,7 @@ impl Datasource for MysqlDatasource {
     ) -> DatasourceResult<Vec<ColumnInfo>> {
         // `column_type` carries the full declared type (e.g. `int(11) unsigned`),
         // which is more useful for display than the normalised `data_type`.
+        let pool = self.pool();
         let rows = sqlx::query(
             "SELECT column_name AS name, column_type AS type_name, is_nullable \
              FROM information_schema.columns \
@@ -171,7 +200,7 @@ impl Datasource for MysqlDatasource {
         .bind(catalog)
         .bind(schema)
         .bind(table)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await
         .map_err(introspect_err)?;
         Ok(rows
@@ -203,6 +232,7 @@ impl Datasource for MysqlDatasource {
         // information_schema.statistics has one row per index column; collapse
         // by index_name and take the lowest non_unique value (0 wins, meaning
         // unique).
+        let pool = self.pool();
         let rows = sqlx::query(
             "SELECT index_name AS name, MIN(non_unique) AS non_unique \
              FROM information_schema.statistics \
@@ -212,7 +242,7 @@ impl Datasource for MysqlDatasource {
         )
         .bind(schema)
         .bind(table)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await
         .map_err(introspect_err)?;
         Ok(rows
@@ -236,8 +266,10 @@ impl Datasource for MysqlDatasource {
         let started = Instant::now();
 
         let mut guard = self.session.lock().await;
-        if guard.is_none() {
-            let mut conn = self.pool.acquire().await.map_err(|e| {
+        let was_in_tx = guard.is_some();
+        if !was_in_tx {
+            let pool = self.pool();
+            let mut conn = pool.acquire().await.map_err(|e| {
                 self.log.error(TARGET, format!("acquire failed: {e}"));
                 execute_err(e)
             })?;
@@ -250,13 +282,13 @@ impl Datasource for MysqlDatasource {
                     execute_err(e)
                 })?;
             self.session_conn_id.store(conn_id, Ordering::SeqCst);
-            *guard = Some(conn);
+            *guard = Some(Session { conn });
         }
-        let conn = guard.as_mut().expect("session conn populated above");
+        let session = guard.as_mut().expect("session populated above");
 
         let outcome: Result<QueryResult, sqlx::Error> =
             if super::is_row_returning(statement, &sqlparser::dialect::MySqlDialect {}) {
-                match sqlx::query(statement).fetch_all(&mut **conn).await {
+                match sqlx::query(statement).fetch_all(&mut *session.conn).await {
                     Ok(rows) => {
                         let elapsed = started.elapsed();
                         let columns = build_columns(&rows);
@@ -275,7 +307,7 @@ impl Datasource for MysqlDatasource {
                     Err(e) => Err(e),
                 }
             } else {
-                match sqlx::query(statement).execute(&mut **conn).await {
+                match sqlx::query(statement).execute(&mut *session.conn).await {
                     Ok(outcome) => {
                         let elapsed = started.elapsed();
                         Ok(QueryResult {
@@ -290,6 +322,14 @@ impl Datasource for MysqlDatasource {
                 }
             };
 
+        let effect = tx_effect(statement, &sqlparser::dialect::MySqlDialect {});
+        let new_in_tx = match (was_in_tx, effect) {
+            (true, TxEffect::End) => false,
+            (true, _) => true,
+            (false, TxEffect::Begin) => true,
+            (false, _) => false,
+        };
+
         match outcome {
             Ok(r) => {
                 self.log.info(
@@ -299,6 +339,10 @@ impl Datasource for MysqlDatasource {
                         None => format!("execute ok: {} rows in {:?}", r.rows.len(), r.elapsed),
                     },
                 );
+                if !new_in_tx {
+                    *guard = None;
+                    self.session_conn_id.store(0, Ordering::SeqCst);
+                }
                 Ok(r)
             }
             Err(e) => {
@@ -308,6 +352,9 @@ impl Datasource for MysqlDatasource {
                     self.session_conn_id.store(0, Ordering::SeqCst);
                     self.log
                         .warn(TARGET, "session conn dropped after connection loss");
+                } else if !was_in_tx {
+                    *guard = None;
+                    self.session_conn_id.store(0, Ordering::SeqCst);
                 }
                 Err(execute_err(e))
             }
@@ -326,7 +373,8 @@ impl Datasource for MysqlDatasource {
         // busy session.
         let sql = format!("KILL QUERY {conn_id}");
         self.log.info(TARGET, format!("cancel: {sql}"));
-        sqlx::query(&sql).execute(&self.pool).await.map_err(|e| {
+        let pool = self.pool();
+        sqlx::query(&sql).execute(&pool).await.map_err(|e| {
             self.log.warn(TARGET, format!("cancel failed: {e}"));
             execute_err(e)
         })?;
@@ -334,18 +382,35 @@ impl Datasource for MysqlDatasource {
     }
 
     async fn reset_session(&self) -> DatasourceResult<()> {
+        // Drop the pinned session conn first (with an explicit ROLLBACK
+        // so the backend isn't left holding an open tx).
         let mut guard = self.session.lock().await;
-        if let Some(mut conn) = guard.take() {
-            // Drop any open transaction before returning the conn to
-            // the pool — a stale BEGIN would otherwise be inherited by
-            // the next checkout. Logged-and-swallowed on failure.
-            if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+        if let Some(mut session) = guard.take() {
+            if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *session.conn).await {
                 self.log.warn(TARGET, format!("reset rollback: {e}"));
             }
-            drop(conn);
+            drop(session);
             self.log.info(TARGET, "session reset");
         }
         self.session_conn_id.store(0, Ordering::SeqCst);
+        drop(guard);
+
+        // Swap in a fresh lazy pool and close the old one — that forces
+        // every existing backend connection this datasource was holding
+        // (idle or otherwise) to disconnect.
+        let new_pool = match build_pool(&self.url) {
+            Ok(p) => p,
+            Err(e) => {
+                self.log.error(TARGET, format!("pool rebuild failed: {e}"));
+                return Err(DatasourceError::Execute(e.to_string()));
+            }
+        };
+        let old_pool = {
+            let mut pool_guard = self.pool.lock().expect("pool mutex poisoned");
+            std::mem::replace(&mut *pool_guard, new_pool)
+        };
+        old_pool.close().await;
+        self.log.info(TARGET, "pool drained");
         Ok(())
     }
 }

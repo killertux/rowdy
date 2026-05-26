@@ -12,9 +12,12 @@ mod llm_settings;
 mod params_prompt;
 mod query;
 mod results;
+mod saved_queries;
 mod schema;
 mod session;
 mod update;
+
+pub use saved_queries::SavedQueryAction;
 
 pub(crate) use session::{flush_session, schedule_session_save};
 pub use update::try_promote_pending_update;
@@ -158,6 +161,11 @@ pub enum Action {
     /// the action layer replies to the LLM with `{"error": "user
     /// denied access"}` so the turn keeps moving.
     ToolApproveDeny,
+    /// Saved-query overlay / picker interaction. The translation layer
+    /// keeps `:save` / `:load` / `:run-saved` outside this variant
+    /// (they're dispatched directly through `dispatch_command`) so this
+    /// only handles the overlay key flow.
+    SavedQuery(SavedQueryAction),
 }
 
 /// What a click or scroll-wheel was aimed at. Translated from
@@ -495,6 +503,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::Session(s) => session::dispatch_session(app, s),
         Action::ToolApproveAccept => chat::on_tool_approve_accept(app),
         Action::ToolApproveDeny => chat::on_tool_approve_deny(app),
+        Action::SavedQuery(a) => saved_queries::apply(app, a),
     }
 }
 
@@ -785,6 +794,10 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
             Action::Session(session::session_subcommand_to_action(sub)),
         ),
         C::Update => apply(app, Action::CheckForUpdate),
+        C::Save(name) => saved_queries::apply_save(app, name),
+        C::Load(name) => saved_queries::apply_load(app, name),
+        C::RunSaved(Some(name)) => saved_queries::apply_run_saved(app, name),
+        C::RunSaved(None) => saved_queries::open_run_picker(app),
     }
 }
 

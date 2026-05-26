@@ -8,7 +8,7 @@ use ratatui_textarea::Input;
 use crate::action::{
     Action, AuthAction, ChatAction, CommandAction, CompletionAction, ConnFormAction,
     ConnListAction, HelpAxis, HelpScrollDelta, LlmSettingsAction, MouseTarget, ParamsPromptAction,
-    ResultColumnAction, ResultNavAction, SchemaAction,
+    ResultColumnAction, ResultNavAction, SavedQueryAction, SchemaAction,
 };
 use crate::app::App;
 use crate::export::ExportFormat;
@@ -92,6 +92,8 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
             Overlay::UpdateAvailable { .. } => translate_update_key(key),
             Overlay::ConfirmToolUse { .. } => translate_tool_confirm_key(key),
             Overlay::ParamsPrompt(_) => translate_params_prompt_key(key),
+            Overlay::ConfirmSaveOverwrite { .. } => translate_save_overwrite_key(key),
+            Overlay::SavedQueryPicker(_) => translate_saved_query_picker_key(key),
         };
     }
     match &app.screen {
@@ -316,6 +318,40 @@ fn translate_tool_confirm_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::ToolApproveDeny),
         _ => None,
     }
+}
+
+/// `:save` overwrite prompt: Enter / `y` accept, Esc / `n` cancel.
+fn translate_save_overwrite_key(key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            Some(Action::SavedQuery(SavedQueryAction::ConfirmOverwrite))
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            Some(Action::SavedQuery(SavedQueryAction::CancelOverwrite))
+        }
+        _ => None,
+    }
+}
+
+/// Saved-query picker: vim-style nav, Enter to confirm, Esc/q to dismiss.
+fn translate_saved_query_picker_key(key: KeyEvent) -> Option<Action> {
+    use SavedQueryAction as A;
+    let action = match (key.code, key.modifiers) {
+        (KeyCode::Char('j') | KeyCode::Down, _) => A::PickerMove(1),
+        (KeyCode::Char('k') | KeyCode::Up, _) => A::PickerMove(-1),
+        (KeyCode::Char('n'), m) if m.contains(KeyModifiers::CONTROL) => A::PickerMove(1),
+        (KeyCode::Char('p'), m) if m.contains(KeyModifiers::CONTROL) => A::PickerMove(-1),
+        (KeyCode::Char('g'), _) => A::PickerTop,
+        (KeyCode::Char('G'), _) => A::PickerBottom,
+        (KeyCode::PageDown, _) => A::PickerMove(10),
+        (KeyCode::PageUp, _) => A::PickerMove(-10),
+        (KeyCode::Home, _) => A::PickerTop,
+        (KeyCode::End, _) => A::PickerBottom,
+        (KeyCode::Enter, _) => A::PickerConfirm,
+        (KeyCode::Esc | KeyCode::Char('q'), _) => A::PickerCancel,
+        _ => return None,
+    };
+    Some(Action::SavedQuery(action))
 }
 
 fn panic_quit(key: KeyEvent) -> Option<Action> {

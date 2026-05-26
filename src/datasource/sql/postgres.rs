@@ -1,5 +1,6 @@
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -15,15 +16,34 @@ use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
-use crate::datasource::sql::decode_to;
+use crate::datasource::sql::{TxEffect, decode_to, tx_effect};
 use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
 
 const DEFAULT_POOL_SIZE: u32 = 3;
+const IDLE_TIMEOUT_SECS: u64 = 60;
 const TARGET: &str = "postgres";
 
+/// Pinned session connection held only while the user is inside an
+/// open transaction. Released back to the pool the moment the
+/// transaction closes (and reacquired on the next statement). Outside
+/// a transaction the datasource owns no connection — the pool can
+/// shrink to zero and idle conns get reaped after `IDLE_TIMEOUT_SECS`.
+/// The backend PID is mirrored to `PostgresDatasource::session_pid` so
+/// `cancel()` can read it without locking the session.
+struct Session {
+    conn: PoolConnection<Postgres>,
+}
+
 pub struct PostgresDatasource {
-    pool: PgPool,
+    /// The pool itself behind a sync mutex so `:reset` can swap it
+    /// (close-and-rebuild) without making every `execute` / introspect
+    /// caller take an async lock. `PgPool` is internally `Arc<...>` so
+    /// cloning out is O(1); we never hold the guard across `.await`.
+    pool: StdMutex<PgPool>,
+    /// Connection URL kept around so `:reset` can rebuild the pool from
+    /// scratch.
+    url: String,
     log: Logger,
     // Backend PID of the pinned session connection, or 0 when no session
     // is currently held. Recorded once when the session is acquired and
@@ -32,32 +52,53 @@ pub struct PostgresDatasource {
     // in a transaction (callers can hit `pg_cancel_backend` to break out
     // of a stuck wait without first finding a running statement).
     session_pid: AtomicI32,
-    // Pinned connection held across `execute()` calls so BEGIN /
-    // COMMIT / ROLLBACK work the way the user expects. Lazily acquired
-    // and dropped by `reset_session()`. Introspection and `cancel()`
-    // still talk to the pool, never to this connection — they need to
-    // make progress while the session is busy.
-    session: Mutex<Option<PoolConnection<Postgres>>>,
+    /// Pinned connection held only while a transaction is open. Outside
+    /// a tx the slot is `None` and every `execute()` lands on a fresh
+    /// pool checkout that's released as soon as the statement finishes.
+    /// Introspection and `cancel()` always talk to the pool, never to
+    /// this connection — they need to make progress while the session
+    /// is busy.
+    session: Mutex<Option<Session>>,
+}
+
+fn build_pool(url: &str) -> Result<PgPool, sqlx::Error> {
+    PgPoolOptions::new()
+        .max_connections(DEFAULT_POOL_SIZE)
+        .min_connections(0)
+        .idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS)))
+        .connect_lazy(url)
 }
 
 impl PostgresDatasource {
     pub async fn connect(url: &str, log: Logger) -> DatasourceResult<Self> {
         log.info(TARGET, format!("connecting to {}", super::redact_url(url)));
-        let pool = PgPoolOptions::new()
-            .max_connections(DEFAULT_POOL_SIZE)
-            .connect(url)
-            .await
-            .map_err(|e| {
-                log.error(TARGET, format!("connect failed: {e}"));
-                DatasourceError::Connect(e.to_string())
-            })?;
+        let pool = build_pool(url).map_err(|e| {
+            log.error(TARGET, format!("pool build failed: {e}"));
+            DatasourceError::Connect(e.to_string())
+        })?;
+        // Verify connectivity up-front by checking out one conn and
+        // releasing it back to the pool. With `min_connections(0)` +
+        // `idle_timeout`, the conn drops shortly after; bad URLs still
+        // fail here instead of waiting until the first user query.
+        let verify_conn = pool.acquire().await.map_err(|e| {
+            log.error(TARGET, format!("connect verify failed: {e}"));
+            DatasourceError::Connect(e.to_string())
+        })?;
+        drop(verify_conn);
         log.info(TARGET, "connected");
         Ok(Self {
-            pool,
+            pool: StdMutex::new(pool),
+            url: url.to_string(),
             log,
             session_pid: AtomicI32::new(0),
             session: Mutex::new(None),
         })
+    }
+
+    /// Cheap clone of the current pool handle (`PgPool` is `Arc`-backed).
+    /// Never holds the std mutex across an `.await`.
+    fn pool(&self) -> PgPool {
+        self.pool.lock().expect("pool mutex poisoned").clone()
     }
 }
 
@@ -69,11 +110,12 @@ impl Datasource for PostgresDatasource {
         // unqualified objects land" — what users mean by "default schema".
         // `public` is the fallback if the search_path is empty (rare but
         // possible after `SET search_path = ''`).
+        let pool = self.pool();
         let row = sqlx::query(
             "SELECT current_database() AS catalog, \
                     COALESCE((current_schemas(false))[1], 'public') AS schema",
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&pool)
         .await
         .map_err(introspect_err)?;
         let catalog: String = row.try_get("catalog").map_err(introspect_err)?;
@@ -84,8 +126,9 @@ impl Datasource for PostgresDatasource {
     async fn introspect_catalogs(&self) -> DatasourceResult<Vec<CatalogInfo>> {
         // A Postgres connection is bound to a single database; expose it as the
         // sole catalog so the tree mirrors the rest of the drivers.
+        let pool = self.pool();
         let row = sqlx::query("SELECT current_database() AS name")
-            .fetch_one(&self.pool)
+            .fetch_one(&pool)
             .await
             .map_err(introspect_err)?;
         let name: String = row.try_get("name").map_err(introspect_err)?;
@@ -93,6 +136,7 @@ impl Datasource for PostgresDatasource {
     }
 
     async fn introspect_schemas(&self, _catalog: &str) -> DatasourceResult<Vec<SchemaInfo>> {
+        let pool = self.pool();
         let rows = sqlx::query(
             "SELECT nspname AS name FROM pg_namespace \
              WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
@@ -100,7 +144,7 @@ impl Datasource for PostgresDatasource {
                AND nspname NOT LIKE 'pg_toast_temp_%' \
              ORDER BY nspname",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await
         .map_err(introspect_err)?;
         Ok(rows
@@ -115,6 +159,7 @@ impl Datasource for PostgresDatasource {
         catalog: &str,
         schema: &str,
     ) -> DatasourceResult<Vec<TableInfo>> {
+        let pool = self.pool();
         let rows = sqlx::query(
             "SELECT table_name AS name, table_type AS kind \
              FROM information_schema.tables \
@@ -123,7 +168,7 @@ impl Datasource for PostgresDatasource {
         )
         .bind(catalog)
         .bind(schema)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await
         .map_err(introspect_err)?;
         Ok(rows
@@ -146,6 +191,7 @@ impl Datasource for PostgresDatasource {
         schema: &str,
         table: &str,
     ) -> DatasourceResult<Vec<ColumnInfo>> {
+        let pool = self.pool();
         let rows = sqlx::query(
             "SELECT column_name AS name, data_type AS type_name, is_nullable \
              FROM information_schema.columns \
@@ -155,7 +201,7 @@ impl Datasource for PostgresDatasource {
         .bind(catalog)
         .bind(schema)
         .bind(table)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await
         .map_err(introspect_err)?;
         Ok(rows
@@ -186,6 +232,7 @@ impl Datasource for PostgresDatasource {
     ) -> DatasourceResult<Vec<IndexInfo>> {
         // pg_indexes doesn't expose `indisunique`, so we walk pg_class/pg_index
         // directly to get the uniqueness flag in a single round-trip.
+        let pool = self.pool();
         let rows = sqlx::query(
             "SELECT i.relname AS name, ix.indisunique AS is_unique \
              FROM pg_class i \
@@ -197,7 +244,7 @@ impl Datasource for PostgresDatasource {
         )
         .bind(schema)
         .bind(table)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await
         .map_err(introspect_err)?;
         Ok(rows
@@ -218,8 +265,10 @@ impl Datasource for PostgresDatasource {
         let started = Instant::now();
 
         let mut guard = self.session.lock().await;
-        if guard.is_none() {
-            let mut conn = self.pool.acquire().await.map_err(|e| {
+        let was_in_tx = guard.is_some();
+        if !was_in_tx {
+            let pool = self.pool();
+            let mut conn = pool.acquire().await.map_err(|e| {
                 self.log.error(TARGET, format!("acquire failed: {e}"));
                 execute_err(e)
             })?;
@@ -232,13 +281,13 @@ impl Datasource for PostgresDatasource {
                     execute_err(e)
                 })?;
             self.session_pid.store(pid, Ordering::SeqCst);
-            *guard = Some(conn);
+            *guard = Some(Session { conn });
         }
-        let conn = guard.as_mut().expect("session conn populated above");
+        let session = guard.as_mut().expect("session populated above");
 
         let outcome: Result<QueryResult, sqlx::Error> =
             if super::is_row_returning(statement, &sqlparser::dialect::PostgreSqlDialect {}) {
-                match sqlx::query(statement).fetch_all(&mut **conn).await {
+                match sqlx::query(statement).fetch_all(&mut *session.conn).await {
                     Ok(rows) => {
                         let elapsed = started.elapsed();
                         let columns = build_columns(&rows);
@@ -257,7 +306,7 @@ impl Datasource for PostgresDatasource {
                     Err(e) => Err(e),
                 }
             } else {
-                match sqlx::query(statement).execute(&mut **conn).await {
+                match sqlx::query(statement).execute(&mut *session.conn).await {
                     Ok(outcome) => {
                         let elapsed = started.elapsed();
                         Ok(QueryResult {
@@ -272,6 +321,18 @@ impl Datasource for PostgresDatasource {
                 }
             };
 
+        // Compute the resulting in-tx flag and decide whether to keep
+        // the pinned conn. Keeping it across an open tx is mandatory;
+        // releasing it when no tx is open is what lets the pool shrink
+        // back to zero and reap idle conns after `IDLE_TIMEOUT_SECS`.
+        let effect = tx_effect(statement, &sqlparser::dialect::PostgreSqlDialect {});
+        let new_in_tx = match (was_in_tx, effect) {
+            (true, TxEffect::End) => false,
+            (true, _) => true,
+            (false, TxEffect::Begin) => true,
+            (false, _) => false,
+        };
+
         match outcome {
             Ok(r) => {
                 self.log.info(
@@ -281,6 +342,10 @@ impl Datasource for PostgresDatasource {
                         None => format!("execute ok: {} rows in {:?}", r.rows.len(), r.elapsed),
                     },
                 );
+                if !new_in_tx {
+                    *guard = None;
+                    self.session_pid.store(0, Ordering::SeqCst);
+                }
                 Ok(r)
             }
             Err(e) => {
@@ -290,6 +355,12 @@ impl Datasource for PostgresDatasource {
                     self.session_pid.store(0, Ordering::SeqCst);
                     self.log
                         .warn(TARGET, "session conn dropped after connection loss");
+                } else if !was_in_tx {
+                    // No tx to preserve — failure means the session we
+                    // just acquired serves no purpose. Release it so
+                    // the pool can reap the conn.
+                    *guard = None;
+                    self.session_pid.store(0, Ordering::SeqCst);
                 }
                 Err(execute_err(e))
             }
@@ -307,9 +378,10 @@ impl Datasource for PostgresDatasource {
         // A separate pool connection is used so the cancel doesn't wait on
         // the busy backend. `pg_cancel_backend` returns false if the target
         // PID is no longer running anything — best-effort by design.
+        let pool = self.pool();
         let signaled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
             .bind(pid)
-            .fetch_one(&self.pool)
+            .fetch_one(&pool)
             .await
             .map_err(|e| {
                 self.log.warn(TARGET, format!("cancel failed: {e}"));
@@ -323,22 +395,36 @@ impl Datasource for PostgresDatasource {
     }
 
     async fn reset_session(&self) -> DatasourceResult<()> {
+        // Drop the pinned session conn first (with an explicit ROLLBACK
+        // so the backend isn't left holding an aborted tx).
         let mut guard = self.session.lock().await;
-        if let Some(mut conn) = guard.take() {
-            // Roll back any in-progress (or aborted) transaction
-            // before the conn returns to the pool. Postgres leaves a
-            // tx aborted after a cancel, and a pooled hand-off without
-            // ROLLBACK would surface "current transaction is aborted"
-            // on the next checkout from a different caller. Failure
-            // is logged but swallowed — the session is being discarded
-            // and a fresh acquire will paper over a poisoned conn.
-            if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+        if let Some(mut session) = guard.take() {
+            if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *session.conn).await {
                 self.log.warn(TARGET, format!("reset rollback: {e}"));
             }
-            drop(conn);
+            drop(session);
             self.log.info(TARGET, "session reset");
         }
         self.session_pid.store(0, Ordering::SeqCst);
+        drop(guard);
+
+        // Force-close all pool connections by swapping in a fresh lazy
+        // pool. Closing the old pool waits for in-flight queries to
+        // return their conns, then disconnects them — equivalent to a
+        // hard reset of every backend this datasource was talking to.
+        let new_pool = match build_pool(&self.url) {
+            Ok(p) => p,
+            Err(e) => {
+                self.log.error(TARGET, format!("pool rebuild failed: {e}"));
+                return Err(DatasourceError::Execute(e.to_string()));
+            }
+        };
+        let old_pool = {
+            let mut pool_guard = self.pool.lock().expect("pool mutex poisoned");
+            std::mem::replace(&mut *pool_guard, new_pool)
+        };
+        old_pool.close().await;
+        self.log.info(TARGET, "pool drained");
         Ok(())
     }
 }

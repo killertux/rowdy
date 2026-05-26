@@ -11,7 +11,7 @@ use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
-use crate::datasource::sql::decode_to;
+use crate::datasource::sql::{TxEffect, decode_to, tx_effect};
 use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
 use crate::log::Logger;
 
@@ -163,6 +163,14 @@ impl Datasource for SqliteDatasource {
             .collect())
     }
 
+    // SQLite intentionally keeps the pool as-is (no idle-timeout) — for
+    // `sqlite::memory:` the database lives in the connection, so reaping
+    // idle conns would drop the data. The on-network drivers (postgres,
+    // mysql) configure `min_connections(0)+idle_timeout`; sqlite holds
+    // its conns indefinitely. Within that constraint we still release
+    // the pinned session conn after any non-transactional statement so
+    // file-backed sqlite users at least don't sit on a single pinned
+    // checkout forever.
     async fn execute(&self, statement: &str) -> DatasourceResult<QueryResult> {
         self.log.info(
             TARGET,
@@ -171,7 +179,8 @@ impl Datasource for SqliteDatasource {
         let started = Instant::now();
 
         let mut guard = self.session.lock().await;
-        if guard.is_none() {
+        let was_in_tx = guard.is_some();
+        if !was_in_tx {
             let conn = self.pool.acquire().await.map_err(|e| {
                 self.log.error(TARGET, format!("acquire failed: {e}"));
                 execute_err(e)
@@ -216,6 +225,14 @@ impl Datasource for SqliteDatasource {
                 }
             };
 
+        let effect = tx_effect(statement, &sqlparser::dialect::SQLiteDialect {});
+        let new_in_tx = match (was_in_tx, effect) {
+            (true, TxEffect::End) => false,
+            (true, _) => true,
+            (false, TxEffect::Begin) => true,
+            (false, _) => false,
+        };
+
         match outcome {
             Ok(r) => {
                 self.log.info(
@@ -225,6 +242,9 @@ impl Datasource for SqliteDatasource {
                         None => format!("execute ok: {} rows in {:?}", r.rows.len(), r.elapsed),
                     },
                 );
+                if !new_in_tx {
+                    *guard = None;
+                }
                 Ok(r)
             }
             Err(e) => {
@@ -237,6 +257,10 @@ impl Datasource for SqliteDatasource {
                     *guard = None;
                     self.log
                         .warn(TARGET, "session conn dropped after connection loss");
+                } else if !was_in_tx {
+                    // Nothing to preserve — release so the pool gets the
+                    // conn back instead of pinning it across a failure.
+                    *guard = None;
                 }
                 Err(execute_err(e))
             }

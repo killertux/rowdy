@@ -221,6 +221,33 @@ pub fn replace_selection_text(state: &mut EditorState, replacement: &str) -> boo
     true
 }
 
+/// Insert `text` at the current cursor position. Splits the buffer at
+/// the cursor, splices in `text`, and reparses through `Lines::from`
+/// so embedded newlines become real rows. The cursor lands at the
+/// end of the inserted text. Selection is dropped; mode is left at
+/// Normal so the user can immediately keep navigating.
+///
+/// edtui's undo stack only tracks edits driven through its own action
+/// handler; this primitive mutates `lines` directly, so a single `u`
+/// won't unwind a `:load`. Same caveat as `replace_buffer_text`.
+pub fn insert_text_at_cursor(state: &mut EditorState, text: &str) {
+    let chars: Vec<char> = state.lines.flatten(&Some('\n'));
+    let cursor_off = cursor_to_offset(state).min(chars.len());
+
+    let mut next = String::with_capacity(chars.len() + text.len());
+    next.extend(chars[..cursor_off].iter());
+    next.push_str(text);
+    next.extend(chars[cursor_off..].iter());
+
+    state.lines = Lines::from(next.as_str());
+    state.selection = None;
+    state.mode = EditorMode::Normal;
+
+    let new_chars: Vec<char> = state.lines.flatten(&Some('\n'));
+    let after_off = (cursor_off + text.chars().count()).min(new_chars.len());
+    state.cursor = clamp_index(&state.lines, offset_to_index(&new_chars, after_off));
+}
+
 pub fn cursor_to_offset(state: &EditorState) -> usize {
     let mut offset = 0;
     for row in 0..state.cursor.row {
@@ -542,6 +569,27 @@ mod tests {
         let state = state_with("SELECT * FROM t WHERE x = ';' AND y = 1;", 0, 35);
         let cur = current_statement_with_cursor(&state);
         assert_eq!(cur.statement, "SELECT * FROM t WHERE x = ';' AND y = 1");
+    }
+
+    #[test]
+    fn insert_text_at_cursor_splices_inline() {
+        let mut state = EditorState::new(Lines::from("AB"));
+        state.cursor = Index2::new(0, 1);
+        insert_text_at_cursor(&mut state, "x");
+        assert_eq!(flatten(&state), "AxB");
+        // Cursor sits at the end of the inserted text.
+        assert_eq!(state.cursor, Index2::new(0, 2));
+    }
+
+    #[test]
+    fn insert_text_at_cursor_handles_multiline_payload() {
+        let mut state = EditorState::new(Lines::from("ab"));
+        state.cursor = Index2::new(0, 1);
+        insert_text_at_cursor(&mut state, "X\nY");
+        // a + "X\nY" + b → "aX\nYb"
+        assert_eq!(flatten(&state), "aX\nYb");
+        // Cursor lands right after the inserted text (row 1, col 1 = after Y).
+        assert_eq!(state.cursor, Index2::new(1, 1));
     }
 
     #[test]

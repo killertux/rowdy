@@ -66,6 +66,14 @@ impl Widget for BottomBar<'_> {
                 render_tool_confirm(name, args_json, area, buf, &self.app.theme);
                 return;
             }
+            Some(Overlay::ConfirmSaveOverwrite { name, .. }) => {
+                render_save_overwrite(name, area, buf, &self.app.theme);
+                return;
+            }
+            Some(Overlay::SavedQueryPicker(_)) => {
+                // Picker owns its own footer line.
+                return;
+            }
             None => {}
         }
         match &self.app.screen {
@@ -232,6 +240,24 @@ fn summarise_tool_args(name: &str, args_json: &str) -> String {
         }
         _ => name.to_string(),
     }
+}
+
+fn render_save_overwrite(name: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    let line = Line::from(vec![
+        Span::styled("⚠ ", Style::default().fg(theme.status_error).bg(theme.bg)),
+        Span::styled(
+            format!("overwrite saved query {name:?}?"),
+            Style::default()
+                .fg(theme.fg)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  y/Enter to overwrite · n/Esc to cancel",
+            Style::default().fg(theme.fg_dim).bg(theme.bg),
+        ),
+    ]);
+    line.render(area, buf);
 }
 
 fn paint_background(area: Rect, buf: &mut Buffer, theme: &Theme) {

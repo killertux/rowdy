@@ -755,6 +755,18 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 keys: ":update",
                 desc: "Check GitHub for a new release (manual; bypasses 24h throttle)",
             },
+            HelpEntry {
+                keys: ":save <name>",
+                desc: "Save selection (or statement under cursor) as a named query",
+            },
+            HelpEntry {
+                keys: ":load <name>",
+                desc: "Insert a saved query at the cursor",
+            },
+            HelpEntry {
+                keys: ":run-saved [name]",
+                desc: "Run a saved query (bare form opens a picker)",
+            },
         ],
     },
 ];
