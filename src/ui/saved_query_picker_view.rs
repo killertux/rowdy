@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::state::saved_query_picker::SavedQueryPickerState;
 use crate::ui::theme::Theme;
@@ -18,6 +18,18 @@ impl Widget for SavedQueryPicker<'_> {
         let Some(box_area) = inner_box(area, self.state.entries.len()) else {
             return;
         };
+        // Wipe + repaint the box cells so the editor underneath doesn't
+        // show through. Block::style only sets style on inner cells, it
+        // doesn't overwrite the glyphs already there.
+        Clear.render(box_area, buf);
+        for y in box_area.y..box_area.y + box_area.height {
+            for x in box_area.x..box_area.x + box_area.width {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_bg(self.theme.bg);
+                    cell.set_fg(self.theme.fg);
+                }
+            }
+        }
         let title = match self.connection {
             Some(c) => format!(" run saved query — {c} "),
             None => " run saved query ".to_string(),
