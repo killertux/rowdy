@@ -308,6 +308,60 @@ fn contains_where_keyword(sql: &str) -> bool {
     false
 }
 
+/// Effect of executing `sql` on the connection's transaction state.
+///
+/// Used by the per-driver `execute()` paths to decide whether to keep
+/// the pinned session connection (we're inside an open transaction so
+/// subsequent statements must hit the same backend) or release it back
+/// to the pool (no transaction is open — the next query can grab any
+/// pool conn). Only the first parsed statement is inspected: the worker
+/// always splits multi-statement input via [`split_statements`] before
+/// calling `execute`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TxEffect {
+    /// `BEGIN` / `START TRANSACTION` — opens a transaction.
+    Begin,
+    /// `COMMIT` / `ROLLBACK` — closes any open transaction.
+    End,
+    /// Anything else (DDL, DML, SAVEPOINT, …) — leaves tx state where it was.
+    None,
+}
+
+/// Inspect `sql` and classify its effect on transaction state. Mirrors
+/// [`is_row_returning`]'s AST-first / keyword-fallback strategy so
+/// dialect quirks don't slip past us. The keyword fallback is permissive
+/// on the "close tx" side so an unparseable `ROLLBACK foo` still
+/// releases the session — staying pinned across a half-parsed close is
+/// the worse error (would burn a backend).
+pub(crate) fn tx_effect(sql: &str, dialect: &dyn sqlparser::dialect::Dialect) -> TxEffect {
+    use sqlparser::ast::Statement;
+    use sqlparser::parser::Parser;
+
+    if let Ok(stmts) = Parser::parse_sql(dialect, sql)
+        && let Some(first) = stmts.first()
+    {
+        return match first {
+            Statement::StartTransaction { .. } => TxEffect::Begin,
+            Statement::Commit { .. } | Statement::Rollback { .. } => TxEffect::End,
+            _ => TxEffect::None,
+        };
+    }
+    classify_tx_keyword(sql)
+}
+
+fn classify_tx_keyword(sql: &str) -> TxEffect {
+    let stripped = strip_leading_comments_and_ws(sql);
+    let head: String = stripped
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    match head.to_ascii_uppercase().as_str() {
+        "BEGIN" | "START" => TxEffect::Begin,
+        "COMMIT" | "END" | "ROLLBACK" => TxEffect::End,
+        _ => TxEffect::None,
+    }
+}
+
 /// Hides the password between `://user:` and `@host` so it doesn't end up in
 /// the log file. Other URL forms are returned untouched.
 pub(crate) fn redact_url(url: &str) -> String {
@@ -517,6 +571,35 @@ mod tests {
             requires_destructive_confirmation(sql, &d),
             Some("DELETE without WHERE")
         );
+    }
+
+    #[test]
+    fn tx_effect_recognises_begin_commit_rollback() {
+        let d = PostgreSqlDialect {};
+        assert_eq!(tx_effect("BEGIN", &d), TxEffect::Begin);
+        assert_eq!(tx_effect("START TRANSACTION", &d), TxEffect::Begin);
+        assert_eq!(tx_effect("COMMIT", &d), TxEffect::End);
+        assert_eq!(tx_effect("ROLLBACK", &d), TxEffect::End);
+        assert_eq!(tx_effect("SELECT 1", &d), TxEffect::None);
+        assert_eq!(tx_effect("INSERT INTO t VALUES (1)", &d), TxEffect::None);
+    }
+
+    #[test]
+    fn tx_effect_keyword_fallback() {
+        // Unparseable input — fallback still classifies the leading kw.
+        let d = PostgreSqlDialect {};
+        assert_eq!(tx_effect("BEGIN garble!!", &d), TxEffect::Begin);
+        assert_eq!(tx_effect("ROLLBACK garble!!", &d), TxEffect::End);
+        assert_eq!(tx_effect("garble!!", &d), TxEffect::None);
+    }
+
+    #[test]
+    fn tx_effect_handles_sqlite_savepoint_as_none() {
+        // SAVEPOINT inside a tx doesn't change the in-tx flag — it's
+        // a nested marker, not a fresh BEGIN.
+        let d = SQLiteDialect {};
+        assert_eq!(tx_effect("SAVEPOINT sp1", &d), TxEffect::None);
+        assert_eq!(tx_effect("RELEASE SAVEPOINT sp1", &d), TxEffect::None);
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod overlay;
 pub mod params_prompt;
 pub mod results;
 pub mod right_panel;
+pub mod saved_query_picker;
 pub mod schema;
 pub mod screen;
 pub mod status;

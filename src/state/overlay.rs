@@ -10,6 +10,7 @@
 use crate::state::command::CommandBuffer;
 use crate::state::llm_settings::LlmSettingsState;
 use crate::state::params_prompt::ParamsPromptState;
+use crate::state::saved_query_picker::SavedQueryPickerState;
 
 /// The layer that floats over the current [`crate::state::screen::Screen`].
 //
@@ -67,6 +68,14 @@ pub enum Overlay {
         name: String,
         args_json: String,
     },
+    /// `:save <name>` collided with an existing entry. Enter overwrites
+    /// the file with `sql`; Esc cancels and leaves the previous entry
+    /// untouched.
+    ConfirmSaveOverwrite { name: String, sql: String },
+    /// Modal list of saved query names — opens via bare `:load` /
+    /// `:run-saved`. `purpose` decides whether Enter inserts the body
+    /// at the cursor or dispatches it through the query pipeline.
+    SavedQueryPicker(SavedQueryPickerState),
 }
 
 /// Why the confirm-run overlay opened. Drives the headline at the top

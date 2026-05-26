@@ -10,6 +10,7 @@ pub mod help_view;
 pub mod llm_settings_view;
 pub mod params_prompt_view;
 pub mod results_view;
+pub mod saved_query_picker_view;
 pub mod schema_view;
 pub mod theme;
 pub mod theme_picker_view;
@@ -36,6 +37,7 @@ use help_view::HelpPopover;
 use llm_settings_view::LlmSettingsForm;
 use params_prompt_view::ParamsPrompt;
 use results_view::{ExpandedResult, InlineResult};
+use saved_query_picker_view::SavedQueryPicker;
 use schema_view::SchemaPane;
 
 const INLINE_RESULT_HEIGHT: u16 = 10;
@@ -73,6 +75,14 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     if let Some(Overlay::ParamsPrompt(state)) = &app.overlay {
         let widget = ParamsPrompt {
             state,
+            theme: &app.theme,
+        };
+        frame.render_widget(widget, area);
+    }
+    if let Some(Overlay::SavedQueryPicker(state)) = &app.overlay {
+        let widget = SavedQueryPicker {
+            state,
+            connection: app.active_connection.as_deref(),
             theme: &app.theme,
         };
         frame.render_widget(widget, area);

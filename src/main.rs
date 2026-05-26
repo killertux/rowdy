@@ -15,6 +15,7 @@ mod keybindings;
 mod llm;
 mod log;
 mod param_history;
+mod saved_queries;
 mod session;
 mod sql_infer;
 mod sql_quote;
