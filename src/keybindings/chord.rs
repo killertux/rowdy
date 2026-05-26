@@ -29,6 +29,62 @@ impl KeyChord {
             mods: KeyModifiers::NONE,
         }
     }
+
+    /// Compact human-readable rendering for popovers and the leader
+    /// hints overlay. Mirrors the parser's accepted notation: bare
+    /// printable characters appear verbatim (`r`, `S`), named keys
+    /// land inside angle brackets (`<Esc>`, `<Tab>`), and modifiers
+    /// prefix the form (`<C-w>`, `<C-S-r>`).
+    pub fn human(&self) -> String {
+        let mut prefix = String::new();
+        if self.mods.contains(KeyModifiers::CONTROL) {
+            prefix.push_str("C-");
+        }
+        if self.mods.contains(KeyModifiers::ALT) {
+            prefix.push_str("A-");
+        }
+        if self.mods.contains(KeyModifiers::SHIFT) {
+            prefix.push_str("S-");
+        }
+        let body = match self.code {
+            KeyCode::Char(' ') => "<Space>".to_string(),
+            KeyCode::Char(c) if prefix.is_empty() => return c.to_string(),
+            KeyCode::Char(c) => return format!("<{prefix}{c}>"),
+            KeyCode::Esc => "<Esc>".to_string(),
+            KeyCode::Enter => "<Enter>".to_string(),
+            KeyCode::Tab => "<Tab>".to_string(),
+            KeyCode::BackTab => "<BackTab>".to_string(),
+            KeyCode::Backspace => "<Backspace>".to_string(),
+            KeyCode::Up => "<Up>".to_string(),
+            KeyCode::Down => "<Down>".to_string(),
+            KeyCode::Left => "<Left>".to_string(),
+            KeyCode::Right => "<Right>".to_string(),
+            KeyCode::Home => "<Home>".to_string(),
+            KeyCode::End => "<End>".to_string(),
+            KeyCode::PageUp => "<PageUp>".to_string(),
+            KeyCode::PageDown => "<PageDown>".to_string(),
+            other => format!("<{other:?}>"),
+        };
+        if prefix.is_empty() {
+            body
+        } else {
+            // body already starts with `<` and ends with `>`; splice
+            // the modifier prefix between the opening bracket and the
+            // key name (e.g. `<Tab>` + `S-` → `<S-Tab>`).
+            let inner = body
+                .strip_prefix('<')
+                .and_then(|s| s.strip_suffix('>'))
+                .unwrap_or(&body);
+            format!("<{prefix}{inner}>")
+        }
+    }
+}
+
+impl Chord {
+    /// Compact human-readable join of all steps for popover labels.
+    pub fn human(&self) -> String {
+        self.0.iter().map(|kc| kc.human()).collect::<String>()
+    }
 }
 
 /// One- or two-step chord. Stored as a Vec for ergonomics; bounded to
