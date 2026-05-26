@@ -7,6 +7,7 @@ pub mod conn_form_view;
 pub mod conn_list_view;
 pub mod editor_view;
 pub mod help_view;
+pub mod leader_hints_view;
 pub mod llm_settings_view;
 pub mod params_prompt_view;
 pub mod results_view;
@@ -34,6 +35,7 @@ use conn_form_view::ConnForm;
 use conn_list_view::ConnList;
 use editor_view::EditorPane;
 use help_view::HelpPopover;
+use leader_hints_view::LeaderHints;
 use llm_settings_view::LlmSettingsForm;
 use params_prompt_view::ParamsPrompt;
 use results_view::{ExpandedResult, InlineResult};
@@ -83,6 +85,17 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         let widget = SavedQueryPicker {
             state,
             connection: app.active_connection.as_deref(),
+            theme: &app.theme,
+        };
+        frame.render_widget(widget, area);
+    }
+    // Which-key style leader hints paint last so they sit above any
+    // other surface. Only fires when no full-screen overlay is owning
+    // the whole frame (e.g. `:help` would otherwise be obscured).
+    if app.overlay.is_none() && app.pending != crate::state::focus::PendingChord::None {
+        let widget = LeaderHints {
+            pending: app.pending,
+            keymap: &app.keymap,
             theme: &app.theme,
         };
         frame.render_widget(widget, area);
