@@ -219,4 +219,3 @@ fn inner_box(area: Rect, hints: &[Hint]) -> Option<Rect> {
         height,
     })
 }
-
