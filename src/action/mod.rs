@@ -15,6 +15,7 @@ mod results;
 mod saved_queries;
 mod schema;
 mod session;
+mod substitute;
 mod update;
 
 pub use saved_queries::SavedQueryAction;
@@ -117,6 +118,9 @@ pub enum Action {
     /// any) or the statement under the cursor; `All` rewrites the
     /// whole buffer.
     FormatEditor(FormatScope),
+    /// A keypress in the interactive `:s///c` confirm prompt. See
+    /// [`SubstituteConfirmAction`].
+    SubstituteConfirm(SubstituteConfirmAction),
     /// Autocomplete popover lifecycle and navigation. See
     /// `CompletionAction` for the sub-variants.
     Completion(CompletionAction),
@@ -423,6 +427,22 @@ pub enum ResultNavAction {
     Bottom,
 }
 
+/// Keys handled by the interactive `:s///c` confirm prompt, mirroring vim's
+/// substitute-confirm vocabulary.
+#[derive(Debug, Clone, Copy)]
+pub enum SubstituteConfirmAction {
+    /// `y` — replace this match and advance.
+    Yes,
+    /// `n` — skip this match and advance.
+    No,
+    /// `a` — replace this and every remaining match.
+    All,
+    /// `l` — replace this match, then stop ("last").
+    Last,
+    /// `q` / `Esc` — stop without replacing the current match.
+    Quit,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ResultColumnAction {
     /// Swap the focused column with the visible column to its left.
@@ -442,7 +462,10 @@ pub fn apply(app: &mut App, action: Action) {
         Action::ResizeSchema(delta) => schema::resize_schema(app, delta),
         Action::SetPendingChord(c) => app.pending = c,
         Action::EditorEvent(ev) => {
-            app.editor.events.on_event(ev, &mut app.editor.state);
+            app.editor
+                .events
+                .on_event(ev.clone(), &mut app.editor.state);
+            refresh_search_highlights(app, &ev);
             if app.completion.is_some() {
                 completion::refresh(app);
             } else {
@@ -450,7 +473,18 @@ pub fn apply(app: &mut App, action: Action) {
             }
             schedule_session_save(app);
         }
-        Action::OpenCommand => app.overlay = Some(Overlay::Command(CommandBuffer::default())),
+        Action::OpenCommand => {
+            // Pressing `:` in Visual mode seeds the line with `'<,'>`, so a
+            // range substitute over the selection is one keystroke away.
+            let buf = if app.focus == Focus::Editor
+                && app.editor.editor_mode() == edtui::EditorMode::Visual
+            {
+                CommandBuffer::with_text("'<,'>")
+            } else {
+                CommandBuffer::default()
+            };
+            app.overlay = Some(Overlay::Command(buf));
+        }
         Action::Command(cmd) => apply_command(app, cmd),
         Action::Schema(s) => schema::apply_schema(app, s),
         Action::PrepareConfirmRun => query::prepare_confirm_run(app),
@@ -490,6 +524,7 @@ pub fn apply(app: &mut App, action: Action) {
         Action::CloseHelp => app.overlay = None,
         Action::HelpScroll(axis, delta) => apply_help_scroll(app, axis, delta),
         Action::FormatEditor(scope) => format_editor(app, scope),
+        Action::SubstituteConfirm(a) => substitute::apply_confirm(app, a),
         Action::Completion(c) => completion::apply(app, c),
         Action::ReloadSchemaCache => schema::reload_schema_cache(app),
         Action::ResetSession => session::reset_session(app),
@@ -798,6 +833,7 @@ fn dispatch_command(app: &mut App, cmd: command::Command) {
         C::Load(name) => saved_queries::apply_load(app, name),
         C::RunSaved(Some(name)) => saved_queries::apply_run_saved(app, name),
         C::RunSaved(None) => saved_queries::open_run_picker(app),
+        C::Substitute(sub) => substitute::run(app, sub),
     }
 }
 
@@ -1290,6 +1326,56 @@ fn format_buffer(app: &mut App) {
         msg: "formatted buffer".into(),
     };
     schedule_session_save(app);
+}
+
+/// Keep `/`-search match highlights in sync after an editor event. Owns only
+/// the `Search` highlight lifecycle — confirm-run and `:s///c` highlights are
+/// managed by their own overlays, so this bails when another owner holds the
+/// highlight vector.
+fn refresh_search_highlights(app: &mut App, ev: &CtEvent) {
+    use crate::state::editor::HighlightOwner;
+    use ratatui::crossterm::event::KeyCode;
+
+    if !matches!(
+        app.editor.highlight_owner,
+        None | Some(HighlightOwner::Search)
+    ) {
+        return;
+    }
+
+    let in_search = app.editor.editor_mode() == edtui::EditorMode::Search;
+    let pattern = app.editor.state.search_pattern();
+
+    if !in_search && app.editor.highlight_owner == Some(HighlightOwner::Search) {
+        // Leaving Search: edtui's `StopSearch` (Esc) clears the pattern; a
+        // plain Esc in Normal mode also acts as `:nohlsearch`.
+        let plain_esc = matches!(
+            ev,
+            CtEvent::Key(k) if k.code == KeyCode::Esc && k.modifiers.is_empty()
+        );
+        if pattern.is_empty() || plain_esc {
+            app.editor.state.clear_highlights();
+            app.editor.highlight_owner = None;
+            return;
+        }
+    } else if !in_search {
+        // Not searching and we don't own the highlights — nothing to do.
+        return;
+    }
+
+    let style = ratatui::style::Style::default().bg(app.theme.selection_bg);
+    let spans = crate::state::editor::search_match_spans(&app.editor.state.lines, &pattern);
+    if spans.is_empty() {
+        app.editor.state.clear_highlights();
+        app.editor.highlight_owner = None;
+        return;
+    }
+    let highlights = spans
+        .into_iter()
+        .map(|(start, end)| edtui::Highlight::new(start, end, style))
+        .collect();
+    app.editor.state.set_highlights(highlights);
+    app.editor.highlight_owner = Some(HighlightOwner::Search);
 }
 
 fn format_sql(sql: &str) -> String {

@@ -16,4 +16,5 @@ pub mod saved_query_picker;
 pub mod schema;
 pub mod screen;
 pub mod status;
+pub mod substitute_confirm;
 pub mod theme_picker;

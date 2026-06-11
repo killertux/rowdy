@@ -11,6 +11,7 @@ use crate::state::command::CommandBuffer;
 use crate::state::llm_settings::LlmSettingsState;
 use crate::state::params_prompt::ParamsPromptState;
 use crate::state::saved_query_picker::SavedQueryPickerState;
+use crate::state::substitute_confirm::ConfirmSubstituteState;
 
 /// The layer that floats over the current [`crate::state::screen::Screen`].
 //
@@ -76,6 +77,10 @@ pub enum Overlay {
     /// `:run-saved`. `purpose` decides whether Enter inserts the body
     /// at the cursor or dispatches it through the query pipeline.
     SavedQueryPicker(SavedQueryPickerState),
+    /// Interactive `:s///c` prompt. Each keypress (`y`/`n`/`a`/`l`/`q`)
+    /// drives the live match scan in [`ConfirmSubstituteState`]; the
+    /// editor shows the current match highlighted underneath.
+    ConfirmSubstitute(ConfirmSubstituteState),
 }
 
 /// Why the confirm-run overlay opened. Drives the headline at the top
