@@ -533,6 +533,43 @@ const HELP_SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
+        title: "Search & replace (editor)",
+        entries: &[
+            HelpEntry {
+                keys: "/text",
+                desc: "Search forward; Enter keeps the pattern, Esc cancels",
+            },
+            HelpEntry {
+                keys: "n / N",
+                desc: "Next / previous match (matches stay highlighted)",
+            },
+            HelpEntry {
+                keys: "Esc",
+                desc: "In Normal mode, clear search highlights (like :nohlsearch)",
+            },
+            HelpEntry {
+                keys: ":s/old/new/",
+                desc: "Substitute on the current line (flags: g all, i ignore-case, c confirm)",
+            },
+            HelpEntry {
+                keys: ":%s/old/new/g",
+                desc: "Substitute across the whole buffer; :3,7s/… for a line range",
+            },
+            HelpEntry {
+                keys: ":'<,'>s/old/new/",
+                desc: "Over the visual selection (pressing : in Visual pre-fills the range)",
+            },
+            HelpEntry {
+                keys: "y / n / a / l / q",
+                desc: "With the c flag: replace / skip / all / last / stop at each match",
+            },
+            HelpEntry {
+                keys: "(regex)",
+                desc: "Rust regex; replacement $1/${name} (also \\1, & whole match); :s//new/ reuses last pattern; any punct separator e.g. :s#a#b#",
+            },
+        ],
+    },
+    HelpSection {
         title: "Auto-update prompt",
         entries: &[
             HelpEntry {

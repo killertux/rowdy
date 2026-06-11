@@ -1,3 +1,4 @@
+use edtui::actions::{Execute, RemoveChar};
 use edtui::{EditorEventHandler, EditorMode, EditorState, Highlight, Index2, Lines};
 use ratatui::style::{Color, Style};
 use sqlparser::dialect::GenericDialect;
@@ -6,6 +7,23 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 pub struct EditorPanel {
     pub state: EditorState,
     pub events: EditorEventHandler,
+    /// Which feature currently owns `state.highlights`. edtui's highlight
+    /// vector is shared, so the `/`-search refresh, the confirm-run prompt,
+    /// and `:s` confirm must not clear each other's spans — each tags its
+    /// ownership here and only touches the highlights when it owns them.
+    pub highlight_owner: Option<HighlightOwner>,
+}
+
+/// Tags the current owner of `EditorState::highlights`. See
+/// [`EditorPanel::highlight_owner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HighlightOwner {
+    /// `/` search match highlights.
+    Search,
+    /// The "run this statement?" confirm prompt highlight.
+    ConfirmRun,
+    /// The current match during interactive `:s///c`.
+    Substitute,
 }
 
 impl EditorPanel {
@@ -14,6 +32,7 @@ impl EditorPanel {
         Self {
             state: EditorState::new(Lines::from(initial)),
             events: EditorEventHandler::default(),
+            highlight_owner: None,
         }
     }
 
@@ -248,6 +267,57 @@ pub fn insert_text_at_cursor(state: &mut EditorState, text: &str) {
     state.cursor = clamp_index(&state.lines, offset_to_index(&new_chars, after_off));
 }
 
+/// Push the current buffer/cursor onto edtui's undo stack without changing
+/// anything. `RemoveChar(0)` runs `state.capture()` (which is `pub(crate)`)
+/// and then loops zero times, so it is a pure snapshot. Call this once before
+/// a programmatic mutation of `state.lines` and a single `u` will unwind the
+/// whole edit. Pinned by `undo_snapshot_round_trips` below — if a future
+/// edtui drops the capture-before-loop ordering, that test fails.
+pub fn capture_undo(state: &mut EditorState) {
+    RemoveChar(0).execute(state);
+}
+
+/// Replace the buffer with `text` and park the cursor at `(row, col)`
+/// (clamped to the new buffer), dropping any selection and returning to
+/// Normal mode. Used by `:s` so the cursor lands on the last changed line,
+/// vim-style.
+pub fn set_buffer_with_cursor(state: &mut EditorState, text: &str, row: usize, col: usize) {
+    state.lines = Lines::from(text);
+    state.selection = None;
+    state.mode = EditorMode::Normal;
+    state.cursor = clamp_index(&state.lines, Index2::new(row, col));
+}
+
+/// Plain-text (case-sensitive) occurrences of `pattern` in the buffer, as
+/// inclusive `(start, end)` index pairs suitable for `Highlight::new`.
+/// Matches are found per-row (never across a `\n`), mirroring edtui's own
+/// `/` search semantics. An empty pattern yields no spans.
+pub fn search_match_spans(lines: &Lines, pattern: &str) -> Vec<(Index2, Index2)> {
+    if pattern.is_empty() {
+        return Vec::new();
+    }
+    let pat: Vec<char> = pattern.chars().collect();
+    let text: String = lines.flatten(&Some('\n')).into_iter().collect();
+    let mut spans = Vec::new();
+    for (row, line) in text.split('\n').enumerate() {
+        let cols: Vec<char> = line.chars().collect();
+        if cols.len() < pat.len() {
+            continue;
+        }
+        let mut col = 0;
+        while col + pat.len() <= cols.len() {
+            if cols[col..col + pat.len()] == pat[..] {
+                let end = col + pat.len() - 1;
+                spans.push((Index2::new(row, col), Index2::new(row, end)));
+                col += pat.len();
+            } else {
+                col += 1;
+            }
+        }
+    }
+    spans
+}
+
 pub fn cursor_to_offset(state: &EditorState) -> usize {
     let mut offset = 0;
     for row in 0..state.cursor.row {
@@ -410,6 +480,45 @@ mod tests {
         assert_eq!(flatten(&state), "fresh\ntext");
         assert_eq!(state.cursor, Index2::new(0, 0));
         assert!(state.selection.is_none());
+    }
+
+    #[test]
+    fn undo_snapshot_round_trips() {
+        // Pins the `RemoveChar(0)` capture trick: a snapshot then a direct
+        // `lines` mutation must be undoable in one `u`.
+        let mut state = EditorState::new(Lines::from("before"));
+        state.cursor = Index2::new(0, 2);
+        capture_undo(&mut state);
+        set_buffer_with_cursor(&mut state, "after", 0, 0);
+        assert_eq!(flatten(&state), "after");
+        state.undo();
+        assert_eq!(flatten(&state), "before");
+        assert_eq!(state.cursor, Index2::new(0, 2));
+    }
+
+    #[test]
+    fn search_match_spans_finds_all_per_row() {
+        let lines = Lines::from("foo foo\nbar\nfoofoo");
+        let spans = search_match_spans(&lines, "foo");
+        assert_eq!(
+            spans,
+            vec![
+                (Index2::new(0, 0), Index2::new(0, 2)),
+                (Index2::new(0, 4), Index2::new(0, 6)),
+                (Index2::new(2, 0), Index2::new(2, 2)),
+                (Index2::new(2, 3), Index2::new(2, 5)),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_match_spans_utf8_and_empty() {
+        assert!(search_match_spans(&Lines::from("anything"), "").is_empty());
+        let lines = Lines::from("café résumé");
+        let spans = search_match_spans(&lines, "é");
+        assert_eq!(spans[0], (Index2::new(0, 3), Index2::new(0, 3)));
+        assert_eq!(spans[1], (Index2::new(0, 6), Index2::new(0, 6)));
+        assert_eq!(spans[2], (Index2::new(0, 10), Index2::new(0, 10)));
     }
 
     #[test]

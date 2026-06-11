@@ -21,6 +21,7 @@ mod sql_infer;
 mod sql_quote;
 mod state;
 mod subcommands;
+mod substitute;
 mod terminal;
 mod ui;
 mod update;

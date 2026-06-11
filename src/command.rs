@@ -68,6 +68,10 @@ pub enum Command {
     /// picker overlay; with a name, dispatches straight through the
     /// existing query pipeline (placeholders prompt, etc.).
     RunSaved(Option<String>),
+    /// `:[range]s/pattern/replacement/flags` — vim-style search & replace
+    /// in the editor buffer. Detected on the raw line before whitespace
+    /// splitting (patterns may contain spaces).
+    Substitute(crate::substitute::SubstituteCmd),
 }
 
 /// `:chat` subcommands. Bare `:chat` toggles the right panel between
@@ -364,6 +368,11 @@ pub static COMMAND_TREE: &[CommandSpec] = &[
 /// as no-op). `Err(msg)` is a user-facing error suitable for the
 /// status bar.
 pub fn parse(line: &str) -> Result<Option<Command>, String> {
+    // Substitute commands can contain spaces (`:%s/foo bar/baz/`), so they
+    // must be matched on the raw line before any whitespace splitting.
+    if let Some(sub) = crate::substitute::parse_substitute(line)? {
+        return Ok(Some(Command::Substitute(sub)));
+    }
     let mut parts = line.split_whitespace();
     let Some(cmd) = parts.next() else {
         return Ok(None);
@@ -656,6 +665,26 @@ mod tests {
     fn reset_and_clear_parse() {
         assert_eq!(parse("reset"), Ok(Some(Command::Reset)));
         assert_eq!(parse("clear"), Ok(Some(Command::Clear)));
+    }
+
+    #[test]
+    fn substitute_with_spaces_in_pattern() {
+        let Ok(Some(Command::Substitute(sub))) = parse("%s/foo bar/baz qux/g") else {
+            panic!("expected substitute command");
+        };
+        assert_eq!(sub.pattern, "foo bar");
+        assert_eq!(sub.replacement, "baz qux");
+        assert!(sub.flags.global);
+    }
+
+    #[test]
+    fn substitute_does_not_shadow_s_prefixed_commands() {
+        assert_eq!(
+            parse("save my query"),
+            Ok(Some(Command::Save("my query".into())))
+        );
+        assert!(matches!(parse("source"), Ok(Some(Command::Source))));
+        assert!(matches!(parse("session 2"), Ok(Some(Command::Session(_)))));
     }
 
     #[test]

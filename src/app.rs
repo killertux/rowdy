@@ -198,6 +198,9 @@ pub struct App {
     /// `<data_dir>/params/<conn>.json` on every submit. See
     /// [`crate::param_history`].
     pub param_history: std::collections::HashMap<String, crate::param_history::ParamHistory>,
+    /// Last pattern used by `:s` (or the `/` search), so a bare-pattern
+    /// substitute (`:s//new/`) can reuse it the way vim does.
+    pub last_substitute_pattern: Option<String>,
 }
 
 impl App {
@@ -299,6 +302,7 @@ impl App {
             preview_hidden: false,
             pending_update_prompt: None,
             param_history: std::collections::HashMap::new(),
+            last_substitute_pattern: None,
         }
     }
 }

@@ -118,6 +118,16 @@ impl Default for CommandBuffer {
 }
 
 impl CommandBuffer {
+    /// Open the command line pre-filled with `text`, cursor at the end.
+    /// Used when `:` is pressed in Visual mode to seed `'<,'>` for a
+    /// range substitute, the way vim does.
+    pub fn with_text(text: &str) -> Self {
+        let mut buf = Self::default();
+        buf.input.insert_str(text);
+        buf.recompute_completion();
+        buf
+    }
+
     pub fn text(&self) -> &str {
         self.input.lines().first().map(String::as_str).unwrap_or("")
     }

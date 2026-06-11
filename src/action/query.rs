@@ -23,6 +23,7 @@ pub(super) fn prepare_confirm_run(app: &mut App) {
         app.theme.selection_fg,
     );
     crate::state::editor::highlight_range(&mut app.editor.state, &range, style);
+    app.editor.highlight_owner = Some(crate::state::editor::HighlightOwner::ConfirmRun);
     app.overlay = Some(Overlay::ConfirmRun {
         statement: range.text,
         reason: crate::state::overlay::ConfirmRunReason::Manual,
@@ -34,6 +35,7 @@ pub(super) fn confirm_run_submit(app: &mut App) {
         return;
     };
     crate::state::editor::clear_confirm_highlight(&mut app.editor.state);
+    app.editor.highlight_owner = None;
     dispatch_query(app, statement);
 }
 
@@ -43,6 +45,7 @@ pub(super) fn confirm_run_cancel(app: &mut App) {
     }
     app.overlay = None;
     crate::state::editor::clear_confirm_highlight(&mut app.editor.state);
+    app.editor.highlight_owner = None;
 }
 
 pub(super) fn run_statement_under_cursor(app: &mut App) {

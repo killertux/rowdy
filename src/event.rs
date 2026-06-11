@@ -94,6 +94,7 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
             Overlay::ParamsPrompt(_) => translate_params_prompt_key(key),
             Overlay::ConfirmSaveOverwrite { .. } => translate_save_overwrite_key(key),
             Overlay::SavedQueryPicker(_) => translate_saved_query_picker_key(key),
+            Overlay::ConfirmSubstitute(_) => translate_confirm_substitute_key(key),
         };
     }
     match &app.screen {
@@ -298,6 +299,22 @@ fn translate_confirm_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Esc => Some(Action::ConfirmRunCancel),
         _ => None,
     }
+}
+
+/// Interactive `:s///c` prompt: vim's y/n/a/l/q vocabulary plus Esc to stop.
+/// Enter is deliberately unbound (vim's `<CR>` here is surprising). Other
+/// keys are inert so a stray press doesn't dismiss the prompt.
+fn translate_confirm_substitute_key(key: KeyEvent) -> Option<Action> {
+    use crate::action::SubstituteConfirmAction as S;
+    let action = match key.code {
+        KeyCode::Char('y') => S::Yes,
+        KeyCode::Char('n') => S::No,
+        KeyCode::Char('a') => S::All,
+        KeyCode::Char('l') => S::Last,
+        KeyCode::Char('q') | KeyCode::Esc => S::Quit,
+        _ => return None,
+    };
+    Some(Action::SubstituteConfirm(action))
 }
 
 /// Auto-update prompt: y/Y/Enter accept, n/N/Esc dismiss.

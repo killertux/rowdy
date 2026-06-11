@@ -74,7 +74,26 @@ impl Widget for BottomBar<'_> {
                 // Picker owns its own footer line.
                 return;
             }
+            Some(Overlay::ConfirmSubstitute(st)) => {
+                render_substitute_confirm(st, area, buf, &self.app.theme);
+                return;
+            }
             None => {}
+        }
+        // `/` search echo: while the editor is in Search mode, mirror the
+        // in-progress pattern in the bar (edtui draws the matches but not the
+        // pattern text itself).
+        if matches!(self.app.screen, Screen::Normal)
+            && self.app.focus == crate::state::focus::Focus::Editor
+            && self.app.editor.editor_mode() == edtui::EditorMode::Search
+        {
+            render_search_prompt(
+                &self.app.editor.state.search_pattern(),
+                area,
+                buf,
+                &self.app.theme,
+            );
+            return;
         }
         match &self.app.screen {
             // Modal screens own their own help text — keep the status
@@ -156,6 +175,49 @@ fn render_confirm(
         "  Enter to confirm · Esc to cancel",
         Style::default().fg(theme.fg_dim).bg(theme.bg),
     ));
+    Line::from(spans).render(area, buf);
+}
+
+/// `/pattern` echo while the editor is in Search mode. A trailing block hints
+/// that input is still live.
+fn render_search_prompt(pattern: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    let line = Line::from(vec![
+        Span::styled(
+            "/",
+            Style::default()
+                .fg(theme.fg)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            pattern.to_string(),
+            Style::default().fg(theme.fg).bg(theme.bg),
+        ),
+        Span::styled("▏", Style::default().fg(theme.fg_dim).bg(theme.bg)),
+    ]);
+    line.render(area, buf);
+}
+
+fn render_substitute_confirm(
+    st: &crate::state::substitute_confirm::ConfirmSubstituteState,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+) {
+    let spans = vec![
+        Span::styled("? ", Style::default().fg(theme.status_running).bg(theme.bg)),
+        Span::styled(
+            format!("replace with \"{}\"?", st.replacement),
+            Style::default()
+                .fg(theme.fg)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  y replace · n skip · a all · l last · q/Esc stop",
+            Style::default().fg(theme.fg_dim).bg(theme.bg),
+        ),
+    ];
     Line::from(spans).render(area, buf);
 }
 
