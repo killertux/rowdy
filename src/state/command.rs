@@ -56,13 +56,10 @@ impl CommandCompletion {
         let mut node_children: &[CommandSpec] = COMMAND_TREE;
         for tok in &tokens {
             let lower = tok.to_ascii_lowercase();
-            let matched = node_children
+            let spec = node_children
                 .iter()
-                .find(|s| s.name == lower || s.aliases.iter().any(|a| *a == lower));
-            match matched {
-                Some(spec) => node_children = spec.children,
-                None => return None,
-            }
+                .find(|s| s.name == lower || s.aliases.iter().any(|a| *a == lower))?;
+            node_children = spec.children;
         }
 
         // Don't pop a popover for empty input at the top level —
