@@ -236,8 +236,8 @@ const HELP_SECTIONS: &[HelpSection] = &[
                 desc: "Cycle to the next per-connection editor session",
             },
             HelpEntry {
-                keys: "<Space> Shift+1..9",
-                desc: "Jump straight to session 1..9 — US-shifted digits ! @ # $ % ^ & * (",
+                keys: "<Space> 0..9",
+                desc: "Jump straight to session 0..9",
             },
             HelpEntry {
                 keys: "=",
@@ -462,6 +462,10 @@ const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 keys: "R",
                 desc: "Reset column order + visibility (un-hide all)",
+            },
+            HelpEntry {
+                keys: ":",
+                desc: "Command bar — :export acts on the Visual selection",
             },
             HelpEntry {
                 keys: "q, Esc",

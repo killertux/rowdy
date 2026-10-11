@@ -2,10 +2,9 @@
 //!
 //! `actions` defines the rebindable surface; `chord` parses the
 //! key-notation strings; `keymap` holds the active mapping. Wired
-//! into `event::translate` preludes for [`Context::GlobalImmediate`],
-//! [`Context::Leader`], and [`Context::Schema`]. Result + Chat
-//! contexts are populated for help-popover rendering but stay
-//! hardcoded in `event.rs` because their keys depend on per-mode sub-state.
+//! into `event::translate` for every context; in the Result + Chat
+//! contexts the sub-mode-dependent keys (Esc, `v`, Enter-submit, …)
+//! stay hardcoded in `event.rs` and the keymap is consulted after them.
 
 pub mod actions;
 pub mod chord;

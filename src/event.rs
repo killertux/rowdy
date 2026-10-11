@@ -12,6 +12,7 @@ use crate::action::{
 };
 use crate::app::App;
 use crate::export::ExportFormat;
+use crate::keybindings::keymap::{Context, Keymap};
 use crate::state::command::CommandBuffer;
 use crate::state::focus::{Focus, PendingChord};
 use crate::state::layout::{DragState, rect_contains};
@@ -99,7 +100,7 @@ fn translate_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action> {
     }
     match &app.screen {
         Screen::Normal => translate_normal_key(app, key, raw),
-        Screen::ResultExpanded { view, .. } => translate_expanded_key(key, view),
+        Screen::ResultExpanded { view, .. } => translate_expanded_key(&app.keymap, key, view),
         Screen::Auth(_) => translate_auth_key(key),
         Screen::EditConnection(_) => translate_conn_form_key(key),
         Screen::ConnectionList(state) => translate_conn_list_key(key, state.is_confirming()),
@@ -461,8 +462,8 @@ fn translate_normal_key(app: &App, key: KeyEvent, raw: CtEvent) -> Option<Action
     match app.focus {
         Focus::Editor => Some(Action::EditorEvent(raw)),
         Focus::Schema => translate_schema_key(&app.keymap, key),
-        Focus::Chat => translate_chat_normal_key(key),
-        Focus::ChatComposer => translate_chat_composer_key(key),
+        Focus::Chat => translate_chat_normal_key(&app.keymap, key),
+        Focus::ChatComposer => translate_chat_composer_key(&app.keymap, key),
     }
 }
 
@@ -569,7 +570,7 @@ fn translate_leader_chord(app: &App, key: KeyEvent) -> Option<Action> {
 
 // NOTE: any new expanded-result binding MUST also be listed in the `:help`
 // popover. See `HELP_SECTIONS` in `src/ui/help_view.rs`.
-fn translate_expanded_key(key: KeyEvent, view: &ResultViewMode) -> Option<Action> {
+fn translate_expanded_key(keymap: &Keymap, key: KeyEvent, view: &ResultViewMode) -> Option<Action> {
     // YankFormat sub-mode: only the format keys + cancel work; navigation
     // and other shortcuts are inert until the user picks one.
     if matches!(view, ResultViewMode::YankFormat { .. }) {
@@ -593,7 +594,9 @@ fn translate_expanded_key(key: KeyEvent, view: &ResultViewMode) -> Option<Action
 
     use ResultNavAction::*;
     let in_visual = matches!(view, ResultViewMode::Visual { .. });
-    let action = match (key.code, key.modifiers) {
+    // Sub-mode keys stay hardcoded: their meaning depends on Visual vs
+    // Normal, or they open a chord / overlay.
+    match (key.code, key.modifiers) {
         // Esc/q: in Visual, drop back to Normal; in Normal, close the view.
         (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
             return Some(if in_visual {
@@ -609,6 +612,21 @@ fn translate_expanded_key(key: KeyEvent, view: &ResultViewMode) -> Option<Action
                 Action::ResultEnterVisual
             });
         }
+        // `:` opens the command bar over the grid so `:export` can see the
+        // Visual selection (and an explicit `:export sql <table>` works on it).
+        (KeyCode::Char(':'), _) => return Some(Action::OpenCommand),
+        (KeyCode::Char('g'), m) if m.is_empty() => {
+            return Some(Action::SetPendingChord(PendingChord::GG));
+        }
+        _ => {}
+    }
+    // Stateless keys go through the `[result]` keymap table first so
+    // user overrides win; the match below keeps the built-in aliases
+    // (arrows, Home/End) and the defaults as a fallback.
+    if let Some(bound) = keymap.lookup_key(Context::Result, key.code, key.modifiers) {
+        return Some(bound.into_action_no_visual());
+    }
+    let action = match (key.code, key.modifiers) {
         (KeyCode::Char('y'), m) if m.is_empty() => return Some(Action::ResultYank),
         // Column ops — uppercase variants leave the lowercase keys for
         // navigation. Documented in the Expanded result view help section.
@@ -631,9 +649,6 @@ fn translate_expanded_key(key: KeyEvent, view: &ResultViewMode) -> Option<Action
         (KeyCode::Char('0'), _) | (KeyCode::Home, _) => LineStart,
         (KeyCode::Char('$'), _) | (KeyCode::End, _) => LineEnd,
         (KeyCode::Char('G'), _) => Bottom,
-        (KeyCode::Char('g'), m) if m.is_empty() => {
-            return Some(Action::SetPendingChord(PendingChord::GG));
-        }
         _ => return None,
     };
     Some(Action::ResultNav(action))
@@ -767,23 +782,30 @@ fn translate_llm_settings_key(state: &LlmSettingsState, key: KeyEvent) -> Option
 /// insert mode (composer focused). Globals (`:`, leader, `Ctrl+W`, etc.)
 /// flow through `translate_global` because [`can_intercept_globally`]
 /// returns `true` for [`Focus::Chat`].
-fn translate_chat_normal_key(key: KeyEvent) -> Option<Action> {
+fn translate_chat_normal_key(keymap: &Keymap, key: KeyEvent) -> Option<Action> {
     let mods = key.modifiers;
     let bare = mods.is_empty();
-    let shift_only = mods == KeyModifiers::SHIFT;
-    let _ = shift_only;
 
-    // `i` enters insert mode (focuses the composer). `I` is a vim-ish
-    // alias that lands in the same place — we don't model "start of line"
-    // separately because the composer is a single text buffer.
-    if matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I')) && bare {
-        return Some(Action::FocusPanel(Focus::ChatComposer));
-    }
     // Esc returns focus to the editor without changing what the right
     // panel paints — symmetric with `Esc` from the schema panel. The
     // chat panel keeps its messages and the composer keeps its contents.
     if key.code == KeyCode::Esc && bare {
         return Some(Action::FocusPanel(Focus::Editor));
+    }
+    // `g` arms the GG chord (jump to top) — a chord opener, not rebindable.
+    if key.code == KeyCode::Char('g') && bare {
+        return Some(Action::SetPendingChord(PendingChord::GG));
+    }
+    // `[chat_normal]` keymap table next, so user overrides win over the
+    // built-in aliases below.
+    if let Some(bound) = keymap.lookup_key(Context::ChatNormal, key.code, key.modifiers) {
+        return Some(bound.into_action_no_visual());
+    }
+    // `i` enters insert mode (focuses the composer). `I` is a vim-ish
+    // alias that lands in the same place — we don't model "start of line"
+    // separately because the composer is a single text buffer.
+    if matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I')) && bare {
+        return Some(Action::FocusPanel(Focus::ChatComposer));
     }
 
     // Scrolling. The user-facing convention: ↑/h/k scroll up, ↓/l/j
@@ -805,21 +827,14 @@ fn translate_chat_normal_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('G') => Some(ChatAction::ScrollToBottom),
         _ => None,
     };
-    if let Some(a) = action {
-        return Some(Action::Chat(a));
-    }
-
-    if key.code == KeyCode::Char('g') && bare {
-        return Some(Action::SetPendingChord(PendingChord::GG));
-    }
-    None
+    action.map(Action::Chat)
 }
 
 /// Chat composer (insert mode) keymap. Mirrors the original chat keymap;
 /// the only behavioral change is `Esc` — instead of toggling the right
 /// panel, it drops back to chat *normal* mode so the user can keep
 /// scrolling without losing the composer's contents.
-fn translate_chat_composer_key(key: KeyEvent) -> Option<Action> {
+fn translate_chat_composer_key(keymap: &Keymap, key: KeyEvent) -> Option<Action> {
     if let Some(act) = clipboard_arm(
         key,
         ChatAction::Paste(None),
@@ -850,6 +865,11 @@ fn translate_chat_composer_key(key: KeyEvent) -> Option<Action> {
     // (insert newline). The composer is multi-line by design.
     if key.code == KeyCode::Enter && bare {
         return Some(Action::Chat(ChatAction::Submit));
+    }
+    // `[chat_insert]` keymap table: log scrolling while the composer is
+    // focused. The built-in chords below stay as a fallback.
+    if let Some(bound) = keymap.lookup_key(Context::ChatInsert, key.code, key.modifiers) {
+        return Some(bound.into_action_no_visual());
     }
     if (key.code == KeyCode::PageUp) && bare {
         return Some(Action::Chat(ChatAction::ScrollUp(8)));
@@ -1621,7 +1641,7 @@ mod tests {
         };
         let case = |k, want: ExportFormat| {
             assert!(matches!(
-                translate_expanded_key(key(k), &view),
+                translate_expanded_key(&Keymap::defaults(), key(k), &view),
                 Some(Action::ResultYankFormat(f)) if f == want
             ));
         };
@@ -1631,11 +1651,13 @@ mod tests {
         case(KeyCode::Char('j'), ExportFormat::Json);
         case(KeyCode::Char('s'), ExportFormat::Sql);
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Esc), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Esc), &view),
             Some(Action::ResultCancelYankFormat)
         ));
         // Non-format, non-cancel keys are inert in YankFormat mode.
-        assert!(translate_expanded_key(key(KeyCode::Char('h')), &view).is_none());
+        assert!(
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char('h')), &view).is_none()
+        );
     }
 
     #[test]
@@ -1643,26 +1665,26 @@ mod tests {
         let view = ResultViewMode::Normal;
         // Esc/q in Normal closes the view (no Visual to drop back to).
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Esc), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Esc), &view),
             Some(Action::CollapseResult)
         ));
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Char('q')), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char('q')), &view),
             Some(Action::CollapseResult)
         ));
         // `v` enters Visual.
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Char('v')), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char('v')), &view),
             Some(Action::ResultEnterVisual)
         ));
         // `y` yanks the current cell.
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Char('y')), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char('y')), &view),
             Some(Action::ResultYank)
         ));
         // `g` triggers the gg chord.
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Char('g')), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char('g')), &view),
             Some(Action::SetPendingChord(PendingChord::GG))
         ));
         // Navigation keys.
@@ -1676,9 +1698,74 @@ mod tests {
             (KeyCode::Char('G'), "Bottom"),
         ];
         for (k, want) in nav_cases {
-            let action = translate_expanded_key(key(k), &view);
+            let action = translate_expanded_key(&Keymap::defaults(), key(k), &view);
             assert!(matches_action(&action, want), "{k:?} → {want}");
         }
+    }
+
+    fn keymap_with(table: &str, chord: &str, action: &str) -> Keymap {
+        let mut file = crate::keybindings::KeybindingsFile::default();
+        let t = match table {
+            "result" => &mut file.result,
+            "chat_normal" => &mut file.chat_normal,
+            "chat_insert" => &mut file.chat_insert,
+            other => panic!("unknown table {other}"),
+        };
+        t.insert(chord.into(), action.into());
+        let mut m = Keymap::defaults();
+        m.merge_overrides(&file).unwrap();
+        m
+    }
+
+    #[test]
+    fn expanded_key_colon_opens_command_bar() {
+        for view in [
+            ResultViewMode::Normal,
+            ResultViewMode::Visual {
+                anchor: ResultCursor::default(),
+            },
+        ] {
+            assert!(matches!(
+                translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char(':')), &view),
+                Some(Action::OpenCommand)
+            ));
+        }
+    }
+
+    #[test]
+    fn expanded_key_result_overrides_win() {
+        // Rebind `n` to move down — previously the `[result]` table was
+        // parsed but never consulted.
+        let m = keymap_with("result", "n", "result-down");
+        assert!(matches!(
+            translate_expanded_key(&m, key(KeyCode::Char('n')), &ResultViewMode::Normal),
+            Some(Action::ResultNav(ResultNavAction::Down))
+        ));
+        // Overriding a default chord replaces it.
+        let m = keymap_with("result", "j", "result-up");
+        assert!(matches!(
+            translate_expanded_key(&m, key(KeyCode::Char('j')), &ResultViewMode::Normal),
+            Some(Action::ResultNav(ResultNavAction::Up))
+        ));
+        // Built-in aliases outside the keymap still work.
+        assert!(matches!(
+            translate_expanded_key(&m, key(KeyCode::Down), &ResultViewMode::Normal),
+            Some(Action::ResultNav(ResultNavAction::Down))
+        ));
+    }
+
+    #[test]
+    fn chat_overrides_win() {
+        let m = keymap_with("chat_normal", "e", "chat-bottom");
+        assert!(matches!(
+            translate_chat_normal_key(&m, key(KeyCode::Char('e'))),
+            Some(Action::Chat(ChatAction::ScrollToBottom))
+        ));
+        let m = keymap_with("chat_insert", "<C-k>", "chat-scroll-up");
+        assert!(matches!(
+            translate_chat_composer_key(&m, ctrl(KeyCode::Char('k'))),
+            Some(Action::Chat(ChatAction::ScrollUp(1)))
+        ));
     }
 
     #[test]
@@ -1686,19 +1773,19 @@ mod tests {
         let view = ResultViewMode::Normal;
         // Shift+H/L move the focused column; x hides; R resets.
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Char('H')), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char('H')), &view),
             Some(Action::ResultColumn(ResultColumnAction::MoveLeft))
         ));
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Char('L')), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char('L')), &view),
             Some(Action::ResultColumn(ResultColumnAction::MoveRight))
         ));
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Char('x')), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char('x')), &view),
             Some(Action::ResultColumn(ResultColumnAction::Hide))
         ));
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Char('R')), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char('R')), &view),
             Some(Action::ResultColumn(ResultColumnAction::Reset))
         ));
     }
@@ -1710,16 +1797,16 @@ mod tests {
         };
         // In Visual, Esc/q drops back to Normal sub-mode (not closing).
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Esc), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Esc), &view),
             Some(Action::ResultExitVisual)
         ));
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Char('q')), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char('q')), &view),
             Some(Action::ResultExitVisual)
         ));
         // `v` toggles Visual off.
         assert!(matches!(
-            translate_expanded_key(key(KeyCode::Char('v')), &view),
+            translate_expanded_key(&Keymap::defaults(), key(KeyCode::Char('v')), &view),
             Some(Action::ResultExitVisual)
         ));
     }
@@ -1824,7 +1911,7 @@ mod tests {
         ));
         // Chat composer uses ClearComposer to disambiguate from `:chat clear`.
         assert!(matches_action(
-            &translate_chat_composer_key(ctrl(KeyCode::Char('u'))),
+            &translate_chat_composer_key(&Keymap::defaults(), ctrl(KeyCode::Char('u'))),
             "ClearComposer"
         ));
     }
@@ -1834,11 +1921,11 @@ mod tests {
     #[test]
     fn chat_normal_i_enters_insert_mode() {
         assert!(matches!(
-            translate_chat_normal_key(key(KeyCode::Char('i'))),
+            translate_chat_normal_key(&Keymap::defaults(), key(KeyCode::Char('i'))),
             Some(Action::FocusPanel(Focus::ChatComposer))
         ));
         assert!(matches!(
-            translate_chat_normal_key(key(KeyCode::Char('I'))),
+            translate_chat_normal_key(&Keymap::defaults(), key(KeyCode::Char('I'))),
             Some(Action::FocusPanel(Focus::ChatComposer))
         ));
     }
@@ -1849,7 +1936,7 @@ mod tests {
         // painting chat; only focus changes. focus_panel() in the action
         // layer leaves right_panel untouched when target is Editor.
         assert!(matches!(
-            translate_chat_normal_key(key(KeyCode::Esc)),
+            translate_chat_normal_key(&Keymap::defaults(), key(KeyCode::Esc)),
             Some(Action::FocusPanel(Focus::Editor))
         ));
     }
@@ -1867,34 +1954,34 @@ mod tests {
     fn chat_normal_scroll_keys() {
         // Up alternatives.
         for k in [KeyCode::Up, KeyCode::Char('h'), KeyCode::Char('k')] {
-            let action = translate_chat_normal_key(key(k));
+            let action = translate_chat_normal_key(&Keymap::defaults(), key(k));
             assert!(matches_action(&action, "ScrollUp(1)"), "{k:?}");
         }
         // Down alternatives.
         for k in [KeyCode::Down, KeyCode::Char('l'), KeyCode::Char('j')] {
-            let action = translate_chat_normal_key(key(k));
+            let action = translate_chat_normal_key(&Keymap::defaults(), key(k));
             assert!(matches_action(&action, "ScrollDown(1)"), "{k:?}");
         }
         // Page scrolling.
         assert!(matches_action(
-            &translate_chat_normal_key(key(KeyCode::PageUp)),
+            &translate_chat_normal_key(&Keymap::defaults(), key(KeyCode::PageUp)),
             "ScrollUp(8)"
         ));
         assert!(matches_action(
-            &translate_chat_normal_key(key(KeyCode::PageDown)),
+            &translate_chat_normal_key(&Keymap::defaults(), key(KeyCode::PageDown)),
             "ScrollDown(8)"
         ));
         // Jumps.
         assert!(matches_action(
-            &translate_chat_normal_key(key(KeyCode::Home)),
+            &translate_chat_normal_key(&Keymap::defaults(), key(KeyCode::Home)),
             "ScrollToTop"
         ));
         assert!(matches_action(
-            &translate_chat_normal_key(key(KeyCode::End)),
+            &translate_chat_normal_key(&Keymap::defaults(), key(KeyCode::End)),
             "ScrollToBottom"
         ));
         assert!(matches_action(
-            &translate_chat_normal_key(key(KeyCode::Char('G'))),
+            &translate_chat_normal_key(&Keymap::defaults(), key(KeyCode::Char('G'))),
             "ScrollToBottom"
         ));
     }
@@ -1902,7 +1989,7 @@ mod tests {
     #[test]
     fn chat_normal_g_starts_gg_chord() {
         assert!(matches!(
-            translate_chat_normal_key(key(KeyCode::Char('g'))),
+            translate_chat_normal_key(&Keymap::defaults(), key(KeyCode::Char('g'))),
             Some(Action::SetPendingChord(PendingChord::GG))
         ));
     }
@@ -1910,7 +1997,7 @@ mod tests {
     #[test]
     fn chat_composer_esc_returns_to_normal_mode() {
         assert!(matches!(
-            translate_chat_composer_key(key(KeyCode::Esc)),
+            translate_chat_composer_key(&Keymap::defaults(), key(KeyCode::Esc)),
             Some(Action::FocusPanel(Focus::Chat))
         ));
     }

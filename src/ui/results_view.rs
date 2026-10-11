@@ -24,7 +24,9 @@ impl Widget for InlineResult<'_> {
         let inner = block_widget.inner(area);
 
         let visible_cols = fit_columns(inner.width).min(total_cols.max(1));
-        let title = inline_title(self.block, self.max_preview_rows, visible_cols, total_cols);
+        let total_rows = self.block.rows().len();
+        let shown = inline_shown_rows(total_rows, self.max_preview_rows, inner.height);
+        let title = inline_title(self.block, shown, visible_cols, total_cols);
         let block_widget = themed_block(self.theme, title, false);
         block_widget.render(area, buf);
 
@@ -35,15 +37,7 @@ impl Widget for InlineResult<'_> {
         // Inline preview ignores column-view ops — the user reaches it
         // outside the expanded screen, where reorder/hide aren't bound.
         let identity: Vec<usize> = (0..visible_cols).collect();
-        let table = build_table(
-            self.block,
-            None,
-            0,
-            self.max_preview_rows,
-            &identity,
-            self.theme,
-            None,
-        );
+        let table = build_table(self.block, None, 0, shown, &identity, self.theme, None);
         let widths = column_widths(visible_cols, inner.width);
         Widget::render(
             Table::new(table.rows, widths)
@@ -53,8 +47,6 @@ impl Widget for InlineResult<'_> {
             buf,
         );
 
-        let total_rows = self.block.rows().len();
-        let shown = total_rows.min(self.max_preview_rows);
         if shown < total_rows {
             let footer = Line::from(Span::styled(
                 format!(
@@ -409,13 +401,26 @@ pub fn expanded_layout(
     }
 }
 
+/// How many body rows the inline preview paints. Capped by
+/// `max_preview_rows` and by the space under the header; when rows are
+/// left over, the bottom row is reserved for the "⤥ N more rows" footer
+/// so it never paints over a data row.
+fn inline_shown_rows(total_rows: usize, max_preview_rows: usize, inner_height: u16) -> usize {
+    let capacity = inner_height.saturating_sub(1) as usize;
+    let shown = total_rows.min(max_preview_rows).min(capacity);
+    if shown < total_rows {
+        shown.min(capacity.saturating_sub(1))
+    } else {
+        shown
+    }
+}
+
 fn inline_title(
     block: &ResultBlock,
-    max_preview_rows: usize,
+    shown_rows: usize,
     visible_cols: usize,
     total_cols: usize,
 ) -> String {
-    let shown_rows = block.rows().len().min(max_preview_rows);
     let cols = if visible_cols < total_cols {
         format!(
             " — {visible_cols}/{total_cols} cols (+{} →)",
@@ -524,5 +529,30 @@ mod tests {
     #[test]
     fn distribute_columns_zero_cols_is_empty() {
         assert!(distribute_columns(rect(0, 18), 0).is_empty());
+    }
+
+    #[test]
+    fn inline_shown_rows_fits_everything_without_footer() {
+        // 5 rows, room for header + 8 body rows → all shown, no footer.
+        assert_eq!(inline_shown_rows(5, 8, 9), 5);
+    }
+
+    #[test]
+    fn inline_shown_rows_reserves_footer_row_when_truncated() {
+        // Header + 7 rows of space, 10 rows of data: 6 rows + footer.
+        assert_eq!(inline_shown_rows(10, 8, 8), 6);
+    }
+
+    #[test]
+    fn inline_shown_rows_caps_at_max_preview_rows() {
+        // Plenty of space: capped at 8 rows, footer still has its own row.
+        assert_eq!(inline_shown_rows(100, 8, 20), 8);
+    }
+
+    #[test]
+    fn inline_shown_rows_handles_tiny_areas() {
+        assert_eq!(inline_shown_rows(10, 8, 0), 0);
+        assert_eq!(inline_shown_rows(10, 8, 1), 0);
+        assert_eq!(inline_shown_rows(10, 8, 2), 0);
     }
 }

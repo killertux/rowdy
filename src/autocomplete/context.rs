@@ -727,16 +727,16 @@ fn find_from_table_in_body(
                 i += 1;
                 skip_trivia(tokens, &mut i);
             }
-            if let Some(Token::Word(w)) = tokens.get(i) {
-                if !is_table_terminator(w) {
-                    alias = Some(w.value.clone());
-                    i += 1;
-                }
+            if let Some(Token::Word(w)) = tokens.get(i)
+                && !is_table_terminator(w)
+            {
+                alias = Some(w.value.clone());
+                i += 1;
             }
             // Bail on multi-table FROM (JOIN or comma follows).
             skip_trivia(tokens, &mut i);
-            if let Some(Token::Word(w)) = tokens.get(i) {
-                if matches!(
+            if let Some(Token::Word(w)) = tokens.get(i)
+                && matches!(
                     w.keyword,
                     Keyword::JOIN
                         | Keyword::INNER
@@ -745,9 +745,9 @@ fn find_from_table_in_body(
                         | Keyword::FULL
                         | Keyword::CROSS
                         | Keyword::NATURAL
-                ) {
-                    return None;
-                }
+                )
+            {
+                return None;
             }
             if matches!(tokens.get(i), Some(Token::Comma)) {
                 return None;
@@ -842,10 +842,10 @@ fn projection_item_name(item: &[&Token]) -> Option<String> {
     // Pure bare or dotted identifier: `col`, `t.col`, `c.s.t.col`.
     // Anything else (operators, function calls, parens, asterisks)
     // disqualifies — needs an `AS` alias to surface.
-    if is_dotted_identifier_only(item) {
-        if let Token::Word(last_word) = item[item.len() - 1] {
-            return Some(last_word.value.clone());
-        }
+    if is_dotted_identifier_only(item)
+        && let Token::Word(last_word) = item[item.len() - 1]
+    {
+        return Some(last_word.value.clone());
     }
     None
 }

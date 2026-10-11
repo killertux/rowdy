@@ -476,7 +476,8 @@ pub fn apply(app: &mut App, action: Action) {
         Action::OpenCommand => {
             // Pressing `:` in Visual mode seeds the line with `'<,'>`, so a
             // range substitute over the selection is one keystroke away.
-            let buf = if app.focus == Focus::Editor
+            let buf = if matches!(app.screen, Screen::Normal)
+                && app.focus == Focus::Editor
                 && app.editor.editor_mode() == edtui::EditorMode::Visual
             {
                 CommandBuffer::with_text("'<,'>")
