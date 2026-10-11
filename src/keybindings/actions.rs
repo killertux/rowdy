@@ -5,7 +5,7 @@
 //!
 //! Not every `Action` is bindable — sub-mode-dependent keys (e.g. `Esc`
 //! in the expanded result view, `Enter` in chat composer) and chord
-//! openers (`<Space>`, `Ctrl+W`, `g`/`G`) stay hardcoded in
+//! openers (`<Space>`, `Ctrl+W`, `g`) stay hardcoded in
 //! `event::translate_*` and are intentionally absent from this enum.
 
 use edtui::EditorMode;
@@ -40,13 +40,10 @@ pub enum BindableAction {
     /// keybinding surface conservative and let users add their own
     /// chord overrides if they want.
     SessionNext,
-    /// `<Space>!` … `<Space>(` jump straight to session `N` (1..=9).
-    /// The shifted-digit gesture mirrors Vim's quickfix nav and gives
-    /// users a single-chord switch when they know the index they
-    /// want — no need to spell out `:session N`. Bound with
-    /// `<S-1>` in the README's chord notation, but on every layout we
-    /// support that key produces the corresponding shifted symbol
-    /// (`!`, `@`, …), which is how the keymap stores it.
+    /// `<Space>0` … `<Space>9` jump straight to session `N` (0..=9),
+    /// matching the `session_<N>.sql` index. Gives users a single-chord
+    /// switch when they know the index they want — no need to spell
+    /// out `:session N`.
     SessionSwitch(u8),
 
     // Schema panel.
@@ -57,7 +54,7 @@ pub enum BindableAction {
     SchemaToggle,
     SchemaBottom,
 
-    // Expanded result view (stateless keys only — q/Esc/v stay
+    // Expanded result view (stateless keys only — q/Esc/v/: stay
     // hardcoded since they branch on the result-view sub-mode).
     ResultYank,
     ResultColumnMoveLeft,

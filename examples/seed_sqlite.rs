@@ -7,8 +7,9 @@
 //! `path` defaults to `sample.db` in the current directory. Existing tables
 //! are dropped before being re-created, so re-running is safe.
 //!
-//! After it finishes:
-//!   cargo run -- --connection sqlite:./sample.db
+//! After it finishes, save it as a connection and open it:
+//!   cargo run -- connections add sample --url sqlite:./sample.db --password ""
+//!   cargo run -- -c sample
 
 use anyhow::Result;
 use sqlx::ConnectOptions as _;
@@ -60,7 +61,8 @@ async fn main() -> Result<()> {
     println!("  wide_metrics: {metric_count}   (horizontal scroll, 35 columns)");
     println!("  + 10 lookup tables to stretch the schema tree");
     println!("\ntry:");
-    println!("  cargo run -- --connection sqlite:{path}");
+    println!("  cargo run -- connections add sample --url sqlite:{path} --password \"\"");
+    println!("  cargo run -- -c sample");
     Ok(())
 }
 

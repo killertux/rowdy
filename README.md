@@ -6,9 +6,16 @@ The goal is a fast, modal, keyboard-first workspace for writing queries,
 exploring schemas, and inspecting results — all without leaving the terminal.
 
 SQLite, Postgres, and MySQL/MariaDB are wired end-to-end. Most authoring
-features (autocomplete, formatting, yank, CSV/TSV/JSON/SQL export,
-transactions across statements, multi-statement scripts) are shipped —
-see [Roadmap](#roadmap) for what's still ahead.
+features (autocomplete, formatting, vim search & replace, query
+parameters, saved queries, yank, CSV/TSV/JSON/SQL export, transactions
+across statements, an LLM chat companion, 14 themes) are shipped — see
+[Roadmap](#roadmap) for what's still ahead.
+
+![rowdy: SQL editor, inline result preview, and the lazily-loaded schema tree](docs/screenshots/overview.png)
+
+<sub>Screenshots are generated from the sample database with
+[vhs](https://github.com/charmbracelet/vhs) — see
+[`docs/screenshots/generate.sh`](docs/screenshots/generate.sh).</sub>
 
 ## Install
 
@@ -38,11 +45,13 @@ When rowdy starts, it asynchronously checks GitHub for a newer release
 version is available, the bottom bar prompts:
 
 ```
-⬆ rowdy v0.6.2 → v0.7.0 available — y to update · n/Esc to dismiss
+⬆ rowdy 0.6.2 → v0.7.0 available  y to update · n/Esc to dismiss
 ```
 
-Pressing `y` re-runs the install script against the running binary's
-directory (so it overwrites the rowdy you're currently using). After a
+The prompt waits until you're back on the main screen and not typing.
+Pressing `y` (or `Enter`) re-runs the install script, pinned to the
+offered release, against the running binary's directory (so it
+overwrites the rowdy you're currently using; needs `curl`). After a
 successful install, restart rowdy to pick up the new binary. Pressing
 `n` records the dismissed version in `~/.rowdy/config.toml` so we don't
 re-prompt for the same release on every launch.
@@ -53,10 +62,13 @@ To disable the check entirely, add to `~/.rowdy/config.toml`:
 check_for_updates = false
 ```
 
+`:update` runs the check on demand — it ignores the 24-hour throttle,
+a previously dismissed version, and `check_for_updates = false`.
+
 ### Build from source
 
-Requires Rust 2024 edition (≥ 1.86) and a terminal that supports truecolor
-for accurate theme rendering.
+Requires Rust 2024 edition (≥ 1.88 — the code uses let-chains) and a
+terminal that supports truecolor for accurate theme rendering.
 
 ```sh
 git clone https://github.com/killertux/rowdy
@@ -67,29 +79,34 @@ cargo build --release
 
 ## Running it
 
-Point rowdy at any database via a connection URL:
+rowdy opens **saved connections** by name. On first launch (no saved
+connections yet) just run `rowdy` — it opens the connection form, where
+you give the connection a name and a URL (`Ctrl+T` tests it before
+saving). After that:
 
 ```sh
-rowdy --connection sqlite:./sample.db
+rowdy                       # pick from the saved connections
+rowdy -c local              # open the saved connection named "local"
+rowdy -c local -p secret    # …and unlock an encrypted store non-interactively
 ```
 
-Or run straight from a checkout:
-
-```sh
-cargo run -- --connection sqlite:./sample.db
-```
+`-c/--connection` takes a connection **name**, not a URL. To save one
+from the shell instead of the TUI, see
+[Saved connections](#saved-connections). From a checkout, replace
+`rowdy` with `cargo run --`.
 
 ### Sample database
 
 A seed program creates a sample SQLite database to poke at: a small
 e-commerce schema (`users` / `products` / `orders` / `order_items` plus a
 `recent_orders` view), an `events` table with 5000 rows, a `wide_metrics`
-table with 32 columns to exercise horizontal scroll, and 10 small lookup
+table with 35 columns to exercise horizontal scroll, and 10 small lookup
 tables to exercise the schema panel's vertical scroll.
 
 ```sh
 cargo run --example seed_sqlite -- ./sample.db
-cargo run -- --connection sqlite:./sample.db
+cargo run -- connections add sample --url sqlite:./sample.db --password ""
+cargo run -- -c sample
 ```
 
 Re-running the seeder is safe — it drops and re-creates the tables.
@@ -101,20 +118,25 @@ them inside the TUI. Open the connection list with `:conn`, or manage
 them without launching the TUI:
 
 ```sh
-rowdy connections list
+rowdy connections list                                        # alias: ls
 rowdy connections add <name> --url <url> [--password <pw>]
 rowdy connections edit <name> --url <url> [--password <pw>]   # overwrite
-rowdy connections delete <name>
+rowdy connections delete <name>                               # alias: rm
 ```
 
-Password handling mirrors the TUI:
+Password handling for `add` / `edit`:
 
-- **Flag absent** — prompts on stdin (masked). `rpassword` falls back to
-  reading from a pipe if stdin isn't a TTY.
-- **`--password X`** (non-empty) — uses `X`. On a fresh store this also
-  initialises the crypto block.
+- **Flag absent** — prompts on stdin (masked) when the store is
+  encrypted or still empty; an existing plaintext store isn't prompted.
+  `rpassword` falls back to reading from a pipe if stdin isn't a TTY.
+- **`--password X`** (non-empty) — uses `X`. On a store without a crypto
+  block yet this also initialises it (existing plaintext entries are
+  *not* re-encrypted, so start from an empty store if you want
+  everything encrypted).
 - **`--password ""`** — explicit "no encryption". Only valid against an empty
   store or an existing plaintext store; refused against an encrypted one.
+  (When launching the TUI, `--password ""` is treated as if the flag were
+  absent.)
 
 `list` and `delete` never touch the password — they're pure config edits.
 
@@ -123,14 +145,16 @@ Password handling mirrors the TUI:
 On startup rowdy creates `.rowdy/` in the current working directory if it
 doesn't exist. It holds:
 
-- `config.toml` — theme, schema-panel width, saved connections, and (when
-  the encrypted store is in use) the argon2id/chacha20-poly1305 crypto
-  block. Written **lazily** on the first change away from defaults.
-- `<datetime>.log` — one file per session, named for the launch time.
-  Append-only. The app and every datasource log into it (connect /
-  execute / cancel / errors / session save+load). URL passwords are
-  redacted. Only the 5 most recent log files are kept; older ones are
-  deleted at the start of the next launch.
+- `config.toml` — theme, schema-panel width, saved connections, LLM
+  provider records, and (when the encrypted store is in use) the
+  argon2id/chacha20-poly1305 crypto block. Written **lazily** on the
+  first change away from defaults.
+- `<datetime>.log` — one file per TUI session, named for the local launch
+  time (`YYYY-MM-DD_HH-MM-SS.log`). Append-only. The app and every
+  datasource log into it (connect / execute / cancel / errors / session
+  save+load). URL passwords are redacted. Only the 5 most recent log
+  files (including the new one) are kept; older ones are pruned at
+  launch. `rowdy connections …` doesn't create a log.
 - `sessions/<connection-name>/session_<N>.sql` — editor buffers for
   each saved connection, indexed from `0`. Each connection starts with
   `session_0.sql`; create more with `:session new` and switch between
@@ -145,39 +169,55 @@ doesn't exist. It holds:
   each saved connection. Append-only JSONL; one `ChatMessage` per line.
   System messages are filtered out on append so we don't persist tool
   prompts. Wiped by `:chat clear`.
+- `queries/<connection-name>/<name>.sql` — named saved queries
+  (`:save` / `:load` / `:run-saved`, see [Saved queries](#saved-queries)).
+- `params/<connection-name>.json` — the last values you typed into the
+  [query parameter](#query-parameters) prompt, capped at the 200 most
+  recently used.
 
 ### User configuration: `~/.rowdy/`
 
 Rowdy also reads from `$HOME/.rowdy/` (Unix) or
-`%USERPROFILE%\.rowdy\` (Windows) for cross-project defaults. The
-directory is **never auto-created** — rowdy only reads from it.
+`%USERPROFILE%\.rowdy\` (Windows) for cross-project defaults. You
+create it yourself for preferences; rowdy only writes to it for its
+own bookkeeping (the update-check timestamp, a dismissed update, and
+the chat read-tools mode).
 
-- `config.toml` — user-level defaults for `theme` and
-  `schema_width`. Both fields are optional; missing fields fall
-  through to the compiled defaults. Project-level
-  `./.rowdy/config.toml` overrides the user file per-field on
-  read, so per-project pins still win.
+- `config.toml` — user-level settings, all optional:
+
+  | Key                            | Default       | Meaning                                                      |
+  |--------------------------------|---------------|--------------------------------------------------------------|
+  | `theme`                        | `base16-dark` | Default theme (see [Themes](#themes))                        |
+  | `schema_width`                 | —             | Default schema-panel width                                   |
+  | `check_for_updates`            | `true`        | Background release check on launch                           |
+  | `completion_trigger_threshold` | `2`           | Identifier chars before autocomplete auto-opens (`0` = only after `.`) |
+  | `read_tools`                   | `ask`         | Chat file-tool policy: `off` / `ask` / `auto`                |
+
+  `last_update_check_at` and `last_dismissed_version` are written by
+  rowdy. Project-level `./.rowdy/config.toml` overrides `theme` and
+  `schema_width` per-field on read, so per-project pins still win.
 - `keybindings.toml` — sparse override of the default keymap. Only
   the chords you change need to be listed; everything else stays
   on its default.
 
-Connections, the encrypted crypto block, LLM API keys, per-session
-editor buffers, chat logs, and the on-disk session log all stay
-**per-project** in `./.rowdy/`. They are not user-wide.
+Connections, the encrypted crypto block, LLM providers and API keys,
+per-session editor buffers, saved queries, parameter history, chat
+logs, and the on-disk session log all stay **per-project** in
+`./.rowdy/`. They are not user-wide.
 
-Runtime mutators (`:theme dark`, `:width 48`) write to the
-**project** file, not the user file — the project file remains the
+Runtime mutators for UI prefs (`:theme <name>`, `:width 48`) write to
+the **project** file, not the user file — the project file remains the
 deliberate-pin lever.
 
 #### `:source`
 
 `:source` re-reads `~/.rowdy/config.toml`, `./.rowdy/config.toml`
-(UI prefs only — theme + schema_width), `~/.rowdy/keybindings.toml`,
-and the `llm_providers` block of both files. The active connection,
-the encrypted crypto block, the worker pool, and any in-flight query
-are **not** touched. On a malformed `keybindings.toml` the previous
+(re-applying theme + schema_width), and `~/.rowdy/keybindings.toml`,
+and reloads `AGENTS.md` for the chat. The active connection, the
+unlocked crypto store, the worker pool, and any in-flight query are
+**not** touched. On a malformed `keybindings.toml` the previous
 keymap stays active — you don't lose your working overrides because
-of one typo.
+of one typo. A malformed `config.toml` aborts the reload.
 
 #### `keybindings.toml` worked example
 
@@ -204,17 +244,23 @@ Tables are keyed by **context** (`global_immediate`, `leader`,
 keys are chord-notation strings and values are bindable action IDs.
 
 **Chord notation.** Bare characters (`r`, `:`, `0`, `$`), named
-keys (`<Esc>`, `<Enter>`, `<Tab>`, `<Up>`, `<Down>`, `<Left>`,
-`<Right>`, `<Home>`, `<End>`, `<PageUp>`, `<PageDown>`, `<Space>`,
-`<BackTab>`, `<Backspace>`), and modifier prefixes (`<C-x>`,
-`<S-r>`, `<C-S-r>`, `<C-Space>`). Two-step sequences are written
-adjacent (`gg`, `<Space>r`, `<C-w>l`).
+keys (`<Esc>`, `<Enter>`/`<Return>`, `<Tab>`, `<Up>`, `<Down>`,
+`<Left>`, `<Right>`, `<Home>`, `<End>`, `<PageUp>`, `<PageDown>`,
+`<Space>`, `<BackTab>`, `<Backspace>`/`<BS>`), and modifier prefixes
+(`<C-x>`, `<A-x>`, `<S-r>`, `<C-S-r>`, `<C-Space>`). Each entry is a
+**single key** looked up inside its context table — in `[leader]`
+write `r`, not `<Space>r`. Two-key sequences such as `gg` or
+`<Space>r` are rejected with an error.
 
 **Chord openers are NOT rebindable.** `<Space>` (leader chord),
-`Ctrl+W` (window chord), and `g`/`G` (GG navigation) trigger state
-transitions into the chord machine — they don't fire actions
-themselves and putting them in any context table is a parse error.
-Rebind chords *under* them (e.g. `<Space>r`) instead.
+`Ctrl+W` (window chord), and `g` (GG navigation) are intercepted before
+the keymap is consulted, so binding them in any context table has no
+effect. Rebind the keys *under* them (the `[leader]` table) instead.
+
+**All-or-nothing.** If any entry has an unknown chord or action ID (or is a multi-key sequence),
+the whole file is rejected and the defaults (or, on `:source`, your
+previous keymap) stay active. Overrides add bindings; there is no way
+to unbind a default.
 
 **Bindable action IDs by context.**
 
@@ -224,16 +270,15 @@ Rebind chords *under* them (e.g. `<Space>r`) instead.
 | `global_immediate`| `format-buffer`                 | Format SQL under the cursor                                |
 | `global_immediate`| `grow-schema`                   | Grow schema panel width                                    |
 | `global_immediate`| `shrink-schema`                 | Shrink schema panel width                                  |
-| `global_immediate`| `open-completion-popover`       | Open autocomplete popover                                  |
+| `global_immediate`| `open-completion-popover`       | Open autocomplete popover (no default chord — `Ctrl+Space` is built in) |
 | `leader`          | `run-prompt-or-selection`       | Run selection (Visual) / prompt to run statement (Normal)  |
 | `leader`          | `run-statement-under-cursor`    | Run the statement under the cursor — no prompt             |
 | `leader`          | `cancel-query`                  | Cancel the in-flight query                                 |
 | `leader`          | `expand-latest-result`          | Expand the latest result to full view                      |
-| `leader`          | `toggle-theme`                  | Toggle Dark / Light theme                                  |
 | `leader`          | `set-right-panel-schema`        | Switch right panel to schema (and focus)                   |
 | `leader`          | `set-right-panel-chat`          | Switch right panel to chat (and focus)                     |
 | `leader`          | `next-session`                  | Cycle to the next per-connection editor session            |
-| `leader`          | `session-switch-1` … `-9`       | Jump straight to session N (default chord: `<Space>` then the shifted digit `!@#$%^&*(`) |
+| `leader`          | `session-switch-0` … `-9`       | Jump straight to session N (default chord: `<Space>` then the digit `0`–`9`) |
 | `schema`          | `schema-up` / `schema-down`     | Move selection                                             |
 | `schema`          | `schema-collapse-or-ascend`     | Collapse node or ascend                                    |
 | `schema`          | `schema-expand-or-descend`      | Expand node or descend                                     |
@@ -250,14 +295,15 @@ Rebind chords *under* them (e.g. `<Space>r`) instead.
 | `chat_normal`     | `chat-{top,bottom}`             | Jump to top / bottom of log                                |
 | `chat_insert`     | `chat-{scroll-up,scroll-down,page-up,page-down}` | Log scroll while composer is focused      |
 
-Today only the **`global_immediate`**, **`leader`**, and **`schema`**
-tables are routed through the keymap inside `event::translate`. The
-`result`, `chat_normal`, and `chat_insert` tables are accepted by the
-parser and surfaced to the help popover but the corresponding
-keystrokes still flow through the hardcoded matches in `src/event.rs`,
-because their behaviour depends on per-mode sub-state (Visual vs
-Normal, composer focused vs scroll). Wiring these last three is
-tracked as Phase 2 follow-up.
+All six tables are routed through the keymap inside `event::translate`.
+In `result`, `chat_normal`, and `chat_insert` a few keys whose meaning
+depends on per-mode sub-state stay built in and are checked first:
+`Esc`, `q`, `v`, `:`, and `g` in the expanded result view; `Esc` and `g`
+in chat Normal; clipboard keys, `Ctrl+U`, `Ctrl+W`, `Esc`, and `Enter`
+in the chat composer. Built-in aliases that aren't in the keymap (arrow
+keys, `Home`/`End`, `I`) keep working alongside your overrides. Leader
+overrides show up in the `<Space>` hint popover; the `:help` cheat sheet
+is static.
 
 **Sparse overrides + new defaults.** Newly-added defaults reach
 existing users automatically. If you happened to bind the same chord
@@ -287,7 +333,7 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
 > introspection sees the data your queries created.
 
 > **System schemas are hidden** by default — Postgres `pg_catalog`,
-> `information_schema`, `pg_toast`, `pg_temp_*`; MySQL `information_schema`,
+> `information_schema`, `pg_toast`, `pg_temp_*`, `pg_toast_temp_*`; MySQL `information_schema`,
 > `mysql`, `performance_schema`, `sys`. You can still query them by name.
 
 ## Features
@@ -301,32 +347,48 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
     `:command` prompt and as the run-confirmation prompt.
 - **Async query execution** through a tokio worker. The UI never blocks on
   the database; a single in-flight query is enforced and `:cancel` aborts it.
-- **Session-pinned connection.** Each driver holds one connection across
-  `execute()` calls, so `BEGIN` / `COMMIT` / `ROLLBACK` issued as
-  separate statements all land on the same backend — and an interactive
-  transaction can span several `<Space>r` runs. Introspection and
-  `:cancel` still use the pool, so neither stalls behind a slow query.
-- **Multi-statement execution.** A selection (Visual `<Space>r`) or
-  buffer containing several semicolon-separated statements runs them in
-  order on the pinned session. The bottom bar shows
+- **Transaction-pinned connection.** Once you issue `BEGIN`, the driver
+  pins that pool connection until the transaction ends, so
+  `BEGIN` / `COMMIT` / `ROLLBACK` issued as separate statements all land
+  on the same backend — an interactive transaction can span several
+  `<Space>r` runs. Outside a transaction the connection goes back to
+  the pool after each statement (so session state such as
+  `SET search_path` isn't guaranteed to stick). Introspection and
+  `:cancel` use the pool, so neither stalls behind a slow query.
+  Postgres/MySQL pools connect lazily (max 3 connections, idle ones
+  reaped after 60s).
+- **Multi-statement execution.** A Visual selection (`<Space>r`) or a
+  saved query containing several semicolon-separated statements runs
+  them in order on the same session. The bottom bar shows
   `ok — N rows in T · ran K statements`. Execution stops at the first
-  error so a broken script doesn't keep mutating state past the failure.
+  error (`statement K of N failed: …`) so a broken script doesn't keep
+  mutating state past the failure.
 - **Confirm-before-run**: `<Space>r` highlights the SQL statement under the
   cursor and asks before executing it. `<Space>R` bypasses the confirmation;
   in editor Visual mode `<Space>r` runs the explicit selection straight away.
-- **Typed result cells** (`Null / Bool / Int / Float / Text / Bytes /
-  Timestamp / Date / Time / Uuid / Other`) — preserved end-to-end so the
+- **Destructive-statement guard**: `UPDATE` / `DELETE` without a `WHERE`
+  and any `TRUNCATE` always stop for a `⚠ … — confirm to run` prompt,
+  even from `<Space>R`, `:run`, or a Visual selection.
+- **Query parameters**: `$1` / `:name` placeholders open a prompt to fill
+  them in before running — see [Query parameters](#query-parameters).
+- **Saved queries** per connection: `:save`, `:load`, `:run-saved` — see
+  [Saved queries](#saved-queries).
+- **Typed result cells** (`Null / Bool / Int / UInt / Float / Decimal /
+  Text / Bytes / Timestamp / Date / Time / Uuid / Other`) — preserved end-to-end so the
   CSV / TSV / JSON / SQL exporters keep type fidelity. The TUI renders each
   cell via its own `display()`; `NULL` cells are dimmed. The bottom row of
   the expanded result view shows the full value of the selected cell so
   wide values stay readable when the column is narrower than them.
 - **Yank and export** in the expanded result view: `y` copies the
   current cell to the clipboard, `v` enters Visual mode for a
-  rectangular selection, and `:export csv|tsv|json|sql` (or `y` from
-  Visual) copies the result — full or selected — in the chosen format.
+  rectangular selection and `y` then copies it as CSV/TSV/JSON/SQL, and
+  `:export csv|tsv|json|sql` exports the selection (or, without one, the
+  whole latest result).
   `:export sql` infers the source table from simple `SELECT … FROM t`
-  shapes; pass it explicitly for joins/aggregates. Pass a path after the
-  format to write to disk instead of the clipboard.
+  shapes; pass it explicitly for joins/aggregates. Add a path to write
+  to disk instead of the clipboard.
+- **Column tools** in the expanded view: reorder (`H`/`L`), hide (`x`),
+  and reset (`R`) columns.
 - **SQL autocomplete** — syntax-aware popover via sqlparser's tokenizer.
   Completes keywords, tables, columns, SQL functions, and CTE names with
   FROM/JOIN alias resolution. Auto-triggers in Insert mode after `.` or
@@ -334,8 +396,21 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
   dialect-quoted on insert. Schema cache primed at connect time; columns
   load lazily; DDL run from rowdy auto-reloads. See the
   [Autocomplete](#autocomplete) reference for the full behaviour.
-- **SQL formatter** — `=` in editor Normal mode formats the whole buffer;
-  in Visual mode formats the selection. `:format` does the same.
+- **SQL formatter** — `=` formats the statement under the cursor (or the
+  Visual selection); `:format` does the same and `:format all` formats
+  the whole buffer.
+- **Vim search & replace** — `/` search highlights every match (`Esc`
+  clears them), and `:[range]s/pattern/replacement/[gic]` substitutes,
+  with an interactive confirm for the `c` flag — see
+  [Search & replace](#search--replace).
+- **Command-bar completion** — typing after `:` pops up matching command
+  names; `Tab` accepts.
+- **Which-key hints** — pressing `<Space>` or `Ctrl+W` pops up the keys
+  that can follow (leader overrides from `keybindings.toml` included).
+- **Mouse support** — click to focus panels and toggle schema nodes,
+  scroll the schema / chat / results with the wheel, click an inline
+  result cell to open the expanded view at that cell, and drag to
+  select cells in the expanded view.
 - **Three SQL drivers** sharing the same `Datasource` trait:
   - **SQLite** — in-memory or file-based, schema via `sqlite_master` and
     `pragma_*` virtual tables.
@@ -345,8 +420,9 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
   - **MySQL / MariaDB** — schema via `information_schema`, `column_type` for
     declared types (preserves `unsigned`, display widths, etc.).
 - **LLM chat companion** in the right panel — multi-provider (OpenAI,
-  Anthropic, Ollama, Google, DeepSeek, OpenRouter via OpenAI-compat),
-  streaming, with first-class tools for the schema and editor buffer:
+  Anthropic, Ollama, Google, DeepSeek, OpenRouter), streaming, with
+  first-class tools for the schema, the editor buffer, and (read-only)
+  the project files:
   - **Schema tools** (`list_catalogs` / `list_schemas` / `list_tables` /
     `describe_table`) auto-load on first use against the live connection,
     so the model can answer "describe `users`" without you expanding the
@@ -356,6 +432,13 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
     precise find/replace that errors when the search snippet matches
     zero or multiple times, so the model can't accidentally clobber the
     buffer.
+  - **File tools** — `read_file`, `list_directory`, `grep_files`, locked
+    to the directory rowdy was started in and refusing `.env*` files.
+    By default each call asks for approval
+    (`read_tools = "off" | "ask" | "auto"`, set in `:chat settings`).
+  - **`AGENTS.md`** at the project root is loaded into the system
+    prompt; ones in subdirectories are picked up as the file tools
+    touch them.
   - **No execute-SQL tool** by design — drafts land in the editor and you
     review/run them yourself.
   - **Modal chat panel** — Normal mode (scrolling, globals work) and
@@ -364,19 +447,23 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
   - **Per-connection session persistence** — chat history saves to
     `./.rowdy/chats/<connection>/session.jsonl` and reloads on the next
     connect. `:chat clear` wipes it.
-  - **Encrypted API keys** — the LLM keystore shares the same crypto
-    block as saved connections, so one password unlocks both.
-- **Two themes** (Dark / Light) switchable at runtime, both tuned for high
-  text contrast. Theme + schema-panel width persist to `./.rowdy/config.toml`.
+  - **Encrypted API keys** — when the store is password-protected, the
+    LLM keystore shares the same crypto block as saved connections, so
+    one password unlocks both (with a plaintext store, keys are stored
+    in plaintext too).
+- **14 bundled themes** with a live-preview picker (`:theme`) — see
+  [Themes](#themes). Theme + schema-panel width persist to
+  `./.rowdy/config.toml`.
 - **Saved connections** in `./.rowdy/config.toml`, optionally encrypted with a
   password (argon2id + chacha20-poly1305). Pick one from `:conn`, switch live
   with `:conn use NAME`. The password prompts in-TUI on launch or via
   `--password`. Manage them without the TUI via `rowdy connections …`. The
   connection form includes `Ctrl+T` to test a URL before saving.
 - **Per-connection editor sessions** persisted at
-  `./.rowdy/sessions/<name>/session_0.sql`. The buffer is flushed 800ms
-  after the last edit and reloaded on the next launch (or `:conn use`
-  switch).
+  `./.rowdy/sessions/<name>/session_<N>.sql` — several buffers per
+  connection (`:session new`, `<Space>n`, `<Space>0`–`9`). The buffer is
+  flushed 800ms after the last edit and reloaded on the next launch (or
+  `:conn use` switch).
 - **Vim-style modal input** end-to-end: editor uses real vim bindings via
   edtui; the schema panel and result viewer use the same `hjkl` / `gg` / `G`
   vocabulary.
@@ -386,7 +473,7 @@ protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
 ## Keybindings
 
 rowdy uses **vim-style bindings everywhere**. Three layers determine what a
-key does: the global app `Mode`, the focused panel, and the editor's own vim
+key does: the active screen or overlay (prompt, popup, expanded result), the focused panel, and the editor's own vim
 mode (Normal / Insert / Visual / Search).
 
 ### Global
@@ -402,12 +489,17 @@ In an insert mode, press `Esc` first.
 | `Esc` (Schema/Chat)   | Focus editor (right panel keeps painting whatever it had) |
 | `Ctrl+W` then `h`/`l` | Focus editor / right panel (schema or chat)             |
 | `Ctrl+W` then `<`/`>` | Grow / shrink schema panel width                        |
-| `Ctrl+C`              | Panic exit (use `:q` for a clean quit)                  |
+| `<` / `>`             | Grow / shrink schema panel width (from any panel)       |
+| `=`                   | Format SQL (editor Visual: selection; otherwise the statement under the cursor) |
+| `Q`                   | Hide the inline result preview (same as `:close`)       |
+| `Ctrl+C`              | Quit (same as `:q`) — from anywhere except the `:` prompt, password prompt and connection form, where it copies |
 
 ### Clipboard
 
-In any input modal (auth prompt, connection form, `:` command prompt) the
-standard system-clipboard shortcuts are wired up:
+In the text inputs (auth prompt, connection form, `:` command prompt,
+LLM settings, query-parameter prompt, chat composer) the standard
+system-clipboard shortcuts are wired up. In the last three, plain
+`Ctrl+C` quits rowdy — use `Ctrl+Shift+C` / `Cmd+C` to copy there.
 
 | Keys                                                    | Action |
 |---------------------------------------------------------|--------|
@@ -415,7 +507,9 @@ standard system-clipboard shortcuts are wired up:
 | `Ctrl+C` / `Ctrl+Shift+C` / `Cmd+C` (with selection)    | Copy   |
 | `Ctrl+X` / `Ctrl+Shift+X` / `Cmd+X` (with selection)    | Cut    |
 
-Copy is suppressed in the password prompt — exposing the masked buffer
+`Ctrl+U` clears the field in all of them.
+
+Copy and cut are suppressed in the password prompt — exposing the masked buffer
 would defeat the masking. Bracketed paste from the terminal (which is what
 most macOS terminals deliver for `Cmd+V`) is also accepted.
 
@@ -436,13 +530,18 @@ normal mode. Not in any insert mode (Esc out first).
 | `<Space> R` | Run the statement under the cursor immediately — no prompt       |
 | `<Space> e` | Expand the latest result to full view                            |
 | `<Space> c` | Cancel the in-flight query                                       |
-| `<Space> t` | Toggle Dark / Light theme                                        |
 | `<Space> S` | Switch right panel to schema (and focus it)                      |
 | `<Space> C` | Switch right panel to chat (and focus it, in normal mode)        |
 | `<Space> n` | Cycle to the next per-connection editor session                  |
-| `<Space> Shift+1`…`<Space> Shift+9` | Switch directly to session 1…9 (US layout: `<Space> !` … `<Space> (`) |
-| `=`         | Format SQL (Visual: selection; Normal: whole buffer)             |
-| `Ctrl+Space`| Open SQL autocomplete popover (works in any editor mode)         |
+| `<Space> 0`…`<Space> 9` | Switch directly to session 0…9                       |
+
+`Ctrl+Space` opens the SQL autocomplete popover (editor focus, any vim
+mode).
+
+After `<Space>` (or `Ctrl+W`) a hint popover lists every key that can
+follow; it closes as soon as you press the next key.
+
+![The <Space> leader hint popover](docs/screenshots/leader-hints.png)
 
 The editor itself is a full vim implementation — `i`, `Esc`, `hjkl`, `w`,
 `b`, `dd`, `yy`, `p`, `u`, `Ctrl+R`, visual mode, search, etc. See
@@ -461,6 +560,9 @@ statement and the bottom bar reads:
 | `Esc`    | Cancel            |
 
 All other keys are intentionally ignored to prevent accidental edits.
+
+The same prompt (with `⚠ DELETE without WHERE — confirm to run` and
+similar) guards destructive statements on every run path.
 
 ### Schema panel
 
@@ -518,8 +620,9 @@ history; scrolling back to the bottom (or `G` / `Ctrl+End`) re-engages it.
 
 #### Tools the model uses
 
-The chat panel registers six tools the model can call. They all run on
-the UI thread against the live app state — no separate worker.
+The chat panel registers nine tools the model can call. Schema and
+buffer tools run against the live app state (a schema cache miss asks
+the DB worker to introspect); file tools run on a blocking thread.
 
 | Tool             | Purpose                                                      |
 |------------------|--------------------------------------------------------------|
@@ -529,6 +632,15 @@ the UI thread against the live app state — no separate worker.
 | `describe_table` | Columns + types for a table or view; auto-loads on first use |
 | `read_buffer`    | Read the editor buffer with line pagination (`start_line`, `limit`) |
 | `write_buffer`   | Find/replace in the editor buffer — `search` must match exactly once (`start_line` constrains scope); zero or multiple matches return an error so the model extends the snippet |
+| `read_file`      | Read a project file (paginated)                              |
+| `list_directory` | List a project directory                                     |
+| `grep_files`     | Regex search across project files                            |
+
+The three file tools are jailed to the project root (the directory
+rowdy was started in) and refuse any `.env` / `.env.*` path. With the
+default `read_tools = "ask"` each call pauses on
+`🔒 chat wants to read … y to allow · n/Esc to deny`; `auto` runs them
+without asking and `off` doesn't register them at all.
 
 Schema tools auto-trigger introspection on cache miss, so the model can
 ask about a table you haven't expanded yet. `write_buffer` parks the
@@ -536,12 +648,13 @@ cursor at the modified line so the change is immediately visible.
 
 #### Provider configuration
 
-Open the settings modal with `:chat settings`. Pick a backend, enter a
-model id and an API key. Keys are encrypted with the same `argon2id +
-chacha20-poly1305` block used for connection passwords, so unlocking the
-store at startup unlocks both. Backends ship as Cargo features
-(`openai`, `anthropic`, `ollama`, `google`, `deepseek`); OpenRouter is
-served via the OpenAI-compatible base URL.
+Open the settings modal with `:chat settings`. Pick a backend (OpenAI,
+Anthropic, Ollama, Google, DeepSeek, OpenRouter — all compiled in),
+enter a model id, an optional base URL, and an API key, and choose the
+read-tools mode (Off / Ask / Auto). When the store is password-protected,
+keys are encrypted with the same `argon2id + chacha20-poly1305` block
+used for connection passwords, so unlocking the store at startup
+unlocks both.
 
 ### Expanded result view
 
@@ -549,18 +662,28 @@ When you've expanded a result block (`<Space>e` or `:expand`).
 
 | Keys         | Action                                                     |
 |--------------|------------------------------------------------------------|
-| `h j k l`    | Move cell cursor                                           |
-| `0` / `$`    | First / last column in row                                 |
+| `h j k l` / arrows | Move cell cursor                                     |
+| `0` / `$` (`Home` / `End`) | First / last column in row                   |
 | `gg` / `G`   | First / last row                                           |
 | `y`          | Yank — current cell (Normal) or selection (Visual, prompts for format) |
 | `v`          | Toggle Visual mode (rectangular cell selection)            |
+| `H` / `L`    | Move the current column left / right                       |
+| `x`          | Hide the current column                                    |
+| `R`          | Reset column order and visibility                          |
+| `:`          | Command bar — `:export` acts on the Visual selection        |
 | `q` / `Esc`  | Visual: exit Visual · Normal: close expanded view          |
 
-When the result has more columns than fit on screen the view scrolls
-horizontally to keep the cursor visible. The title shows `cols X-Y of Z`
-with `‹`/`›` markers when there are columns off-screen on either side. The
-inline preview shows only the leftmost columns that fit and a `+N →` count
-of how many were truncated — expand it to navigate.
+The mouse works here too: the wheel scrolls and dragging selects a
+rectangle (entering Visual mode).
+
+![Expanded result view with a Visual selection and the yank-format prompt](docs/screenshots/results.png)
+
+When the result has more rows or columns than fit on screen the view
+scrolls to keep the cursor visible. The title shows `rows X-Y of Z` and
+`cols X-Y of Z` with `↑`/`↓` and `‹`/`›` markers when there is content
+off-screen, plus the cursor position and, in Visual mode, the selection
+size. The inline preview shows only the leftmost columns that fit and a
+`+N →` count of how many were truncated — expand it to navigate.
 
 The bottom row of the expanded view shows `column: value` for the selected
 cell, clipped with `…` when the value is wider than the row. Use yank to
@@ -577,12 +700,16 @@ format and the selection is copied; `Esc` returns you to Visual with the
 selection intact.
 
 `:export csv|tsv|json|sql` does the same thing from the command bar.
-With an active Visual selection it exports just the rectangle; otherwise
-it exports the latest result block in full.
+With an active Visual selection in the expanded view it exports just the
+rectangle (and `:export sql <table>` lets you name the target table for
+it); otherwise it exports the latest result block in full.
 
 Pass a path after the format to write to disk instead of the clipboard:
-`:export csv path/to/out.csv`. A leading `>` is optional and ignored
-(`:export csv > out.csv` is the same call). `~` and `~/` expand to
+`:export csv path/to/out.csv`. A leading `>` (as its own word) is
+optional and ignored (`:export csv > out.csv` is the same call). For
+`sql` the first word is the table name, so write
+`:export sql <table> out.sql` or `:export sql > out.sql` (inferred
+table) — `:export sql out.sql` would treat `out.sql` as the table. `~` and `~/` expand to
 `$HOME`; everything else is passed verbatim to the OS. The parent
 directory must already exist; existing files are overwritten without a
 prompt.
@@ -610,10 +737,10 @@ Format details:
     wildcard (`*` or `<table>.*`) or a list of bare/qualified
     identifiers without aliases. Anything else (joins, aggregates,
     aliased projections, computed columns) refuses inference and
-    asks for `:export sql <table>`. Visual selection only requires
-    the *selected* projection items to satisfy the rule, so a
-    column-subset of a join can still infer if those particular
-    columns are clean.
+    asks for `:export sql <table>`. A Visual selection only requires
+    the *selected* projection items to satisfy the projection rule,
+    so on a single-table query you can still yank the clean columns
+    even if others are aliased or computed (joins never infer).
   - **Limitations**. No `CREATE TABLE` prelude (target schema must
     already exist), no `BEGIN`/`COMMIT` wrapping, no `ON CONFLICT` /
     `ON DUPLICATE KEY` clauses; selecting a column subset that
@@ -623,8 +750,11 @@ Format details:
 
 The popover **auto-opens** in editor Insert mode after you type `.` or
 at least N identifier characters (default 2, configurable via
-`completion_trigger_threshold` in `~/.rowdy/config.toml`);
-`Ctrl+Space` forces it open in any editor mode.
+`completion_trigger_threshold` in `~/.rowdy/config.toml`; `0` means only
+after `.`); `Ctrl+Space` forces it open in any editor mode.
+
+![Column completion after an alias](docs/screenshots/autocomplete.png)
+
 Selection and acceptance:
 
 | Keys                  | Action                                          |
@@ -649,13 +779,17 @@ suggestions:
   CTE bodies with named columns surface those columns; `SELECT *`
   bodies resolve against the schema cache when the FROM has a single
   base table.
-- After `SELECT` / `WHERE` / `ON` / `AND` / `,` / `INSERT INTO`
-  column list / operators → **columns** unioned across FROM/JOIN
-  bindings (qualifier-free) plus **SQL functions** (per-dialect
-  curated list).
-- Statement start, after `;`, or unrecognised slot → **keywords**.
+- After `SELECT` / `WHERE` / `ON` / `AND` / `OR` / `HAVING` /
+  `ORDER BY` / `GROUP BY` / `SET` / `USING` / `IN` / `(` / `,` /
+  `INSERT INTO` column list / comparison and arithmetic operators →
+  **columns** unioned across FROM/JOIN bindings (qualifier-free) plus
+  **SQL functions** (per-dialect curated list). With no FROM bindings
+  yet, these slots fall back to the mixed list below.
+- Statement start or after `;` → **keywords**.
+- Any other slot → a **mixed** list: keywords, functions, bound
+  columns, and CTE names.
 
-FROM/JOIN/INSERT aliases are resolved by a forward pass over the *whole*
+FROM/JOIN/UPDATE/INSERT aliases are resolved by a forward pass over the *whole*
 statement, so `SELECT u.|` autocompletes correctly even when the
 `FROM users u` clause comes after the cursor. CTE definitions
 (`WITH name AS (…)`, optional `RECURSIVE`, multiple comma-separated
@@ -665,14 +799,18 @@ projections are extracted for column completion.
 **Ranking.** Candidates are scored with `nucleo-matcher` (fuzzy
 subsequence match) and re-ordered by:
 
-1. Score (higher = better, with a +500 bonus when the label has the
-   user's exact prefix).
-2. **Kind bonus** matched to the syntactic context: `+1000` for
-   columns in column slots, tables in table slots, etc., so a
-   shorter coincidentally-matching keyword can't shadow the right
-   answer.
-3. Shorter labels first.
-4. Alphabetical.
+1. Score (higher = better): the fuzzy score, plus +500 when the label
+   has the user's exact prefix, plus a **kind bonus** matched to the
+   syntactic context — `+1000` for columns in column slots and tables
+   in table slots (`+1100` for CTEs there), `+200` for columns in mixed
+   slots, `+100` for keywords in keyword slots, `+50` for functions in
+   mixed slots — so a shorter coincidentally-matching keyword can't
+   shadow the right answer.
+2. Shorter labels first.
+3. Alphabetical.
+
+With nothing typed yet (e.g. right after `.`) there's no fuzzy step:
+kind bonus first, then alphabetical.
 
 **Insert.** Accepting an item writes into the buffer with three
 refinements:
@@ -684,14 +822,16 @@ refinements:
   `` `x` `` for MySQL — and any internal quote chars are doubled.
   Keywords and functions are inserted *as displayed*, never quoted.
 - **Trail** depends on item kind:
-  - **Table / view** in a FROM/JOIN/INSERT INTO slot → auto-generated
-    short alias (e.g. `users u` from first letters of underscore
-    segments).
+  - **Table / view / CTE** → a trailing space, then a one-item popover
+    offering a short alias (e.g. `u` for `users`, from the first letters
+    of underscore segments) — `Enter`/`Tab` accepts it, `Esc` skips it.
   - **Function** with arguments → appended `()` with the cursor
     between them, ready for arguments.
-  - **Function** with no arguments (`NOW`, `CURRENT_TIMESTAMP`,
-    `CURDATE`, …) → appended `()`, cursor at the end.
-  - **Column / keyword / CTE** → no trail.
+  - **Function** with no arguments (`NOW`, `CURDATE`, …) → appended
+    `()`, cursor at the end. SQL-standard niladic forms
+    (`CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_TIMESTAMP`) are inserted
+    bare.
+  - **Column / keyword** → no trail.
 
 **Schema cache.** Catalogs, schemas of the default catalog, and tables
 of the default schema are eagerly loaded on connect. **Columns load
@@ -707,11 +847,17 @@ After pressing `:`.
 
 | Keys             | Action                  |
 |------------------|-------------------------|
-| `Enter`          | Submit                  |
+| `Enter`          | Submit (completes the highlighted command first if the popover is open) |
 | `Esc`            | Cancel                  |
+| `Tab`            | Accept the highlighted command completion |
+| `Up` / `Down` / `Ctrl+P` / `Ctrl+N` | Move the completion selection |
+| `Ctrl+U`         | Clear the line          |
 | `Backspace`      | Delete character        |
 | `Left` / `Right` | Move cursor             |
-| typing           | Insert character        |
+| typing           | Insert character (command names are prefix-matched in a popover) |
+
+Pressing `:` with an editor Visual selection pre-fills `'<,'>` for
+[substitute](#search--replace).
 
 ## Commands
 
@@ -723,18 +869,25 @@ After pressing `:`.
 | `:cancel`                    | Cancel the in-flight query                                      |
 | `:expand`, `:e`              | Expand the latest result                                        |
 | `:collapse`, `:c`            | Close the expanded result view                                  |
+| `:close`, `:hide`            | Hide the inline result preview (the next query shows it again; also `Q`) |
 | `:width <cols>`              | Set schema panel width (clamped 12–80)                          |
-| `:theme dark` \| `light`     | Switch theme                                                    |
-| `:theme toggle` \| `:theme`  | Flip between Dark and Light                                     |
-| `:export csv` \| `tsv` \| `json` `[path]` | Copy the latest result (or Visual selection) to the clipboard, or write to `path` if given |
+| `:theme`                     | Open the theme picker                                           |
+| `:theme <name>`              | Switch to a bundled theme (e.g. `:theme nord`)                  |
+| `:export csv` \| `tsv` \| `json` `[path]` | Copy the latest result (or the expanded view's Visual selection) to the clipboard, or write to `path` if given |
 | `:export sql [table] [path]` | Emit `INSERT` statements. Table is inferred from the query for simple `SELECT * FROM t` / `SELECT cols FROM t` shapes; pass `<table>` explicitly for joins, aggregates, aliases, etc. `:export sql > path` writes to disk with inferred table |
-| `:format`, `:fmt`            | Format the SQL buffer (or active Visual selection) via `sqlformat`. Undo via edtui's `u` won't restore the pre-format text — yank first if you need a backup |
+| `:format`, `:fmt`            | Format the statement under the cursor (or active Visual selection) via `sqlformat`. Undo via edtui's `u` won't restore the pre-format text — yank first if you need a backup |
+| `:format all`                | Format the whole buffer                                         |
+| `:[range]s/pat/repl/[gic]`   | Vim-style substitute — see [Search & replace](#search--replace) |
+| `:save <name>`               | Save the Visual selection (or statement under the cursor) as a named query for this connection; asks before overwriting |
+| `:load <name>`               | Insert a saved query at the cursor                              |
+| `:run-saved [name]`          | Run a saved query; with no name, open a picker                  |
+| `:update`                    | Check GitHub for a newer release now                            |
 | `:reload`                    | Drop and re-prime the autocomplete schema cache against the active connection (use after DDL outside the app) |
 | `:reset`                     | Roll back any open transaction on the pinned session connection and drop it; the next query re-acquires a fresh connection |
 | `:clear`                     | Wipe the editor buffer, drop result blocks, and reset the session (useful after a multi-statement script you'd like to walk away from cleanly) |
 | `:source`                    | Re-read user + project UI prefs, the user keybindings file, and LLM provider records. Connections, crypto, the worker pool, and any in-flight query are NOT touched |
-| `:conn`, `:conn list`        | Open the connection list                                        |
-| `:conn add <name>`           | Open the form to create `<name>`                                |
+| `:conn`, `:conn list`        | Open the connection list (or the create form if none are saved) |
+| `:conn add [name]`           | Open the form to create a connection                            |
 | `:conn edit <name>`          | Open the form pre-filled with `<name>`'s URL (overwrite on save) |
 | `:conn delete <name>`        | Remove `<name>` (refuses if it's the active connection)         |
 | `:conn use <name>`           | Switch the active connection live                               |
@@ -746,6 +899,66 @@ After pressing `:`.
 | `:session new`               | Create a fresh session at the lowest unused index and switch to it |
 | `:session <N>`               | Switch to session `<N>` (must already exist)                    |
 | `:session delete <N>`        | Delete session `<N>` (refuses if it's the only remaining one)   |
+
+Aliases: `:conns`, `:conn ls` / `rm`, `:sess`, `:session ls` /
+`previous` / `rm`.
+
+### Query parameters
+
+Statements containing `$1`-style or `:name` placeholders (outside string
+literals and comments; `?` is deliberately not a placeholder) open a
+prompt before they run. Values are spliced into the SQL **as text**, so
+quote strings yourself (`'shipped'`); `NULL` or any SQL expression also
+works. The last values you used are remembered per connection.
+
+| Keys                | Action                 |
+|---------------------|------------------------|
+| `Tab` / `Shift+Tab` | Next / previous field  |
+| `Enter`             | Run                    |
+| `Esc`               | Cancel                 |
+| `Ctrl+U`            | Clear the field        |
+
+![The query-parameter prompt](docs/screenshots/query-params.png)
+
+### Saved queries
+
+`:save <name>` stores the Visual selection (or the statement under the
+cursor) as `./.rowdy/queries/<connection>/<name>.sql` — plain files you
+can edit or grep outside rowdy. `:load <name>` inserts one at the
+cursor; `:run-saved <name>` runs it through the normal pipeline
+(parameter prompt, destructive guard, multi-statement), and bare
+`:run-saved` opens a picker (`j`/`k`, `Enter` to run, `Esc` to close).
+
+### Search & replace
+
+`/pattern` searches the editor buffer and highlights every match;
+`Esc` in Normal mode clears the highlights.
+
+`:[range]s/pattern/replacement/[flags]` substitutes, vim-style:
+
+- **Range** — none (cursor line), `%` (whole buffer), `N,M`, `.`, `$`,
+  or `'<,'>` (the Visual selection; pressing `:` in Visual pre-fills it).
+- **Flags** — `g` every match on the line, `i` case-insensitive, `c`
+  confirm each match (`y` replace · `n` skip · `a` all · `l` last ·
+  `q`/`Esc` stop).
+- **Regex** — Rust's [`regex`](https://docs.rs/regex) syntax, not vim's.
+  In the replacement, `$1` / `${name}` / `\1` reference groups, `&` or
+  `\0` the whole match; write `$$` for a literal `$` and `\&` for a
+  literal `&`.
+
+![Interactive substitute (:%s/…/…/gc)](docs/screenshots/substitute.png)
+
+### Themes
+
+14 themes are compiled in: `base16-dark` (default), `dark`, `dracula`,
+`gruber-darker`, `gruvbox`, `monokai`, `neon`, `nord`, `rose-pine`,
+`solarized-dark`, `base16-light`, `github-light`, `light`,
+`solarized-light`. Bare `:theme` opens a picker with a live preview
+(`j`/`k` or arrows, `g`/`G`, `Enter` to apply, `Esc` to cancel);
+`:theme <name>` switches directly. The editor's syntax highlighting
+follows the theme.
+
+![The theme picker previewing gruvbox](docs/screenshots/theme-picker.png)
 
 ### Connection list
 
@@ -783,7 +996,7 @@ ports there.
 
 ## Architecture
 
-The codebase is a small, MVC-flavoured loop with an async worker on the side:
+The codebase is a small, MVC-flavoured loop with async workers on the side:
 
 ```
             ┌──────────────────────────────────────────────────┐
@@ -794,50 +1007,66 @@ The codebase is a small, MVC-flavoured loop with an async worker on the side:
             │  │ select!:                                  │   │
             │  │   crossterm EventStream  → Action         │   │
             │  │   worker → app channel   → Action::Worker │   │
+            │  │   session-save debounce · elapsed tick    │   │
             │  └───────────────────────────────────────────┘   │
             │              │                  ▲                │
             │      cmd_tx  │                  │  evt_rx        │
             │              ▼                  │                │
-            │  worker task                                     │
+            │  worker task          (evt_rx is also fed by the │
+            │                        LLM chat worker and the   │
+            │                        update check)             │
             │  ┌───────────────────────────────────────────┐   │
             │  │ owns Arc<dyn Datasource> (sqlx::Pool)     │   │
             │  │ tracks current query JoinHandle           │   │
-            │  │ dispatches Execute / Cancel / Introspect  │   │
+            │  │ Connect / Execute / Cancel / Introspect / │   │
+            │  │ ResetSession / completion-cache priming   │   │
             │  └───────────────────────────────────────────┘   │
             └──────────────────────────────────────────────────┘
 ```
 
 - `App` (`src/app.rs`) owns the entire UI state and the `cmd_tx` handle.
-- `Action` (`src/action.rs`) enumerates every legal mutation; `apply()` is
-  the single dispatcher.
+- `Action` (`src/action/mod.rs`, with per-feature submodules) enumerates
+  the legal mutations; `apply()` is the dispatcher. Parsed `:` commands
+  (`src/command.rs`) go through `dispatch_command`, which calls some
+  helpers directly.
 - `event::translate` (`src/event.rs`) is a pure function that turns a
-  `crossterm::Event` into an `Action` based on the current `Mode` and
-  `Focus`.
-- View functions under `src/ui/` derive entirely from `App` — they never
-  mutate state.
+  `crossterm::Event` (key, paste, or mouse) into an `Action` based on the
+  current overlay, screen, focus, pending chord, and popovers. Rebindable
+  keys are looked up in the `Keymap` (`src/keybindings/`).
+- View functions under `src/ui/` derive from `App`; the only thing they
+  write back is render-time bookkeeping (the mouse hit-test layout cache
+  and clamped scroll offsets).
 - `Datasource` (`src/datasource/mod.rs`) is the cross-driver trait:
   `introspect_catalogs`, `introspect_schemas`, `introspect_tables`,
-  `introspect_columns`, `introspect_indices`, `execute`, `cancel`, `close`.
-  Drivers live under `src/datasource/sql/`.
+  `introspect_columns`, `introspect_indices`, `default_schema`,
+  `execute`, `cancel`, `reset_session`. Drivers live under
+  `src/datasource/sql/`.
 - The worker (`src/worker/mod.rs`) owns the live connection pool, runs at
   most one query at a time, and fans introspection out concurrently.
-  `:cancel` aborts the in-flight `JoinHandle` *and* sends a server-side
-  cancel (`pg_cancel_backend` for Postgres, `KILL QUERY` for MySQL) so the
+  `:cancel` sends a server-side cancel (`pg_cancel_backend` for Postgres,
+  `KILL QUERY` for MySQL) *and* aborts the in-flight `JoinHandle`, so the
   database doesn't keep grinding on a query the user gave up on. SQLite
   has no server-side cancel; the abort is the cancel.
 
 State is encoded so that invalid combinations are unrepresentable wherever
 possible:
 
-- `Focus { Editor, Schema }` — exactly one panel owns input.
-- `Mode { Normal, Command(CommandBuffer), ResultExpanded { id, cursor,
-  col_offset, row_offset }, ConfirmRun { statement }, Auth(AuthState),
-  EditConnection(ConnFormState), ConnectionList(ConnListState),
-  Connecting { name } }` — every variant carries the data its UI needs;
-  no "expanded but no result", no "in command mode but no buffer", no
-  "awaiting confirmation but no statement".
-- `QueryStatus { Idle, Running, Succeeded, Failed, Cancelled }` — replaces a
-  bag of booleans / `Option<String>` fields.
+- `Focus { Editor, Schema, Chat, ChatComposer }` — exactly one panel owns
+  input; `PendingChord { None, Window, Leader, GG }` tracks a half-typed
+  chord.
+- `Screen { Normal, ResultExpanded { id, cursor, col_offset, row_offset,
+  view, column_view }, Auth(AuthState), EditConnection(ConnFormState),
+  ConnectionList(ConnListState), ThemePicker(ThemePickerState) }` — the
+  full-screen state, always present.
+- `Option<Overlay>` floats on top: `Command(CommandBuffer)`,
+  `ConfirmRun { statement, reason }`, `Connecting { name }`, `Help`,
+  `LlmSettings`, `UpdateAvailable`, `ParamsPrompt`, `ConfirmToolUse`,
+  `ConfirmSaveOverwrite`, `SavedQueryPicker`, `ConfirmSubstitute`. Every
+  variant carries the data its UI needs; no "expanded but no result", no
+  "in command mode but no buffer", no "awaiting confirmation but no
+  statement".
+- `QueryStatus { Idle, Running, Succeeded, Failed, Cancelled, Notice }` —
+  replaces a bag of booleans / `Option<String>` fields.
 - `LoadState { NotLoaded, Loading, Loaded, Failed(error) }` on every schema
   node — drives the lazy-load UX without any "is_loading + error" pairs.
 - `IntrospectTarget` — a single value identifies both *which level* to load
@@ -850,34 +1079,48 @@ possible:
 src/
   main.rs                 async entry point + tokio::select event loop
   app.rs                  App state + cmd_tx handle to the worker
-  action.rs               Action enum, apply() dispatcher, command parser
-  event.rs                crossterm Event → Action translation
-  cli.rs                  clap arg parsing (--connection NAME, --password)
+  command.rs              `:` command parser
+  event.rs                crossterm Event → Action translation (keys, paste, mouse)
+  cli.rs                  clap arg parsing (-c/--connection NAME, -p/--password)
   clipboard.rs            arboard wrapper for paste/copy/cut into inputs
   crypto.rs               argon2id KDF + chacha20poly1305 AEAD primitives
   connections.rs          ConnectionStore: encrypt/decrypt, unlock, make_entry
-  config.rs               .rowdy/config.toml load + lazy save
+  config.rs               ./.rowdy/config.toml load + lazy save
+  user_config.rs          ~/.rowdy/config.toml (user defaults, update state)
   log.rs                  Logger — Arc<Mutex<File>>, info/warn/error
   export.rs               CSV / TSV / JSON / SQL formatters for yank + :export
-  session.rs              .rowdy/sessions/<name>/session_0.sql load + save
+  sql_infer.rs            source-table inference for :export sql
+  sql_quote.rs            dialect-aware identifier quoting
+  session.rs              .rowdy/sessions/<name>/session_<N>.sql load + save
+  chat_session.rs         .rowdy/chats/<name>/session.jsonl persistence
+  saved_queries.rs        .rowdy/queries/<name>/*.sql (:save / :load / :run-saved)
+  param_history.rs        .rowdy/params/<name>.json (last-used parameter values)
+  substitute.rs           :s/pattern/replacement/flags engine
+  update.rs               GitHub release check + self-update
   subcommands.rs          non-TUI `rowdy connections …` handlers
   terminal.rs             terminal init / restore / panic hook
-  state/                  sub-state modules
-    editor.rs             EditorPanel + statement-under-cursor parser
-    schema.rs             SchemaPanel + LoadState + tree population
-    results.rs            ResultBlock + ResultCursor
-    command.rs            CommandBuffer
-    focus.rs              Focus + Mode + PendingChord
-    status.rs             QueryStatus
-    auth.rs               AuthState (password buffer + attempt counter)
-    conn_form.rs          ConnFormState (name + url two-field form)
-    conn_list.rs          ConnListState (saved connections, with delete-confirm)
+  action/                 Action enum + apply() (mod.rs) and per-feature handlers:
+                          auth, chat, completion, conn_form, conn_list,
+                          llm_settings, params_prompt, query, results,
+                          saved_queries, schema, session, substitute, update
+  autocomplete/           SQL completion: context detection, ranking engine,
+                          schema cache, keywords/functions, insert rules, DDL reload
+  keybindings/            keybindings.toml: chord parser, action IDs, keymap
+  llm/                    chat: provider mapping, keystore, prompt, tools
+                          (+ tools/schemas.rs), fs_root jail, AGENTS.md, worker
+  state/                  sub-state modules: editor, schema, results, command,
+                          focus, screen, overlay, status, layout, auth,
+                          conn_form, conn_list, chat, completion, llm_settings,
+                          params_prompt, right_panel, saved_query_picker,
+                          substitute_confirm, theme_picker
   datasource/
     mod.rs                Datasource trait + connect() factory
     cell.rs               typed Cell enum + display helpers
     schema.rs             CatalogInfo / SchemaInfo / TableInfo / …
     error.rs              DatasourceError
     sql/
+      mod.rs              shared helpers (statement splitting, destructive guard, …)
+      placeholders.rs     $N / :name placeholder scanning + splicing
       sqlite.rs           SqliteDatasource (sqlx)
       postgres.rs         PostgresDatasource (sqlx)
       mysql.rs            MysqlDatasource (sqlx, also handles mariadb://)
@@ -886,17 +1129,17 @@ src/
     request.rs            RequestId newtype + counter
   ui/
     mod.rs                render() — layout + cursor placement
-    editor_view.rs        edtui rendering with themed block + highlights
-    schema_view.rs        tree + load-state glyphs
-    results_view.rs       inline preview + expanded grid + cell badge
-    auth_view.rs          centered password prompt
-    conn_form_view.rs     centered name+url form
-    conn_list_view.rs     centered connection picker
-    help_view.rs          `:help` popover (bindings + commands cheat sheet)
-    bottom_bar.rs         status / command / confirm-run prompt
-    theme.rs              Dark + Light palettes
+    theme.rs              TOML theme registry (themes/*.toml, compiled in)
+    editor_view.rs, schema_view.rs, results_view.rs, chat_view.rs,
+    bottom_bar.rs, help_view.rs, leader_hints_view.rs, theme_picker_view.rs,
+    autocomplete_popover.rs, command_completion_popover.rs, auth_view.rs,
+    conn_form_view.rs, conn_list_view.rs, llm_settings_view.rs,
+    params_prompt_view.rs, saved_query_picker_view.rs
+themes/                   the 14 bundled themes (embedded at build time)
 examples/
   seed_sqlite.rs          creates a sample SQLite DB to test against
+  probe_sqlite.rs         small SQLite type-decoding probe
+docs/screenshots/         README screenshots + the vhs tapes that generate them
 ```
 
 ## Roadmap

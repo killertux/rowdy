@@ -1,11 +1,10 @@
 //! Keymap — chord → BindableAction lookup, per Context.
 //!
-//! `Context::GlobalImmediate`, `Leader`, and `Schema` are wired into
-//! `event::translate_*` preludes; `Result`, `ChatNormal`, and
-//! `ChatInsert` are populated for the help-popover render but their
-//! keys still flow through the hardcoded matches in `event.rs`
-//! (their behaviour depends on per-mode sub-state that is awkward to
-//! express through a flat keymap).
+//! Every context is wired into `event::translate_*`. `GlobalImmediate`,
+//! `Leader`, and `Schema` are consulted first; `Result`, `ChatNormal`,
+//! and `ChatInsert` are consulted after the keys whose behaviour
+//! depends on per-mode sub-state (Visual vs Normal, composer focused
+//! vs scroll), which stay hardcoded in `event.rs`.
 
 use std::collections::HashMap;
 
@@ -83,6 +82,12 @@ pub enum MergeError {
         chord: String,
         raw: String,
     },
+    /// A two-key sequence (`gg`, `<Space>r`). Every context table is
+    /// looked up one key at a time — the chord opener (`<Space>`,
+    /// `<C-w>`, `g`) is consumed before the table is consulted — so a
+    /// multi-key entry could never fire. Rejected instead of silently
+    /// dropped.
+    MultiKey { context: Context, raw: String },
 }
 
 impl std::fmt::Display for MergeError {
@@ -98,6 +103,11 @@ impl std::fmt::Display for MergeError {
             } => write!(
                 f,
                 "[{}] {chord:?}: unknown action {raw:?}",
+                context.as_key()
+            ),
+            Self::MultiKey { context, raw } => write!(
+                f,
+                "[{}] {raw:?}: bind a single key (e.g. `r` under [leader], not `<Space>r`)",
                 context.as_key()
             ),
         }
@@ -161,6 +171,12 @@ impl Keymap {
                     raw: raw_chord.clone(),
                     err,
                 })?;
+                if chord.0.len() > 1 {
+                    return Err(MergeError::MultiKey {
+                        context: ctx,
+                        raw: raw_chord.clone(),
+                    });
+                }
                 let action =
                     BindableAction::parse(raw_action).ok_or_else(|| MergeError::Action {
                         context: ctx,
@@ -225,11 +241,12 @@ fn normalize_chord(code: KeyCode, mods: KeyModifiers) -> (KeyCode, KeyModifiers)
     (upper, mods - KeyModifiers::SHIFT)
 }
 
-// Single source of truth for default chords. `event::translate_*` for
-// GlobalImmediate / Leader / Schema reads from this via
-// `Keymap::lookup_*`; the help popover walks the same map. The other
-// three contexts populate the help popover only — `event.rs` keeps
-// hardcoded matches for them.
+// Single source of truth for default chords. `event::translate_*` reads
+// every context from this via `Keymap::lookup_key`; the leader hint
+// popover walks the same map. For Result / ChatNormal / ChatInsert the
+// keymap is consulted after the sub-mode keys that stay hardcoded (Esc,
+// `q`, `v`, `:`, Enter-submit, …), and `event.rs` keeps its hardcoded
+// matches as a fallback for aliases not listed here (arrows, Home/End).
 const DEFAULTS: &[(Context, &str, BindableAction)] = &[
     // --- GlobalImmediate (single press, post-chord-arming) ---
     (Context::GlobalImmediate, ":", BindableAction::OpenCommand),
@@ -252,13 +269,8 @@ const DEFAULTS: &[(Context, &str, BindableAction)] = &[
     (Context::Leader, "S", BindableAction::SetRightPanelSchema),
     (Context::Leader, "C", BindableAction::SetRightPanelChat),
     (Context::Leader, "n", BindableAction::SessionNext),
-    // Direct-jump to sessions 1..=9 via `<Space>` then a shifted
-    // digit. We register the shifted symbols (`!`, `@`, …) rather
-    // than `<S-1>` notation because every keyboard delivers the
-    // shifted forms identically: crossterm reports `Char('!')`, and
-    // `normalize_chord` strips the SHIFT bit so the literal matches.
-    // Layout caveat: these are US-shift mappings; users on other
-    // layouts can override via `keybindings.toml`.
+    // Direct-jump to sessions 0..=9 via `<Space>` then the plain
+    // digit — the same index as `session_<N>.sql` / `:session N`.
     (Context::Leader, "0", BindableAction::SessionSwitch(0)),
     (Context::Leader, "1", BindableAction::SessionSwitch(1)),
     (Context::Leader, "2", BindableAction::SessionSwitch(2)),
@@ -277,7 +289,7 @@ const DEFAULTS: &[(Context, &str, BindableAction)] = &[
     (Context::Schema, "o", BindableAction::SchemaToggle),
     (Context::Schema, "<Enter>", BindableAction::SchemaToggle),
     (Context::Schema, "G", BindableAction::SchemaBottom),
-    // --- Expanded result view (help-only; event.rs stays hardcoded) ---
+    // --- Expanded result view ---
     (Context::Result, "y", BindableAction::ResultYank),
     (Context::Result, "H", BindableAction::ResultColumnMoveLeft),
     (Context::Result, "L", BindableAction::ResultColumnMoveRight),
@@ -290,7 +302,7 @@ const DEFAULTS: &[(Context, &str, BindableAction)] = &[
     (Context::Result, "0", BindableAction::ResultLineStart),
     (Context::Result, "$", BindableAction::ResultLineEnd),
     (Context::Result, "G", BindableAction::ResultBottom),
-    // --- Chat normal (help-only) ---
+    // --- Chat normal ---
     (Context::ChatNormal, "i", BindableAction::ChatEnterInsert),
     (Context::ChatNormal, "k", BindableAction::ChatScrollUp),
     (Context::ChatNormal, "j", BindableAction::ChatScrollDown),
@@ -303,8 +315,8 @@ const DEFAULTS: &[(Context, &str, BindableAction)] = &[
     (Context::ChatNormal, "<Home>", BindableAction::ChatTop),
     (Context::ChatNormal, "<End>", BindableAction::ChatBottom),
     (Context::ChatNormal, "G", BindableAction::ChatBottom),
-    // --- Chat insert (help-only; only the chat-specific actions, not
-    // the composer's text input or Enter-submit) ---
+    // --- Chat insert (only the chat-specific actions, not the
+    // composer's text input or Enter-submit) ---
     (Context::ChatInsert, "<C-Up>", BindableAction::ChatScrollUp),
     (
         Context::ChatInsert,
@@ -373,10 +385,10 @@ mod tests {
     }
 
     #[test]
-    fn shifted_digits_route_to_session_switch_in_leader() {
-        // The Shift+1..=9 gesture binds to the shifted symbols on a
-        // US keyboard; whether the terminal also reports SHIFT or not
-        // shouldn't matter (the normalizer strips it for `Char`).
+    fn digits_route_to_session_switch_in_leader() {
+        // `<Space>0`..`<Space>9`; whether the terminal also reports
+        // SHIFT or not shouldn't matter (the normalizer strips it for
+        // `Char`).
         let m = Keymap::defaults();
         for (sym, n) in [
             ('0', 0u8),
@@ -394,13 +406,13 @@ mod tests {
             assert_eq!(
                 m.lookup_key(Context::Leader, KeyCode::Char(sym), KeyModifiers::NONE),
                 Some(BindableAction::SessionSwitch(n)),
-                "Shift+{n} ({sym} + NONE) must resolve",
+                "<Space>{n} ({sym} + NONE) must resolve",
             );
             // SHIFT-bearing delivery — kitty / iTerm enhanced.
             assert_eq!(
                 m.lookup_key(Context::Leader, KeyCode::Char(sym), KeyModifiers::SHIFT),
                 Some(BindableAction::SessionSwitch(n)),
-                "Shift+{n} ({sym} + SHIFT) must resolve",
+                "<Space>{n} ({sym} + SHIFT) must resolve",
             );
         }
     }
@@ -535,6 +547,24 @@ mod tests {
             snapshot,
             "merge_overrides must roll back on any error"
         );
+    }
+
+    #[test]
+    fn merge_overrides_rejects_multi_key_chords() {
+        let mut m = Keymap::defaults();
+        let snapshot = format!("{:?}", m.binds);
+
+        let mut file = KeybindingsFile::default();
+        // Looks plausible but could never fire: the leader table is
+        // consulted for the key *after* `<Space>`.
+        file.leader.insert("<Space>x".into(), "cancel-query".into());
+        let err = m.merge_overrides(&file).unwrap_err();
+        match err {
+            MergeError::MultiKey { ref raw, .. } => assert_eq!(raw, "<Space>x"),
+            other => panic!("expected MultiKey error, got {other:?}"),
+        }
+        assert!(err.to_string().contains("single key"));
+        assert_eq!(format!("{:?}", m.binds), snapshot);
     }
 
     #[test]

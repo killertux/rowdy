@@ -143,7 +143,7 @@ fn check_identifier_item(
 ) -> Result<(), String> {
     match item {
         SelectItem::UnnamedExpr(expr) => check_identifier_expr(expr, table, alias),
-        SelectItem::ExprWithAlias { .. } => Err(
+        SelectItem::ExprWithAlias { .. } | SelectItem::ExprWithAliases { .. } => Err(
             "selected column has an alias; aliases break round-trip — pass an explicit table"
                 .into(),
         ),
