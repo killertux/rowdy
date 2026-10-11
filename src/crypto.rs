@@ -102,10 +102,10 @@ pub fn encrypt(
     aad: &[u8],
     plaintext: &[u8],
 ) -> CryptoResult<Vec<u8>> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(key));
     cipher
         .encrypt(
-            Nonce::from_slice(nonce),
+            <&Nonce>::from(nonce),
             Payload {
                 msg: plaintext,
                 aad,
@@ -120,10 +120,10 @@ pub fn decrypt(
     aad: &[u8],
     ciphertext: &[u8],
 ) -> CryptoResult<Zeroizing<Vec<u8>>> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(key));
     let pt = cipher
         .decrypt(
-            Nonce::from_slice(nonce),
+            <&Nonce>::from(nonce),
             Payload {
                 msg: ciphertext,
                 aad,
