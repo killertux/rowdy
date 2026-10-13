@@ -1036,11 +1036,16 @@ The codebase is a small, MVC-flavoured loop with async workers on the side:
 - View functions under `src/ui/` derive from `App`; the only thing they
   write back is render-time bookkeeping (the mouse hit-test layout cache
   and clamped scroll offsets).
-- `Datasource` (`src/datasource/mod.rs`) is the cross-driver trait:
+- Each database is a `Driver` (`src/datasource/driver.rs`): a stateless
+  descriptor carrying everything dialect-specific — URL schemes, the
+  sqlparser dialect, identifier quoting, autocomplete functions, and
+  SQL-literal rendering for `:export sql` — plus `connect()`, which
+  returns a live `Datasource` (`src/datasource/mod.rs`):
   `introspect_catalogs`, `introspect_schemas`, `introspect_tables`,
   `introspect_columns`, `introspect_indices`, `default_schema`,
   `execute`, `cancel`, `reset_session`. Drivers live under
-  `src/datasource/sql/`.
+  `src/datasource/sql/` and are registered in `DRIVERS`; adding a
+  database touches nothing outside `src/datasource/`.
 - The worker (`src/worker/mod.rs`) owns the live connection pool, runs at
   most one query at a time, and fans introspection out concurrently.
   `:cancel` sends a server-side cancel (`pg_cancel_backend` for Postgres,
@@ -1114,16 +1119,18 @@ src/
                           params_prompt, right_panel, saved_query_picker,
                           substitute_confirm, theme_picker
   datasource/
-    mod.rs                Datasource trait + connect() factory
+    mod.rs                Datasource trait, DRIVERS registry, connect()
+    driver.rs             Driver trait (per-database dialect + connect)
+    literal.rs            shared SQL-literal rendering for :export sql
     cell.rs               typed Cell enum + display helpers
     schema.rs             CatalogInfo / SchemaInfo / TableInfo / …
     error.rs              DatasourceError
     sql/
       mod.rs              shared helpers (statement splitting, destructive guard, …)
       placeholders.rs     $N / :name placeholder scanning + splicing
-      sqlite.rs           SqliteDatasource (sqlx)
-      postgres.rs         PostgresDatasource (sqlx)
-      mysql.rs            MysqlDatasource (sqlx, also handles mariadb://)
+      sqlite.rs           SqliteDriver + SqliteDatasource (sqlx)
+      postgres.rs         PostgresDriver + PostgresDatasource (sqlx)
+      mysql.rs            MysqlDriver + MysqlDatasource (sqlx, also mariadb://)
   worker/
     mod.rs                tokio worker task, command/event channels
     request.rs            RequestId newtype + counter

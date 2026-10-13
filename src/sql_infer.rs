@@ -22,18 +22,9 @@ use sqlparser::ast::{
     Expr, ObjectName, ObjectNamePart, SelectItem, SelectItemQualifiedWildcardKind, SetExpr,
     Statement, TableFactor,
 };
-use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::parser::Parser;
 
-use crate::datasource::DriverKind;
-
-pub fn dialect_for(kind: DriverKind) -> Box<dyn Dialect> {
-    match kind {
-        DriverKind::Sqlite => Box::new(SQLiteDialect {}),
-        DriverKind::Postgres => Box::new(PostgreSqlDialect {}),
-        DriverKind::Mysql => Box::new(MySqlDialect {}),
-    }
-}
+use crate::datasource::Driver;
 
 /// Try to infer the source table.
 ///
@@ -43,11 +34,10 @@ pub fn dialect_for(kind: DriverKind) -> Box<dyn Dialect> {
 /// when only some columns matter (Visual selection sub-rectangle).
 pub fn infer_source_table(
     sql: &str,
-    kind: DriverKind,
+    kind: &dyn Driver,
     column_indices: Option<&[usize]>,
 ) -> Result<String, String> {
-    let dialect = dialect_for(kind);
-    let stmts = Parser::parse_sql(&*dialect, sql)
+    let stmts = Parser::parse_sql(kind.sql_dialect(), sql)
         .map_err(|e| format!("could not parse query for inference ({e})"))?;
     let stmt = match stmts.as_slice() {
         [s] => s,
@@ -194,13 +184,14 @@ fn object_name_to_string(name: &ObjectName) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::datasource::sql::sqlite::SqliteDriver;
 
     fn infer(sql: &str) -> Result<String, String> {
-        infer_source_table(sql, DriverKind::Sqlite, None)
+        infer_source_table(sql, &SqliteDriver, None)
     }
 
     fn infer_subset(sql: &str, idx: &[usize]) -> Result<String, String> {
-        infer_source_table(sql, DriverKind::Sqlite, Some(idx))
+        infer_source_table(sql, &SqliteDriver, Some(idx))
     }
 
     #[test]

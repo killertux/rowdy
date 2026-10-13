@@ -179,7 +179,7 @@ fn active_context(app: &App) -> String {
     if let Some(name) = &app.active_connection {
         let dialect = app
             .active_dialect
-            .map(|d| format!(" (driver: {d:?})"))
+            .map(|d| format!(" (driver: {})", d.name()))
             .unwrap_or_default();
         lines.push(format!("- connection: {name}{dialect}"));
     }

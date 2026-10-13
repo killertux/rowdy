@@ -1219,7 +1219,7 @@ pub(crate) fn dispatch_connect(app: &mut App, name: String, url: String) {
     // Snapshot the dialect off the URL up front. Result blocks created by
     // this connection will pin to it; if the connect fails before any rows
     // come back, the stale value is harmless (no result block uses it).
-    app.active_dialect = crate::datasource::DriverKind::from_url(&url);
+    app.active_dialect = crate::datasource::driver_for_url(&url);
     // Drop the previous connection's autocomplete cache so a popover that
     // opens before the new prime lands can't show stale tables.
     if let Ok(mut cache) = app.schema_cache.write() {

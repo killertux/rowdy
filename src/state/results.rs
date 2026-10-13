@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::datasource::{Cell, Column, DriverKind};
+use crate::datasource::{Cell, Column, Driver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResultId(pub usize);
@@ -22,7 +22,7 @@ pub struct ResultBlock {
     /// The driver kind active when the query ran. Snapshotted onto the
     /// block so a `:conn use` switch later doesn't change the export
     /// dialect of older results.
-    pub dialect: DriverKind,
+    pub dialect: &'static dyn Driver,
 }
 
 impl ResultBlock {

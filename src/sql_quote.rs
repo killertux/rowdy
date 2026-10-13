@@ -13,12 +13,12 @@
 //! Both share the dialect quote-pair table and the close-quote
 //! doubling rule.
 
-use crate::datasource::DriverKind;
+use crate::datasource::Driver;
 
 /// Wrap `ident` in dialect quotes unconditionally, doubling any
 /// internal close-quote chars.
-pub fn always(ident: &str, dialect: DriverKind) -> String {
-    let (open, close) = quotes(dialect);
+pub fn always(ident: &str, dialect: &dyn Driver) -> String {
+    let (open, close) = dialect.identifier_quotes();
     let escaped = ident.replace(close, &format!("{close}{close}"));
     format!("{open}{escaped}{close}")
 }
@@ -35,7 +35,7 @@ pub fn always(ident: &str, dialect: DriverKind) -> String {
 ///    Checked against the curated autocomplete keyword list rather
 ///    than `ALL_KEYWORDS_INDEX` so we don't gratuitously quote rarely
 ///    used SQL words like `ABORT`.
-pub fn smart(ident: &str, dialect: DriverKind) -> String {
+pub fn smart(ident: &str, dialect: &dyn Driver) -> String {
     if needs_quoting(ident) {
         always(ident, dialect)
     } else {
@@ -71,64 +71,60 @@ fn is_reserved_keyword(ident: &str) -> bool {
     crate::autocomplete::keywords::KEYWORDS.contains(&upper.as_str())
 }
 
-fn quotes(dialect: DriverKind) -> (&'static str, &'static str) {
-    match dialect {
-        DriverKind::Mysql => ("`", "`"),
-        DriverKind::Sqlite | DriverKind::Postgres => ("\"", "\""),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::datasource::sql::{
+        mysql::MysqlDriver, postgres::PostgresDriver, sqlite::SqliteDriver,
+    };
 
     #[test]
     fn always_wraps_simple_ident() {
-        assert_eq!(always("users", DriverKind::Postgres), "\"users\"");
-        assert_eq!(always("users", DriverKind::Mysql), "`users`");
-        assert_eq!(always("users", DriverKind::Sqlite), "\"users\"");
+        assert_eq!(always("users", &PostgresDriver), "\"users\"");
+        assert_eq!(always("users", &MysqlDriver), "`users`");
+        assert_eq!(always("users", &SqliteDriver), "\"users\"");
     }
 
     #[test]
     fn always_doubles_inner_quote() {
-        assert_eq!(always("a\"b", DriverKind::Postgres), "\"a\"\"b\"");
-        assert_eq!(always("a`b", DriverKind::Mysql), "`a``b`");
+        assert_eq!(always("a\"b", &PostgresDriver), "\"a\"\"b\"");
+        assert_eq!(always("a`b", &MysqlDriver), "`a``b`");
     }
 
     #[test]
     fn smart_lowercase_simple_ident_is_passthrough() {
-        assert_eq!(smart("users", DriverKind::Postgres), "users");
-        assert_eq!(smart("user_id", DriverKind::Sqlite), "user_id");
-        assert_eq!(smart("a1", DriverKind::Mysql), "a1");
+        assert_eq!(smart("users", &PostgresDriver), "users");
+        assert_eq!(smart("user_id", &SqliteDriver), "user_id");
+        assert_eq!(smart("a1", &MysqlDriver), "a1");
     }
 
     #[test]
     fn smart_mixed_case_postgres_uses_double_quotes() {
-        assert_eq!(smart("Users", DriverKind::Postgres), "\"Users\"");
-        assert_eq!(smart("MyTable", DriverKind::Sqlite), "\"MyTable\"");
+        assert_eq!(smart("Users", &PostgresDriver), "\"Users\"");
+        assert_eq!(smart("MyTable", &SqliteDriver), "\"MyTable\"");
     }
 
     #[test]
     fn smart_mysql_uses_backticks() {
-        assert_eq!(smart("Users", DriverKind::Mysql), "`Users`");
+        assert_eq!(smart("Users", &MysqlDriver), "`Users`");
     }
 
     #[test]
     fn smart_special_chars() {
-        assert_eq!(smart("user name", DriverKind::Postgres), "\"user name\"");
-        assert_eq!(smart("with-dash", DriverKind::Sqlite), "\"with-dash\"");
-        assert_eq!(smart("1st", DriverKind::Postgres), "\"1st\"");
+        assert_eq!(smart("user name", &PostgresDriver), "\"user name\"");
+        assert_eq!(smart("with-dash", &SqliteDriver), "\"with-dash\"");
+        assert_eq!(smart("1st", &PostgresDriver), "\"1st\"");
     }
 
     #[test]
     fn smart_reserved_keyword() {
-        assert_eq!(smart("select", DriverKind::Postgres), "\"select\"");
-        assert_eq!(smart("FROM", DriverKind::Mysql), "`FROM`");
+        assert_eq!(smart("select", &PostgresDriver), "\"select\"");
+        assert_eq!(smart("FROM", &MysqlDriver), "`FROM`");
     }
 
     #[test]
     fn smart_escapes_inner_quote() {
-        assert_eq!(smart("a\"b", DriverKind::Postgres), "\"a\"\"b\"");
-        assert_eq!(smart("a`b", DriverKind::Mysql), "`a``b`");
+        assert_eq!(smart("a\"b", &PostgresDriver), "\"a\"\"b\"");
+        assert_eq!(smart("a`b", &MysqlDriver), "`a``b`");
     }
 }

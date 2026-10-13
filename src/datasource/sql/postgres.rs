@@ -5,19 +5,21 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde_json::Value as JsonValue;
+use sqlparser::dialect::{Dialect, PostgreSqlDialect};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow, PgTypeKind, Postgres};
 use sqlx::{Column as _, Row, TypeInfo};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::autocomplete::functions::{FnArity, FunctionDef};
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
 use crate::datasource::sql::{TxEffect, decode_to, tx_effect};
-use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
+use crate::datasource::{Column, Datasource, Driver, QueryResult, Row as CellRow, literal};
 use crate::log::Logger;
 
 const DEFAULT_POOL_SIZE: u32 = 3;
@@ -68,6 +70,94 @@ fn build_pool(url: &str) -> Result<PgPool, sqlx::Error> {
         .idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS)))
         .connect_lazy(url)
 }
+
+/// Postgres dialect descriptor. See [`Driver`].
+#[derive(Debug)]
+pub struct PostgresDriver;
+
+#[async_trait]
+impl Driver for PostgresDriver {
+    fn name(&self) -> &'static str {
+        TARGET
+    }
+
+    fn schemes(&self) -> &'static [&'static str] {
+        &["postgres", "postgresql"]
+    }
+
+    fn sql_dialect(&self) -> &'static dyn Dialect {
+        &PostgreSqlDialect {}
+    }
+
+    fn functions(&self) -> &'static [FunctionDef] {
+        FUNCTIONS
+    }
+
+    fn format_literal(&self, cell: &Cell) -> String {
+        match cell {
+            // bytea hex-string syntax with an explicit cast.
+            Cell::Bytes(b) => format!("'\\x{}'::bytea", literal::hex(b)),
+            Cell::Timestamp(t) => format!(
+                "TIMESTAMP {}",
+                literal::quote_string(&t.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
+            ),
+            Cell::Uuid(u) => format!("{}::uuid", literal::quote_string(&u.to_string())),
+            _ => literal::ansi(cell),
+        }
+    }
+
+    async fn connect(&self, url: &str, log: Logger) -> DatasourceResult<Box<dyn Datasource>> {
+        Ok(Box::new(PostgresDatasource::connect(url, log).await?))
+    }
+}
+
+const FUNCTIONS: &[FunctionDef] = &[
+    FunctionDef {
+        name: "NOW",
+        signature: "NOW()",
+        arity: FnArity::ZeroArgParens,
+    },
+    FunctionDef {
+        name: "DATE_TRUNC",
+        signature: "DATE_TRUNC(unit, ts)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "EXTRACT",
+        signature: "EXTRACT(field FROM ts)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "GENERATE_SERIES",
+        signature: "GENERATE_SERIES(start, stop [, step])",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "ARRAY_AGG",
+        signature: "ARRAY_AGG(expr)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "STRING_AGG",
+        signature: "STRING_AGG(expr, sep)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "JSONB_BUILD_OBJECT",
+        signature: "JSONB_BUILD_OBJECT(k, v, …)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "TO_CHAR",
+        signature: "TO_CHAR(value, fmt)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "TO_TIMESTAMP",
+        signature: "TO_TIMESTAMP(text, fmt)",
+        arity: FnArity::Args,
+    },
+];
 
 impl PostgresDatasource {
     pub async fn connect(url: &str, log: Logger) -> DatasourceResult<Self> {

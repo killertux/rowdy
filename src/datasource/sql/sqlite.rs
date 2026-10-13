@@ -1,18 +1,20 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
+use sqlparser::dialect::{Dialect, SQLiteDialect};
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{Sqlite, SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{Column as _, Row, TypeInfo};
 use tokio::sync::Mutex;
 
+use crate::autocomplete::functions::{FnArity, FunctionDef};
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
 use crate::datasource::sql::{TxEffect, decode_to, tx_effect};
-use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
+use crate::datasource::{Column, Datasource, Driver, QueryResult, Row as CellRow, literal};
 use crate::log::Logger;
 
 const DEFAULT_POOL_SIZE: u32 = 3;
@@ -28,6 +30,85 @@ pub struct SqliteDatasource {
     // schema browsing.
     session: Mutex<Option<PoolConnection<Sqlite>>>,
 }
+
+/// SQLite dialect descriptor. See [`Driver`].
+#[derive(Debug)]
+pub struct SqliteDriver;
+
+#[async_trait]
+impl Driver for SqliteDriver {
+    fn name(&self) -> &'static str {
+        TARGET
+    }
+
+    fn schemes(&self) -> &'static [&'static str] {
+        &["sqlite"]
+    }
+
+    fn sql_dialect(&self) -> &'static dyn Dialect {
+        &SQLiteDialect {}
+    }
+
+    fn functions(&self) -> &'static [FunctionDef] {
+        FUNCTIONS
+    }
+
+    fn format_literal(&self, cell: &Cell) -> String {
+        match cell {
+            // SQLite has no native bool — round-tripping as 1/0 matches
+            // what every SQLite client does.
+            Cell::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+            _ => literal::ansi(cell),
+        }
+    }
+
+    async fn connect(&self, url: &str, log: Logger) -> DatasourceResult<Box<dyn Datasource>> {
+        Ok(Box::new(SqliteDatasource::connect(url, log).await?))
+    }
+}
+
+const FUNCTIONS: &[FunctionDef] = &[
+    FunctionDef {
+        name: "IFNULL",
+        signature: "IFNULL(a, b)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "IIF",
+        signature: "IIF(cond, a, b)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "DATETIME",
+        signature: "DATETIME(time, modifiers…)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "DATE",
+        signature: "DATE(time, modifiers…)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "STRFTIME",
+        signature: "STRFTIME(fmt, time, modifiers…)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "JSON",
+        signature: "JSON(text)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "JSON_EXTRACT",
+        signature: "JSON_EXTRACT(j, path)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "REPLACE",
+        signature: "REPLACE(str, find, repl)",
+        arity: FnArity::Args,
+    },
+];
 
 impl SqliteDatasource {
     pub async fn connect(url: &str, log: Logger) -> DatasourceResult<Self> {
