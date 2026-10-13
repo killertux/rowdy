@@ -1,5 +1,7 @@
 pub mod cell;
+pub mod driver;
 pub mod error;
+pub mod literal;
 pub mod schema;
 pub mod sql;
 
@@ -10,6 +12,7 @@ use async_trait::async_trait;
 use crate::log::Logger;
 
 pub use cell::Cell;
+pub use driver::Driver;
 pub use error::{DatasourceError, DatasourceResult};
 pub use schema::{CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo};
 
@@ -18,26 +21,38 @@ pub struct Column {
     pub name: String,
 }
 
-/// Which SQL backend a connection (or stored result) belongs to. Drives
-/// dialect-specific behaviour at the edges: parsing for source-table
-/// inference, literal escaping when emitting INSERTs, etc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DriverKind {
-    Sqlite,
-    Postgres,
-    Mysql,
+/// Every driver rowdy can connect with. Adding a database is one entry
+/// here plus its module under `sql/` — see [`Driver`].
+pub static DRIVERS: &[&dyn Driver] = &[
+    &sql::sqlite::SqliteDriver,
+    &sql::postgres::PostgresDriver,
+    &sql::mysql::MysqlDriver,
+    &sql::stoolap::StoolapDriver,
+];
+
+/// Dialect assumed when no connection is active (autocomplete and the
+/// destructive-statement guard still run on a buffer typed before
+/// connecting).
+pub static FALLBACK_DRIVER: &dyn Driver = &sql::sqlite::SqliteDriver;
+
+/// The driver claiming `url`'s scheme (the part before the first `:`).
+pub fn driver_for_url(url: &str) -> Option<&'static dyn Driver> {
+    let scheme = url.split_once(':').map(|(s, _)| s).unwrap_or(url);
+    DRIVERS
+        .iter()
+        .copied()
+        .find(|d| d.schemes().contains(&scheme))
 }
 
-impl DriverKind {
-    pub fn from_url(url: &str) -> Option<Self> {
-        let scheme = url.split_once(':').map(|(s, _)| s).unwrap_or(url);
-        match scheme {
-            "sqlite" => Some(Self::Sqlite),
-            "postgres" | "postgresql" => Some(Self::Postgres),
-            "mysql" | "mariadb" => Some(Self::Mysql),
-            _ => None,
-        }
-    }
+/// Every scheme any driver accepts, formatted for UI hints
+/// (`"sqlite:, postgres:, …"`).
+pub fn supported_schemes() -> String {
+    DRIVERS
+        .iter()
+        .flat_map(|d| d.schemes())
+        .map(|s| format!("{s}:"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub type Row = Vec<Cell>;
@@ -103,25 +118,55 @@ pub trait Datasource: Send + Sync {
 
 /// Builds a datasource from a connection string. Scheme dispatches to the driver.
 pub async fn connect(connection: &str, logger: Logger) -> DatasourceResult<Box<dyn Datasource>> {
-    let scheme = connection
-        .split_once(':')
-        .map(|(s, _)| s)
-        .unwrap_or(connection);
-    match scheme {
-        "sqlite" => sql::sqlite::SqliteDatasource::connect(connection, logger)
-            .await
-            .map(|ds| Box::new(ds) as Box<dyn Datasource>),
-        "postgres" | "postgresql" => sql::postgres::PostgresDatasource::connect(connection, logger)
-            .await
-            .map(|ds| Box::new(ds) as Box<dyn Datasource>),
-        "mysql" | "mariadb" => sql::mysql::MysqlDatasource::connect(connection, logger)
-            .await
-            .map(|ds| Box::new(ds) as Box<dyn Datasource>),
-        other => {
-            logger.error("datasource", format!("unsupported scheme: {other}"));
+    match driver_for_url(connection) {
+        Some(driver) => driver.connect(connection, logger).await,
+        None => {
+            let scheme = connection
+                .split_once(':')
+                .map(|(s, _)| s)
+                .unwrap_or(connection);
+            logger.error("datasource", format!("unsupported scheme: {scheme}"));
             Err(DatasourceError::Connect(format!(
-                "unsupported scheme: {other}"
+                "unsupported scheme: {scheme}"
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn driver_for_url_dispatches_on_scheme() {
+        let cases = [
+            ("sqlite:./sample.db", "sqlite"),
+            ("sqlite::memory:", "sqlite"),
+            ("postgres://u@h/db", "postgres"),
+            ("postgresql://u@h/db", "postgres"),
+            ("mysql://u@h/db", "mysql"),
+            ("mariadb://u@h/db", "mysql"),
+            ("stoolap:./data/db", "stoolap"),
+        ];
+        for (url, name) in cases {
+            assert_eq!(driver_for_url(url).map(|d| d.name()), Some(name), "{url}");
+        }
+        assert!(driver_for_url("oracle://h/db").is_none());
+    }
+
+    #[test]
+    fn no_two_drivers_claim_the_same_scheme() {
+        let mut seen = std::collections::HashSet::new();
+        for scheme in DRIVERS.iter().flat_map(|d| d.schemes()) {
+            assert!(seen.insert(*scheme), "scheme {scheme:?} claimed twice");
+        }
+    }
+
+    #[test]
+    fn supported_schemes_lists_every_driver() {
+        assert_eq!(
+            supported_schemes(),
+            "sqlite:, postgres:, postgresql:, mysql:, mariadb:, stoolap:"
+        );
     }
 }

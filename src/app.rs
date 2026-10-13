@@ -8,7 +8,7 @@ use crate::worker::WorkerEvent;
 use crate::autocomplete::SchemaCache;
 use crate::config::ConfigStore;
 use crate::connections::ConnectionStore;
-use crate::datasource::DriverKind;
+use crate::datasource::Driver;
 use crate::keybindings::keymap::Keymap;
 use crate::llm::keystore::LlmKeyStore;
 use crate::llm::worker::{PendingApprovalTool, PendingChatTool};
@@ -96,7 +96,7 @@ pub struct App {
     /// Driver kind of the active connection — snapshotted onto each
     /// `ResultBlock` so dialect-aware exports keep working after a
     /// `:conn use` switch to a different driver.
-    pub active_dialect: Option<DriverKind>,
+    pub active_dialect: Option<&'static dyn Driver>,
     /// Base `.rowdy/` directory — used to resolve session files and any
     /// other on-disk state.
     pub data_dir: PathBuf,

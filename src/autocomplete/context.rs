@@ -29,8 +29,7 @@ use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer, Whitespace, Word};
 
 use super::cache::SchemaCache;
-use crate::datasource::DriverKind;
-use crate::sql_infer::dialect_for;
+use crate::datasource::Driver;
 
 /// What the popover should populate for the cursor's syntactic
 /// position.
@@ -130,7 +129,7 @@ impl ResolveContext<'_> {
 pub fn classify(
     statement: &str,
     cursor: usize,
-    dialect: DriverKind,
+    dialect: &dyn Driver,
     resolve: ResolveContext,
     cache: &SchemaCache,
 ) -> ClassifyResult {
@@ -141,8 +140,8 @@ pub fn classify(
     let head_end = cursor - partial_byte_len;
     let head = &statement[..head_end];
 
-    let dialect_obj = dialect_for(dialect);
-    let head_tokens = match Tokenizer::new(&*dialect_obj, head).tokenize_with_location() {
+    let dialect_obj = dialect.sql_dialect();
+    let head_tokens = match Tokenizer::new(dialect_obj, head).tokenize_with_location() {
         Ok(t) => t,
         Err(_) => {
             return ClassifyResult {
@@ -154,7 +153,7 @@ pub fn classify(
         }
     };
 
-    let full_tokens = Tokenizer::new(&*dialect_obj, statement)
+    let full_tokens = Tokenizer::new(dialect_obj, statement)
         .tokenize_with_location()
         .unwrap_or_default();
     let bindings_map = collect_bindings(&full_tokens, &resolve, cache);
@@ -992,12 +991,15 @@ fn is_ident_char(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::datasource::sql::{
+        mysql::MysqlDriver, postgres::PostgresDriver, sqlite::SqliteDriver,
+    };
 
     fn classify_at_end(stmt: &str) -> ClassifyResult {
         classify(
             stmt,
             stmt.len(),
-            DriverKind::Sqlite,
+            &SqliteDriver,
             ResolveContext::empty(),
             &SchemaCache::new(),
         )
@@ -1007,7 +1009,7 @@ mod tests {
         classify(
             stmt,
             cursor,
-            DriverKind::Sqlite,
+            &SqliteDriver,
             ResolveContext {
                 default_catalog: Some("main"),
                 default_schema: Some("main"),
@@ -1522,7 +1524,7 @@ mod tests {
         classify(
             stmt,
             cursor,
-            DriverKind::Sqlite,
+            &SqliteDriver,
             ResolveContext {
                 default_catalog: Some("main"),
                 default_schema: Some("main"),
@@ -1639,7 +1641,7 @@ mod tests {
     // (review gap: parameterized coverage for these areas)
     // -----------------------------------------------------------------
 
-    fn classify_with_dialect(stmt: &str, cursor: usize, dialect: DriverKind) -> ClassifyResult {
+    fn classify_with_dialect(stmt: &str, cursor: usize, dialect: &dyn Driver) -> ClassifyResult {
         classify(
             stmt,
             cursor,
@@ -1716,7 +1718,7 @@ mod tests {
     fn postgres_double_quoted_identifier_binds() {
         let stmt = "SELECT * FROM \"Users\" u WHERE u.";
         let cursor = stmt.len();
-        let r = classify_with_dialect(stmt, cursor, DriverKind::Postgres);
+        let r = classify_with_dialect(stmt, cursor, &PostgresDriver);
         match r.context {
             CompletionContext::Column { qualifier: Some(b) } => assert_eq!(b.table, "Users"),
             other => panic!("expected u.* qualified-by-Users; got {other:?}"),
@@ -1729,7 +1731,7 @@ mod tests {
     fn mysql_backtick_identifier_binds() {
         let stmt = "SELECT * FROM `Users` u WHERE u.";
         let cursor = stmt.len();
-        let r = classify_with_dialect(stmt, cursor, DriverKind::Mysql);
+        let r = classify_with_dialect(stmt, cursor, &MysqlDriver);
         match r.context {
             CompletionContext::Column { qualifier: Some(b) } => assert_eq!(b.table, "Users"),
             other => panic!("expected u.* qualified-by-Users; got {other:?}"),

@@ -101,9 +101,10 @@ pub(super) fn dispatch_query(app: &mut App, sql: String) {
     // don't loop). Skipped when the user already passed through a
     // manual confirm (overlay is consumed before re-dispatch).
     if app.overlay.is_none()
-        && let Some(dialect) = destructive_dialect(app)
-        && let Some(reason) =
-            crate::datasource::sql::requires_destructive_confirmation(&trimmed, dialect.as_ref())
+        && let Some(reason) = crate::datasource::sql::requires_destructive_confirmation(
+            &trimmed,
+            active_sql_dialect(app),
+        )
     {
         app.overlay = Some(Overlay::ConfirmRun {
             statement: trimmed,
@@ -115,10 +116,8 @@ pub(super) fn dispatch_query(app: &mut App, sql: String) {
     // can fill values in. The original (unsubstituted) statement
     // stays on the overlay; the substituted form is what we eventually
     // send to the worker via `send_to_worker`.
-    if app.overlay.is_none()
-        && let Some(dialect) = destructive_dialect(app)
-    {
-        let scan = crate::datasource::sql::placeholders::scan(&trimmed, dialect.as_ref());
+    if app.overlay.is_none() {
+        let scan = crate::datasource::sql::placeholders::scan(&trimmed, active_sql_dialect(app));
         let unique = crate::datasource::sql::placeholders::unique_params(&scan);
         if !unique.is_empty() {
             open_params_prompt(app, trimmed, scan, unique);
@@ -168,17 +167,16 @@ fn open_params_prompt(
     app.overlay = Some(Overlay::ParamsPrompt(state));
 }
 
-/// Pick a sqlparser dialect to feed `requires_destructive_confirmation`.
-/// Falls back to `Generic` when no connection is active so the guardrail
-/// still fires for queries typed before connecting (rare but possible).
-fn destructive_dialect(app: &App) -> Option<Box<dyn sqlparser::dialect::Dialect>> {
-    use crate::datasource::DriverKind;
-    let kind = app.active_dialect.unwrap_or(DriverKind::Sqlite);
-    Some(match kind {
-        DriverKind::Postgres => Box::new(sqlparser::dialect::PostgreSqlDialect {}),
-        DriverKind::Mysql => Box::new(sqlparser::dialect::MySqlDialect {}),
-        DriverKind::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
-    })
+/// Pick a sqlparser dialect to feed `requires_destructive_confirmation`
+/// and placeholder scanning. Falls back to [`FALLBACK_DRIVER`] when no
+/// connection is active so the guardrail still fires for queries typed
+/// before connecting (rare but possible).
+///
+/// [`FALLBACK_DRIVER`]: crate::datasource::FALLBACK_DRIVER
+fn active_sql_dialect(app: &App) -> &'static dyn sqlparser::dialect::Dialect {
+    app.active_dialect
+        .unwrap_or(crate::datasource::FALLBACK_DRIVER)
+        .sql_dialect()
 }
 
 pub(super) fn on_query_done(app: &mut App, req: crate::worker::RequestId, result: QueryResult) {
@@ -223,7 +221,7 @@ pub(super) fn on_query_done(app: &mut App, req: crate::worker::RequestId, result
         // panic if the invariant ever breaks.
         let dialect = app
             .active_dialect
-            .unwrap_or(crate::datasource::DriverKind::Sqlite);
+            .unwrap_or(crate::datasource::FALLBACK_DRIVER);
         app.results.push(ResultBlock {
             id,
             took,

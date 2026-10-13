@@ -12,7 +12,7 @@ use crate::autocomplete::cache::SchemaCache;
 use crate::autocomplete::context::{CompletionContext, TableBinding};
 use crate::autocomplete::keywords::KEYWORDS;
 use crate::autocomplete::{CachedTable, CompletionItem, CompletionKind, InsertTrail, functions};
-use crate::datasource::DriverKind;
+use crate::datasource::Driver;
 use crate::datasource::schema::TableKind;
 
 pub const MAX_ITEMS: usize = 20;
@@ -29,7 +29,7 @@ pub fn compute(
     cache: &SchemaCache,
     prefix: &str,
     bindings: &[TableBinding],
-    dialect: DriverKind,
+    dialect: &dyn Driver,
 ) -> Vec<CompletionItem> {
     let mut items: Vec<CompletionItem> = Vec::new();
     match context {
@@ -171,7 +171,7 @@ fn collect_columns_from_bindings(
     }
 }
 
-fn collect_functions(out: &mut Vec<CompletionItem>, dialect: DriverKind) {
+fn collect_functions(out: &mut Vec<CompletionItem>, dialect: &dyn Driver) {
     use crate::autocomplete::functions::FnArity;
     for f in functions::for_dialect(dialect) {
         // Three modes: arg-taking (insert bare name + trail OpenParens
@@ -319,6 +319,7 @@ fn combine_score(
 mod tests {
     use super::*;
     use crate::autocomplete::CachedColumn;
+    use crate::datasource::sql::{postgres::PostgresDriver, sqlite::SqliteDriver};
 
     fn cache_with_tables(names: &[&str]) -> SchemaCache {
         let mut cache = SchemaCache::new();
@@ -367,7 +368,7 @@ mod tests {
         prefix: &str,
         bindings: &[TableBinding],
     ) -> Vec<CompletionItem> {
-        compute(context, cache, prefix, bindings, DriverKind::Sqlite)
+        compute(context, cache, prefix, bindings, &SqliteDriver)
     }
 
     #[test]
@@ -542,7 +543,7 @@ mod tests {
             &cache,
             "COUN",
             &[],
-            DriverKind::Sqlite,
+            &SqliteDriver,
         );
         let count = items
             .iter()
@@ -561,7 +562,7 @@ mod tests {
             &cache,
             "NOW",
             &[],
-            DriverKind::Postgres,
+            &PostgresDriver,
         );
         let now = items
             .iter()
@@ -576,7 +577,7 @@ mod tests {
     fn bare_function_inserts_without_parens() {
         // SQLite rejects `CURRENT_TIMESTAMP()` — the popover must
         // surface the bare form on every supported dialect.
-        for dialect in [DriverKind::Sqlite, DriverKind::Postgres, DriverKind::Mysql] {
+        for dialect in crate::datasource::DRIVERS.iter().copied() {
             let cache = SchemaCache::new();
             let items = compute(&CompletionContext::Mixed, &cache, "CURRENT_T", &[], dialect);
             let ts = items
@@ -636,7 +637,7 @@ mod tests {
             &cache,
             "rec",
             &bindings,
-            DriverKind::Sqlite,
+            &SqliteDriver,
         );
         let cte = items
             .iter()
@@ -679,7 +680,7 @@ mod tests {
             &cache,
             "rec",
             &bindings,
-            DriverKind::Sqlite,
+            &SqliteDriver,
         );
         let cte = items
             .iter()

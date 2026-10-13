@@ -7,13 +7,13 @@
 use edtui::{EditorState, Index2, Lines};
 
 use crate::autocomplete::InsertTrail;
-use crate::datasource::DriverKind;
+use crate::datasource::Driver;
 use crate::sql_quote;
 
 /// Wrap `ident` in dialect-appropriate quotes if it can't safely sit
 /// unquoted. Thin re-export of [`sql_quote::smart`] kept so call sites
 /// in this module read naturally.
-pub fn quote_if_needed(ident: &str, dialect: DriverKind) -> String {
+pub fn quote_if_needed(ident: &str, dialect: &dyn Driver) -> String {
     sql_quote::smart(ident, dialect)
 }
 

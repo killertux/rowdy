@@ -83,7 +83,7 @@ impl Widget for ConnForm<'_> {
                     .bg(self.theme.bg),
             )),
             None => Line::from(Span::styled(
-                "schemes: sqlite:, postgres:, mysql:, mariadb:",
+                format!("schemes: {}", crate::datasource::supported_schemes()),
                 Style::default().fg(self.theme.fg_dim).bg(self.theme.bg),
             )),
         };

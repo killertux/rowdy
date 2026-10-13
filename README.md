@@ -5,7 +5,8 @@ A terminal SQL client built with [ratatui](https://github.com/ratatui/ratatui),
 The goal is a fast, modal, keyboard-first workspace for writing queries,
 exploring schemas, and inspecting results — all without leaving the terminal.
 
-SQLite, Postgres, and MySQL/MariaDB are wired end-to-end. Most authoring
+SQLite, Postgres, MySQL/MariaDB, and [Stoolap](https://github.com/stoolap/stoolap)
+are wired end-to-end. Most authoring
 features (autocomplete, formatting, vim search & replace, query
 parameters, saved queries, yank, CSV/TSV/JSON/SQL export, transactions
 across statements, an LLM chat companion, 14 themes) are shipped — see
@@ -323,9 +324,18 @@ URL scheme dispatches to the driver:
 | `sqlite:`                    | SQLite     | `sqlite:./sample.db`, `sqlite::memory:?cache=shared`   |
 | `postgres:` / `postgresql:`  | Postgres   | `postgres://user:pass@host:5432/db`                    |
 | `mysql:` / `mariadb:`        | MySQL      | `mysql://user:pass@host:3306/db`                       |
+| `stoolap:`                   | Stoolap    | `stoolap:./data/mydb`, `stoolap::memory:`              |
 
 `mariadb://` is rewritten to `mysql://` before sqlx sees it — same wire
 protocol, same driver. `postgres://` and `postgresql://` are interchangeable.
+
+Stoolap is embedded, so it runs in-process like SQLite. A `stoolap:` path
+names a *directory* (created if missing); stoolap options go in the query
+string (`stoolap:./data/mydb?sync_mode=full`), and a native stoolap DSN
+after the prefix passes through (`stoolap:file:///abs/path`). Stoolap
+locks the directory, so it can't be open in rowdy and another process at
+the same time. It has no catalogs or schemas — tables appear under a
+single `main`.
 
 > **In-memory SQLite caveat:** the worker uses a connection pool, and each
 > SQLite memory connection gets its *own* database unless you opt into
@@ -1036,17 +1046,26 @@ The codebase is a small, MVC-flavoured loop with async workers on the side:
 - View functions under `src/ui/` derive from `App`; the only thing they
   write back is render-time bookkeeping (the mouse hit-test layout cache
   and clamped scroll offsets).
-- `Datasource` (`src/datasource/mod.rs`) is the cross-driver trait:
+- Each database is a `Driver` (`src/datasource/driver.rs`): a stateless
+  descriptor carrying everything dialect-specific — URL schemes, the
+  sqlparser dialect, identifier quoting, autocomplete functions, and
+  SQL-literal rendering for `:export sql` — plus `connect()`, which
+  returns a live `Datasource` (`src/datasource/mod.rs`):
   `introspect_catalogs`, `introspect_schemas`, `introspect_tables`,
   `introspect_columns`, `introspect_indices`, `default_schema`,
   `execute`, `cancel`, `reset_session`. Drivers live under
-  `src/datasource/sql/`.
+  `src/datasource/sql/` and are registered in `DRIVERS`; adding a
+  database touches nothing outside `src/datasource/`.
 - The worker (`src/worker/mod.rs`) owns the live connection pool, runs at
   most one query at a time, and fans introspection out concurrently.
   `:cancel` sends a server-side cancel (`pg_cancel_backend` for Postgres,
   `KILL QUERY` for MySQL) *and* aborts the in-flight `JoinHandle`, so the
   database doesn't keep grinding on a query the user gave up on. SQLite
-  has no server-side cancel; the abort is the cancel.
+  has no server-side cancel; the abort is the cancel. Stoolap gets a
+  cancellation flag, but the engine only checks it at a few points (not
+  inside joins), so rowdy also moves the session to a fresh executor: the
+  next statement doesn't wait behind the runaway one, and any open
+  transaction is rolled back.
 
 State is encoded so that invalid combinations are unrepresentable wherever
 possible:
@@ -1114,16 +1133,19 @@ src/
                           params_prompt, right_panel, saved_query_picker,
                           substitute_confirm, theme_picker
   datasource/
-    mod.rs                Datasource trait + connect() factory
+    mod.rs                Datasource trait, DRIVERS registry, connect()
+    driver.rs             Driver trait (per-database dialect + connect)
+    literal.rs            shared SQL-literal rendering for :export sql
     cell.rs               typed Cell enum + display helpers
     schema.rs             CatalogInfo / SchemaInfo / TableInfo / …
     error.rs              DatasourceError
     sql/
       mod.rs              shared helpers (statement splitting, destructive guard, …)
       placeholders.rs     $N / :name placeholder scanning + splicing
-      sqlite.rs           SqliteDatasource (sqlx)
-      postgres.rs         PostgresDatasource (sqlx)
-      mysql.rs            MysqlDatasource (sqlx, also handles mariadb://)
+      sqlite.rs           SqliteDriver + SqliteDatasource (sqlx)
+      postgres.rs         PostgresDriver + PostgresDatasource (sqlx)
+      mysql.rs            MysqlDriver + MysqlDatasource (sqlx, also mariadb://)
+      stoolap.rs          StoolapDriver + StoolapDatasource (embedded, in-process)
   worker/
     mod.rs                tokio worker task, command/event channels
     request.rs            RequestId newtype + counter

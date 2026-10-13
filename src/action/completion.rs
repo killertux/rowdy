@@ -59,7 +59,7 @@ fn compute(app: &App) -> Option<Computed> {
     let cursor = crate::state::editor::current_statement_with_cursor(&app.editor.state);
     let dialect = app
         .active_dialect
-        .unwrap_or(crate::datasource::DriverKind::Sqlite);
+        .unwrap_or(crate::datasource::FALLBACK_DRIVER);
     let cache = app.schema_cache.read().ok()?;
     let resolve = autocomplete::ResolveContext {
         default_catalog: cache.default_catalog.as_deref(),
@@ -214,7 +214,7 @@ fn accept(app: &mut App) {
     }
     let dialect = app
         .active_dialect
-        .unwrap_or(crate::datasource::DriverKind::Sqlite);
+        .unwrap_or(crate::datasource::FALLBACK_DRIVER);
     // Keywords / functions / loading items go in as displayed (the
     // engine already shaped `insert` correctly); identifier kinds get
     // dialect-quoted if the name needs it.

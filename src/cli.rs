@@ -40,7 +40,8 @@ pub enum ConnCommand {
         /// Connection name (used as the lookup key for `--connection`).
         name: String,
         /// Connection URL (e.g. `sqlite:./sample.db`,
-        /// `postgres://user@host/db`, `mysql://...`, `mariadb://...`).
+        /// `postgres://user@host/db`, `mysql://...`, `mariadb://...`,
+        /// `stoolap:./data/mydb`).
         #[arg(long)]
         url: String,
     },

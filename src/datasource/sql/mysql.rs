@@ -5,18 +5,20 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde_json::Value as JsonValue;
+use sqlparser::dialect::{Dialect, MySqlDialect};
 use sqlx::mysql::{MySql, MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::pool::PoolConnection;
 use sqlx::{Column as _, Row, TypeInfo};
 use tokio::sync::Mutex;
 
+use crate::autocomplete::functions::{FnArity, FunctionDef};
 use crate::datasource::cell::Cell;
 use crate::datasource::error::{DatasourceError, DatasourceResult};
 use crate::datasource::schema::{
     CatalogInfo, ColumnInfo, DefaultSchema, IndexInfo, SchemaInfo, TableInfo, TableKind,
 };
 use crate::datasource::sql::{TxEffect, decode_to, tx_effect};
-use crate::datasource::{Column, Datasource, QueryResult, Row as CellRow};
+use crate::datasource::{Column, Datasource, Driver, QueryResult, Row as CellRow};
 use crate::log::Logger;
 
 const DEFAULT_POOL_SIZE: u32 = 3;
@@ -53,6 +55,85 @@ fn build_pool(url: &str) -> Result<MySqlPool, sqlx::Error> {
         .idle_timeout(Some(Duration::from_secs(IDLE_TIMEOUT_SECS)))
         .connect_lazy(url)
 }
+
+/// MySQL / MariaDB dialect descriptor. See [`Driver`].
+#[derive(Debug)]
+pub struct MysqlDriver;
+
+#[async_trait]
+impl Driver for MysqlDriver {
+    fn name(&self) -> &'static str {
+        TARGET
+    }
+
+    fn schemes(&self) -> &'static [&'static str] {
+        &["mysql", "mariadb"]
+    }
+
+    fn sql_dialect(&self) -> &'static dyn Dialect {
+        &MySqlDialect {}
+    }
+
+    fn identifier_quotes(&self) -> (&'static str, &'static str) {
+        ("`", "`")
+    }
+
+    fn functions(&self) -> &'static [FunctionDef] {
+        FUNCTIONS
+    }
+
+    async fn connect(&self, url: &str, log: Logger) -> DatasourceResult<Box<dyn Datasource>> {
+        Ok(Box::new(MysqlDatasource::connect(url, log).await?))
+    }
+}
+
+const FUNCTIONS: &[FunctionDef] = &[
+    FunctionDef {
+        name: "NOW",
+        signature: "NOW()",
+        arity: FnArity::ZeroArgParens,
+    },
+    FunctionDef {
+        name: "IFNULL",
+        signature: "IFNULL(a, b)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "IF",
+        signature: "IF(cond, a, b)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "DATE_FORMAT",
+        signature: "DATE_FORMAT(date, fmt)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "STR_TO_DATE",
+        signature: "STR_TO_DATE(str, fmt)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "GROUP_CONCAT",
+        signature: "GROUP_CONCAT(expr [SEPARATOR sep])",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "CURDATE",
+        signature: "CURDATE()",
+        arity: FnArity::ZeroArgParens,
+    },
+    FunctionDef {
+        name: "JSON_OBJECT",
+        signature: "JSON_OBJECT(k, v, …)",
+        arity: FnArity::Args,
+    },
+    FunctionDef {
+        name: "JSON_EXTRACT",
+        signature: "JSON_EXTRACT(j, path)",
+        arity: FnArity::Args,
+    },
+];
 
 impl MysqlDatasource {
     pub async fn connect(url: &str, log: Logger) -> DatasourceResult<Self> {
