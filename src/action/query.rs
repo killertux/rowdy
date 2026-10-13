@@ -204,6 +204,12 @@ pub(super) fn on_query_done(app: &mut App, req: crate::worker::RequestId, result
             app.schema_reload_in_flight = true;
             let _ = app.cmd_tx.send(WorkerCommand::Reload { connection: name });
         }
+        // The schema tree caches each level on first expand; re-fetch the
+        // levels the user has open so new/dropped tables show up. Bounded
+        // by what's been expanded, so no coalescing needed.
+        for target in app.schema.refresh_targets() {
+            let _ = app.cmd_tx.send(WorkerCommand::Introspect { target });
+        }
     }
 
     let took = result.elapsed;

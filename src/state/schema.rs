@@ -204,6 +204,13 @@ impl SchemaPanel {
         match load_state {
             LoadState::Loading => ExpandOutcome::Nothing,
             LoadState::Failed(_) | LoadState::NotLoaded => self.begin_loading(id, kind),
+            // Nothing to show: fetch again rather than dead-ending, in case
+            // the schema changed since (e.g. a table created elsewhere).
+            LoadState::Loaded
+                if self.node(id).children.is_empty() && self.node(id).on_expand.is_some() =>
+            {
+                self.begin_loading(id, kind)
+            }
             LoadState::Loaded => self.descend_or_toggle(id),
         }
     }
@@ -275,15 +282,70 @@ impl SchemaPanel {
         }
     }
 
+    /// Fill (or refill) the children of the node that asked for `target`.
+    ///
+    /// Children that survive a refill keep their node — and with it their
+    /// own loaded subtree and expanded flag — so a refresh after DDL
+    /// doesn't collapse everything the user had open. A first load opens
+    /// the node; a refresh of an already-loaded node leaves it as it was.
     pub fn populate(&mut self, target: &IntrospectTarget, payload: SchemaPayload) {
         let Some(node_id) = self.find_by_target(target) else {
             return;
         };
-        let new_children = self.build_children(target, payload);
+        let refreshing = matches!(self.node(node_id).load_state, LoadState::Loaded);
+        let previous = std::mem::take(&mut self.node_mut(node_id).children);
+        let mut children = Vec::new();
+        for (label, kind, on_expand) in child_specs(target, payload) {
+            let existing = previous.iter().copied().find(|&c| {
+                let n = self.node(c);
+                n.kind == kind && n.label == label
+            });
+            children.push(existing.unwrap_or_else(|| self.push_node(label, kind, on_expand)));
+        }
         let node = self.node_mut(node_id);
-        node.children = new_children;
-        node.expanded = true;
+        node.children = children;
+        if !refreshing {
+            node.expanded = true;
+        }
         node.load_state = LoadState::Loaded;
+        if let Some(sel) = self.selected
+            && !self.is_attached(sel)
+        {
+            self.selected = Some(node_id);
+        }
+    }
+
+    /// Targets of every loaded node still in the tree, so a schema change
+    /// can re-fetch whatever the user has already opened. Results land
+    /// through [`Self::populate`].
+    pub fn refresh_targets(&self) -> Vec<IntrospectTarget> {
+        let mut out = Vec::new();
+        let mut stack = self.roots.clone();
+        while let Some(id) = stack.pop() {
+            let node = self.node(id);
+            if matches!(node.load_state, LoadState::Loaded)
+                && let Some(target) = &node.on_expand
+            {
+                out.push(target.clone());
+            }
+            stack.extend(&node.children);
+        }
+        out
+    }
+
+    /// Whether `id` is still reachable from a root (a refill can drop
+    /// nodes, e.g. a table that no longer exists).
+    fn is_attached(&self, id: NodeId) -> bool {
+        let mut current = id;
+        loop {
+            if self.roots.contains(&current) {
+                return true;
+            }
+            match self.parent_of(current) {
+                Some(parent) => current = parent,
+                None => return false,
+            }
+        }
     }
 
     pub fn record_failure(&mut self, target: &IntrospectTarget, error: String) {
@@ -298,42 +360,6 @@ impl SchemaPanel {
             .iter()
             .find(|n| n.on_expand.as_ref() == Some(target))
             .map(|n| n.id)
-    }
-
-    fn build_children(&mut self, target: &IntrospectTarget, payload: SchemaPayload) -> Vec<NodeId> {
-        match (target, payload) {
-            (IntrospectTarget::Schemas { catalog }, SchemaPayload::Schemas(schemas)) => schemas
-                .into_iter()
-                .map(|s| {
-                    let on_expand = IntrospectTarget::Tables {
-                        catalog: catalog.clone(),
-                        schema: s.name.clone(),
-                    };
-                    self.push_node(s.name, NodeKind::Schema, Some(on_expand))
-                })
-                .collect(),
-            (IntrospectTarget::Tables { catalog, schema }, SchemaPayload::Tables(tables)) => tables
-                .into_iter()
-                .map(|t| {
-                    let _ = (catalog, schema);
-                    let kind = match t.kind {
-                        TableKind::Table => NodeKind::Table,
-                        TableKind::View => NodeKind::View,
-                    };
-                    self.push_node(t.name, kind, None)
-                })
-                .collect(),
-            (IntrospectTarget::Columns { .. }, SchemaPayload::Columns(cols)) => cols
-                .into_iter()
-                .map(|c| self.push_node(format_column(&c), NodeKind::Column, None))
-                .collect(),
-            (IntrospectTarget::Indices { .. }, SchemaPayload::Indices(indices)) => indices
-                .into_iter()
-                .map(|i| self.push_node(format_index(&i), NodeKind::Index, None))
-                .collect(),
-            // Catalogs handled via `populate_catalogs`; mismatches are ignored.
-            _ => Vec::new(),
-        }
     }
 
     fn synthesize_table_children(&mut self, table_id: NodeId) -> ExpandOutcome {
@@ -417,6 +443,47 @@ struct TablePath {
     catalog: String,
     schema: String,
     table: String,
+}
+
+/// `(label, kind, on_expand)` for each child an introspection payload
+/// describes. Kept free of node allocation so `populate` can match them
+/// against the children already in the tree.
+fn child_specs(
+    target: &IntrospectTarget,
+    payload: SchemaPayload,
+) -> Vec<(String, NodeKind, Option<IntrospectTarget>)> {
+    match (target, payload) {
+        (IntrospectTarget::Schemas { catalog }, SchemaPayload::Schemas(schemas)) => schemas
+            .into_iter()
+            .map(|s| {
+                let on_expand = IntrospectTarget::Tables {
+                    catalog: catalog.clone(),
+                    schema: s.name.clone(),
+                };
+                (s.name, NodeKind::Schema, Some(on_expand))
+            })
+            .collect(),
+        (IntrospectTarget::Tables { .. }, SchemaPayload::Tables(tables)) => tables
+            .into_iter()
+            .map(|t| {
+                let kind = match t.kind {
+                    TableKind::Table => NodeKind::Table,
+                    TableKind::View => NodeKind::View,
+                };
+                (t.name, kind, None)
+            })
+            .collect(),
+        (IntrospectTarget::Columns { .. }, SchemaPayload::Columns(cols)) => cols
+            .iter()
+            .map(|c| (format_column(c), NodeKind::Column, None))
+            .collect(),
+        (IntrospectTarget::Indices { .. }, SchemaPayload::Indices(indices)) => indices
+            .iter()
+            .map(|i| (format_index(i), NodeKind::Index, None))
+            .collect(),
+        // Catalogs handled via `populate_catalogs`; mismatches are ignored.
+        _ => Vec::new(),
+    }
 }
 
 fn format_column(c: &ColumnInfo) -> String {
@@ -878,5 +945,103 @@ mod tests {
         assert_eq!(p.parent_of(schema_id), Some(p.roots[0]));
         // Roots have no parent.
         assert_eq!(p.parent_of(p.roots[0]), None);
+    }
+
+    fn tables_target() -> IntrospectTarget {
+        IntrospectTarget::Tables {
+            catalog: "db".into(),
+            schema: "public".into(),
+        }
+    }
+
+    fn visible_labels(p: &SchemaPanel) -> Vec<String> {
+        p.visible_rows()
+            .iter()
+            .map(|r| p.node(r.id).label.clone())
+            .collect()
+    }
+
+    #[test]
+    fn refresh_shows_table_created_after_schema_loaded_empty() {
+        // Reproduces: expand an empty schema, CREATE TABLE, tree stays empty.
+        let mut p = SchemaPanel::new(30);
+        p.populate_catalogs(vec![catalog("db")]);
+        let _ = p.expand_or_descend();
+        p.populate(
+            &IntrospectTarget::Schemas {
+                catalog: "db".into(),
+            },
+            SchemaPayload::Schemas(vec![schema("public")]),
+        );
+        p.move_selection(1);
+        let _ = p.expand_or_descend();
+        p.populate(&tables_target(), SchemaPayload::Tables(vec![]));
+        assert_eq!(visible_labels(&p), vec!["db", "public"]);
+
+        let targets = p.refresh_targets();
+        assert!(targets.contains(&tables_target()), "{targets:?}");
+        p.populate(&tables_target(), SchemaPayload::Tables(vec![table("test")]));
+        assert_eq!(visible_labels(&p), vec!["db", "public", "test"]);
+    }
+
+    #[test]
+    fn expanding_empty_loaded_node_fetches_again() {
+        let mut p = SchemaPanel::new(30);
+        p.populate_catalogs(vec![catalog("db")]);
+        let _ = p.expand_or_descend();
+        p.populate(
+            &IntrospectTarget::Schemas {
+                catalog: "db".into(),
+            },
+            SchemaPayload::Schemas(vec![schema("public")]),
+        );
+        p.move_selection(1);
+        let _ = p.expand_or_descend();
+        p.populate(&tables_target(), SchemaPayload::Tables(vec![]));
+        assert_eq!(dispatched(p.expand_or_descend()), vec![tables_target()]);
+    }
+
+    #[test]
+    fn refresh_keeps_surviving_subtrees_and_collapse_state() {
+        let mut p = SchemaPanel::new(30);
+        let users = build_to_table(&mut p);
+        let _ = p.expand_or_descend();
+        let users_children = p.node(users).children.clone();
+        assert!(p.node(users).expanded);
+
+        p.populate(
+            &tables_target(),
+            SchemaPayload::Tables(vec![table("orders"), table("users")]),
+        );
+        let schema_id = p.parent_of(users).unwrap();
+        let labels: Vec<_> = p
+            .node(schema_id)
+            .children
+            .iter()
+            .map(|&c| p.node(c).label.clone())
+            .collect();
+        assert_eq!(labels, vec!["orders", "users"]);
+        // Same node, still expanded, columns/indices folders intact.
+        assert!(p.node(schema_id).children.contains(&users));
+        assert!(p.node(users).expanded);
+        assert_eq!(p.node(users).children, users_children);
+
+        // A refresh of a collapsed node must not pop it open.
+        p.node_mut(schema_id).expanded = false;
+        p.populate(
+            &tables_target(),
+            SchemaPayload::Tables(vec![table("users")]),
+        );
+        assert!(!p.node(schema_id).expanded);
+    }
+
+    #[test]
+    fn refresh_dropping_selected_table_selects_parent() {
+        let mut p = SchemaPanel::new(30);
+        let users = build_to_table(&mut p);
+        assert_eq!(p.selected, Some(users));
+        let schema_id = p.parent_of(users).unwrap();
+        p.populate(&tables_target(), SchemaPayload::Tables(vec![]));
+        assert_eq!(p.selected, Some(schema_id));
     }
 }
