@@ -2,6 +2,7 @@ pub mod mysql;
 pub mod placeholders;
 pub mod postgres;
 pub mod sqlite;
+pub mod stoolap;
 
 /// Lift the per-arm boilerplate in each driver's `decode_typed` switch
 /// into a single line. Expands to:

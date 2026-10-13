@@ -27,6 +27,7 @@ pub static DRIVERS: &[&dyn Driver] = &[
     &sql::sqlite::SqliteDriver,
     &sql::postgres::PostgresDriver,
     &sql::mysql::MysqlDriver,
+    &sql::stoolap::StoolapDriver,
 ];
 
 /// Dialect assumed when no connection is active (autocomplete and the
@@ -145,6 +146,7 @@ mod tests {
             ("postgresql://u@h/db", "postgres"),
             ("mysql://u@h/db", "mysql"),
             ("mariadb://u@h/db", "mysql"),
+            ("stoolap:./data/db", "stoolap"),
         ];
         for (url, name) in cases {
             assert_eq!(driver_for_url(url).map(|d| d.name()), Some(name), "{url}");
@@ -164,7 +166,7 @@ mod tests {
     fn supported_schemes_lists_every_driver() {
         assert_eq!(
             supported_schemes(),
-            "sqlite:, postgres:, postgresql:, mysql:, mariadb:"
+            "sqlite:, postgres:, postgresql:, mysql:, mariadb:, stoolap:"
         );
     }
 }
